@@ -131,6 +131,11 @@ export interface RedGate {
   readonly gateId?: string
   readonly logPath?: string
   readonly exitCode?: number | null
+  /**
+   * Its log reads as a test database left by another tree, and the gate has no
+   * `fresh_cmd` to rerun it from fresh state (`integration/fresh.ts`).
+   */
+  readonly staleSchema?: true
 }
 
 export interface SpawnPromptRequest {

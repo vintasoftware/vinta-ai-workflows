@@ -1887,6 +1887,24 @@ describe('the git verbs', () => {
       expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
     })
 
+    /**
+     * Reported as "a regression between" the dependencies three times out of
+     * three in one run; one was a worker database missing two columns.
+     */
+    it('names a stale test database rather than a regression when the base gate has no fresh form', async () => {
+      const stale = renderGate({ stdout: ['psycopg.errors.UndefinedColumn: column "workshop_id" does not exist'], exit: 1 })
+      const rig = setup(gatedDiamond(stale), { cache: true })
+      await work(rig, 'p1', 0).catch(() => {})
+      await work(rig, 'p2', 1).catch(() => {})
+      const error = await work(rig, 'p3', 2).then(
+        () => null,
+        (caught: unknown) => caught as Error,
+      )
+      expect(error?.message).toMatch(/test database left behind by another tree/)
+      expect(error?.message).toMatch(/declares no `fresh_cmd`/)
+      expect(error?.message).not.toMatch(/regression between/)
+    })
+
     it('re-runs a red verdict on the base when the phase is retried, rather than replaying it', async () => {
       // A gate that fails the first time it runs and passes after: the
       // time-of-day flake that froze one run's phase for seven retries.

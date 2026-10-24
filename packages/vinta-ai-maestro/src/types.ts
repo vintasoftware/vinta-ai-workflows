@@ -269,6 +269,17 @@ export const CommandGateSchema = z.strictObject({
         'its red output reads as a stale schema (missing or extra columns or relations), or a ' +
         'conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.',
     ),
+  fresh_when: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is ' +
+        'built from — the migrations, typically (`apps/*/migrations/*.py`). When a file that ' +
+        'matched at the gate’s last run in the integration worktree is gone or different now, ' +
+        'the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a ' +
+        'migration that was rewritten or renamed under it. Files added since do not count. ' +
+        'Ignored without `fresh_cmd`.',
+    ),
   requires: z
     .array(Id)
     .default([])

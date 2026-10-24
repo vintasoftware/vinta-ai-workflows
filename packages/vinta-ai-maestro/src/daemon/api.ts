@@ -926,11 +926,15 @@ export function createApi(options: ApiOptions): Hono {
     const body = await readBody(c, GateCacheInvalidateSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
 
-    const { tree } = body.value
+    const { tree, databases } = body.value
     const actor = actorOf(c)
     const reason = reasonOf(c)
     if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
+    if (databases === true && run.gateCache.forgetDatabases === undefined) return fail(c, 501, 'fresh_state_unavailable')
     const removed = run.gateCache.invalidate(gateId, tree)
+    // A gate with no `fresh_cmd` has no fresh form to run: said in the answer,
+    // so the caller is not left believing the databases will be recreated.
+    const fresh = databases === true ? (run.gateCache.forgetDatabases?.(gateId) ?? false) : undefined
     journal.append({
       runId,
       type: 'gate_cache_invalidated',
@@ -938,12 +942,13 @@ export function createApi(options: ApiOptions): Hono {
         gate: gateId,
         ...(tree === undefined ? {} : { tree }),
         removed,
+        ...(fresh === undefined ? {} : { databases: fresh }),
         ...(actor === 'coordinator' ? { by: actor } : {}),
         ...(reason === undefined ? {} : { reason }),
       },
     })
-    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed })
-    return c.json({ gate: gateId, removed })
+    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed, databases: fresh })
+    return c.json({ gate: gateId, removed, ...(fresh === undefined ? {} : { databases: fresh }) })
   })
 
   /**

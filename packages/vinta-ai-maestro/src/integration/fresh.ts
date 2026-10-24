@@ -31,6 +31,15 @@
  *   leave a database half-migrated — one observed worker database had 71 of
  *   134 migrations after a timeout — and a run reusing it fails on columns
  *   that are simply not there yet.
+ * - **A file it declares as state input changed** (`inputs_changed`): the
+ *   gate's `fresh_when` globs — its migrations, typically — matched a file at
+ *   its last run here that is now gone or different. "Forward" is only safe
+ *   while the migrations already applied stay as they were; a phase that
+ *   rewrites or renames one of its own mid-run moves the tree forward and
+ *   still leaves the reused database recording a migration under a name or
+ *   with a body the tree no longer has. Files added since are what a reused
+ *   database applies, and do not count.
+ * - **Somebody asked** (`requested`): `gate-cache invalidate --databases`.
  *
  * `fresh_cmd` checks at least what `cmd` does, so running it never weakens a
  * gate; a gate without one runs `cmd` everywhere, as before.
@@ -40,7 +49,14 @@ import { readFile } from 'node:fs/promises'
 import { gitOk, git } from './git.ts'
 import type { CommandGate } from '../types.ts'
 
-export type FreshReason = 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported' | 'interrupted'
+export type FreshReason =
+  | 'tree_moved'
+  | 'first_run'
+  | 'stale_schema'
+  | 'fixer_reported'
+  | 'interrupted'
+  | 'inputs_changed'
+  | 'requested'
 
 /**
  * Errors a database left by another tree produces, across the usual drivers:
@@ -59,6 +75,22 @@ export const STALE_SCHEMA: readonly RegExp[] = [
   /Table '[^']+' doesn't exist/i,
 ]
 
+/**
+ * What a red gate's error says in place of blaming the code, when its log reads
+ * as a stale schema and the gate has no `fresh_cmd` that could have rerun it.
+ * Three failures in one observed run were reported as "a regression between"
+ * the phases; one was a worker database missing two columns its migrations
+ * add, and recreating the databases cleared 39 failures at once.
+ */
+export function staleSchemaNote(gateId: string): string {
+  return (
+    `its log reads as a test database left behind by another tree (a missing or extra column or ` +
+    `relation) rather than as failing code, and gate "${gateId}" declares no \`fresh_cmd\` to rerun ` +
+    `it from fresh state. Declare one (\`--create-db\`, typically), or recreate the databases by hand ` +
+    `and retry`
+  )
+}
+
 /** Whether a gate log reads as a stale schema. Only its tail: a suite can be long. */
 export async function looksStale(logPath: string): Promise<boolean> {
   try {
@@ -76,6 +108,8 @@ export interface FreshDecision {
   readonly reason: FreshReason | null
   /** The commit checked out, which the gate's state belongs to once it has run. */
   readonly head: string
+  /** The `fresh_when` files as they are now, by path, when the gate declares any. */
+  readonly inputs?: ReadonlyMap<string, string>
 }
 
 /** What `run` needs back from a gate: whether it passed, where it logged, and whether it ran at all. */
@@ -86,11 +120,44 @@ export interface FreshRun {
   readonly cached?: boolean
 }
 
+/**
+ * The files matching `patterns` with their blob ids, as the integration
+ * worktree's index has them — the tree a gate there is about to run on,
+ * resolution included while a merge is being verified.
+ */
+async function stateInputs(cwd: string, patterns: readonly string[]): Promise<ReadonlyMap<string, string>> {
+  const inputs = new Map<string, string>()
+  if (patterns.length === 0) return inputs
+  const out = await git(cwd, ['ls-files', '-s', '-z', '--', ...patterns.map((pattern) => `:(glob)${pattern}`)], {
+    maxBuffer: 64 * 1024 * 1024,
+  }).catch(() => '')
+  for (const entry of out.split('\0')) {
+    // `<mode> <blob> <stage>\t<path>`
+    const tab = entry.indexOf('\t')
+    if (tab === -1) continue
+    const blob = entry.slice(0, tab).split(' ')[1]
+    if (blob !== undefined) inputs.set(entry.slice(tab + 1), blob)
+  }
+  return inputs
+}
+
+/** Whether a file the last run had is gone or different now. Additions are not. */
+function rewritten(before: ReadonlyMap<string, string> | undefined, now: ReadonlyMap<string, string>): boolean {
+  if (before === undefined) return false
+  for (const [path, blob] of before) if (now.get(path) !== blob) return true
+  return false
+}
+
 /** One run's view of the integration worktree's gate state, shared by every caller that gates there. */
 export class IntegrationFreshness {
   readonly #last = new Map<string, string>()
-  /** Gates whose last run here was killed, so their state is unknown whatever the tree. */
-  readonly #interrupted = new Set<string>()
+  /** The `fresh_when` files each gate last ran on here, by path. */
+  readonly #inputs = new Map<string, ReadonlyMap<string, string>>()
+  /**
+   * Gates whose state is unknown whatever the tree, and why: the last run was
+   * killed, or somebody asked. Cleared by the next run that completes.
+   */
+  readonly #owed = new Map<string, 'interrupted' | 'requested'>()
   readonly #onFresh: ((gateId: string, reason: FreshReason) => void) | undefined
 
   constructor(options: { readonly onFresh?: (gateId: string, reason: FreshReason) => void } = {}) {
@@ -104,15 +171,29 @@ export class IntegrationFreshness {
   async decide(gateId: string, gate: CommandGate, cwd: string, force?: FreshReason): Promise<FreshDecision> {
     const head = (await git(cwd, ['rev-parse', 'HEAD']).catch(() => '')).trim()
     if (gate.fresh_cmd === undefined) return { gate, reason: null, head }
+    const inputs = gate.fresh_when === undefined ? undefined : await stateInputs(cwd, gate.fresh_when)
+    const facts = { head, ...(inputs === undefined ? {} : { inputs }) }
     const last = this.#last.get(gateId)
-    let reason: FreshReason | null = force ?? null
-    if (reason === null && this.#interrupted.has(gateId)) reason = 'interrupted'
+    let reason: FreshReason | null = force ?? this.#owed.get(gateId) ?? null
     if (reason === null && (head === '' || last === undefined)) reason = 'first_run'
     if (reason === null && last !== undefined && last !== head) {
       if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', last, head]))) reason = 'tree_moved'
     }
-    if (reason === null) return { gate, reason: null, head }
-    return { gate: { ...gate, cmd: gate.fresh_cmd }, reason, head }
+    if (reason === null && inputs !== undefined && rewritten(this.#inputs.get(gateId), inputs)) {
+      reason = 'inputs_changed'
+    }
+    if (reason === null) return { gate, reason: null, ...facts }
+    return { gate: { ...gate, cmd: gate.fresh_cmd }, reason, ...facts }
+  }
+
+  /**
+   * Makes the next run of `gateId` here start from fresh state, whatever the
+   * tree. False for a gate with no `fresh_cmd`, which has no fresh form to run.
+   */
+  forget(gateId: string, gate: CommandGate): boolean {
+    if (gate.fresh_cmd === undefined) return false
+    this.#owed.set(gateId, 'requested')
+    return true
   }
 
   /**
@@ -147,11 +228,12 @@ export class IntegrationFreshness {
     const result = await execute(decision.gate)
     if (result.cached === true) return { result, reason: decision.reason }
     if (result.status === 'timed_out') {
-      this.#interrupted.add(gateId)
+      this.#owed.set(gateId, 'interrupted')
       this.#last.delete(gateId)
     } else {
-      this.#interrupted.delete(gateId)
+      this.#owed.delete(gateId)
       if (decision.head !== '') this.#last.set(gateId, decision.head)
+      if (decision.inputs !== undefined) this.#inputs.set(gateId, decision.inputs)
     }
     return { result, reason: decision.reason }
   }

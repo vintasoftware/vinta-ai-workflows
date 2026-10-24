@@ -710,6 +710,14 @@
                 "type": "string",
                 "minLength": 1
               },
+              "fresh_when": {
+                "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (`apps/*/migrations/*.py`). When a file that matched at the gate’s last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
               "requires": {
                 "default": [],
                 "description": "Resource pool ids acquired before the gate runs, in canonical order.",

@@ -108,7 +108,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Works on a live run: its job makes the merges, holding the integration worktree's queue. Stops at a conflict, leaving that branch as it was. |
 | `sync-base <run-id> [--dry-run] [--no-push]` | Brings a `base_branch` that moved on into `plan/<id>/base` and every wave, keeping the chain. On a live run a wave's conflict goes to the run's conflict fixer; otherwise, and for the plan branch's own merge, a conflict stops it. |
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
-| `gate-cache invalidate <run-id> <gate-id> [--tree <hash>]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. The operator's and the run coordinator's. |
+| `gate-cache invalidate <run-id> <gate-id> [--tree <hash>] [--databases]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. `--databases` also makes the gate's next run in the integration worktree its `fresh_cmd`. The operator's and the run coordinator's. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. It records the release it loaded in `.vinta-ai-maestro/ui/<pid>.json`, says once when the package under it is upgraded, and `run` and `status` warn about a live `ui` serving another release — restart it to pick up the new code. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run] [--lanes] [--branches] [--force]` | Deletes run state under `.vinta-ai-maestro/runs/`; `--lanes` also removes lane worktrees and tears down their databases, service slices and compose stacks from each lane's summary. A run whose job is still running is kept; one that could still be resumed (paused, failed, interrupted) is kept unless named or `--force`. It also drops the `refs/vinta-ai-maestro/wip/*` rescues recycled lanes left for the purged runs' phases that have since landed, and keeps every other rescue. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
@@ -591,15 +591,28 @@ sees migrations from whichever tree ran before. Give it `fresh_cmd`, the same
 check from fresh state:
 
 ```jsonc
-"test": { "cmd": "pytest --reuse-db -n auto", "fresh_cmd": "pytest --create-db -n auto" }
+"test": {
+  "cmd": "pytest --reuse-db -n auto",
+  "fresh_cmd": "pytest --create-db -n auto",
+  "fresh_when": ["apps/*/migrations/*.py"]
+}
 ```
 
 `fresh_cmd` runs instead of `cmd` in the integration worktree when the tree
 there moved anywhere but forward since the gate last ran, on the gate's first
-run there in a process, after a red run whose output reads as a stale schema,
-and after a conflict fixer reports `ENVIRONMENT_STALE`. Each one is journalled
-as `integration_fresh_state`. `maestro.gates.test.fresh_cmd` in
-`.vinta-ai-workflows.yaml` sets it for every `test`-typed gate.
+run there in a process, after a run that was killed (a timeout), after a red
+run whose output reads as a stale schema, and after a conflict fixer reports
+`ENVIRONMENT_STALE`. With `fresh_when`, it also runs when a file those globs
+matched at the gate's last run there is gone or different — a phase that
+rewrote or renamed its own migration moves the tree forward and still leaves
+the reused database recording the old one. Each one is journalled as
+`integration_fresh_state`. `maestro.gates.test.fresh_cmd` and `fresh_when` in
+`.vinta-ai-workflows.yaml` set them for every `test`-typed gate, and
+`gate-cache invalidate <run> <gate> --databases` asks for fresh state once.
+
+A gate with no `fresh_cmd` cannot be rerun from fresh state. When its red
+output in the integration worktree reads as a stale schema, the error says so
+instead of calling it a regression between the phases.
 
 ### Lane databases on a Postgres you already run
 

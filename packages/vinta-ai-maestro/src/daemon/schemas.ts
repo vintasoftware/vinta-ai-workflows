@@ -181,6 +181,8 @@ export const GateCacheInvalidateSchema = z.strictObject({
     .string()
     .regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/)
     .optional(),
+  /** Also start the gate's next integration-worktree run from fresh state. */
+  databases: z.boolean().optional(),
 })
 
 /** A command inside an agent turn asks for semaphore resources as one lease. */

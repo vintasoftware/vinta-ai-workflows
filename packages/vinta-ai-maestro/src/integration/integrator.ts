@@ -47,7 +47,7 @@ import {
   type ConflictRequest,
   type FixVerdict,
 } from './fixer.ts'
-import type { FreshReason } from './fresh.ts'
+import { staleSchemaNote, type FreshReason } from './fresh.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
@@ -174,7 +174,9 @@ export class IntegrationVerifyError extends UnresolvedConflictError {
       `merge of ${incoming} into ${into} fails gate ${gate.gateId ?? '(unnamed)'}` +
         `${typeof gate.exitCode === 'number' ? ` (exit ${gate.exitCode})` : ''} after ${rounds} fix rounds` +
         `${gate.logPath === undefined ? '' : `; its output is at ${gate.logPath}`}. ` +
-        `${nodes.join(' and ')} each pass alone and break together. Fix the merged code ` +
+        (gate.staleSchema === true && gate.gateId !== undefined
+          ? `But ${staleSchemaNote(gate.gateId)}. Otherwise, fix the merged code `
+          : `${nodes.join(' and ')} each pass alone and break together. Fix the merged code `) +
         `in the integration worktree and conclude the merge with \`git commit\` — the ` +
         `next attempt keeps that branch — or serialize the phases with a dependency edge.`,
     )

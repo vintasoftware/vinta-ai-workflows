@@ -93,7 +93,7 @@ import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict, resolveBrief } from '../prompts/index.ts'
-import type { IntegrationFreshness } from '../integration/fresh.ts'
+import { looksStale, staleSchemaNote, type IntegrationFreshness } from '../integration/fresh.ts'
 import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
 import type { IntegrationStepPayload, SystemOneJudge } from '../journal/events.ts'
 import type { SystemOne } from '../system-one/config.ts'
@@ -201,10 +201,13 @@ export class BaseGateError extends Error {
     readonly gateId: string,
     readonly exitCode: number,
     readonly logPath: string,
+    readonly staleSchema = false,
   ) {
     super(
       `the base of ${nodeId} (${branch}) merged, but gate "${gateId}" failed on it (exit ${exitCode}) — ` +
-        'its dependencies each passed their own gates, so this is a regression between them, and ' +
+        (staleSchema
+          ? `${staleSchemaNote(gateId)}. `
+          : 'its dependencies each passed their own gates, so this is a regression between them, and ') +
         `${nodeId} does not start on it. Log: ${logPath}`,
     )
     this.name = 'BaseGateError'
@@ -217,10 +220,13 @@ export class WaveGateError extends Error {
     readonly gateId: string,
     readonly exitCode: number,
     readonly logPath: string,
+    readonly staleSchema = false,
   ) {
     super(
       `wave ${wave} merged, but gate "${gateId}" failed on the merged tree (exit ${exitCode}) — ` +
-        'the phases each passed their own gates, so this is a regression between them. ' +
+        (staleSchema
+          ? `${staleSchemaNote(gateId)}. `
+          : 'the phases each passed their own gates, so this is a regression between them. ') +
         `Log: ${logPath}`,
     )
     this.name = 'WaveGateError'
@@ -1126,7 +1132,9 @@ export class RunEffectExecutor implements EffectExecutor {
       })
       // First red stops the wave, for `run_gate`'s reason: the merge fails on
       // this gate whatever the rest say, and they are full suites.
-      if (exitCode !== 0) throw new WaveGateError(wave, gateId, exitCode, logPath)
+      if (exitCode !== 0) {
+        throw new WaveGateError(wave, gateId, exitCode, logPath, gate.fresh_cmd === undefined && (await looksStale(logPath)))
+      }
     }
   }
 
@@ -1183,7 +1191,10 @@ export class RunEffectExecutor implements EffectExecutor {
       })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
       this.#step(nodeId, { ...step, state: 'finished', outcome: exitCode === 0 ? 'ok' : 'failed' })
-      if (exitCode !== 0) throw new BaseGateError(nodeId, base.branch, gateId, exitCode, logPath)
+      if (exitCode !== 0) {
+        const stale = gate.fresh_cmd === undefined && (await looksStale(logPath))
+        throw new BaseGateError(nodeId, base.branch, gateId, exitCode, logPath, stale)
+      }
     }
   }
 

@@ -84,9 +84,10 @@ usage: vinta-ai-maestro <command> [options]
   exec <run-id> <lane|integration> -- <cmd>
                              Run a command in a lane or the integration
                              worktree, with that worktree's environment.
-  gate-cache invalidate <run-id> <gate-id> [--tree <hash>]
+  gate-cache invalidate <run-id> <gate-id> [--tree <hash>] [--databases]
                              Forget a gate's cached results, so its next run
-                             runs the command rather than replaying them.
+                             runs the command rather than replaying them;
+                             --databases also recreates its test databases.
   land <run-id> [--close]    Which PR lands a finished run, and which of its
                              review PRs are done; --close closes those.
   propagate <run-id> <phase> Carry a fix made on a phase into every integ-*

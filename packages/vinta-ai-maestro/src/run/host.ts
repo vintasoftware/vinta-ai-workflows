@@ -30,7 +30,7 @@ import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import type { ConflictFixer } from '../integration/fixer.ts'
-import { type FreshReason, IntegrationFreshness } from '../integration/fresh.ts'
+import { type FreshReason, IntegrationFreshness, looksStale } from '../integration/fresh.ts'
 import { gitLines } from '../integration/git.ts'
 import {
   type CommitDecision,
@@ -410,7 +410,10 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         progress?.finished(id, result.exitCode === 0 ? 'ok' : 'failed')
         // Named, with its log, so the next fix round reads why and the error
         // the rounds end on says where the cause is.
-        if (result.exitCode !== 0) return { gateId: id, logPath, exitCode: result.exitCode }
+        if (result.exitCode !== 0) {
+          const stale = gate.fresh_cmd === undefined && (await looksStale(logPath))
+          return { gateId: id, logPath, exitCode: result.exitCode, ...(stale ? { staleSchema: true as const } : {}) }
+        }
       }
       return true
     },
@@ -662,7 +665,13 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         'HEAD',
       ])
     },
-    gateCache: { invalidate: (gateId, treeHash) => cache.invalidate(gateId, treeHash) },
+    gateCache: {
+      invalidate: (gateId, treeHash) => cache.invalidate(gateId, treeHash),
+      forgetDatabases: (gateId) => {
+        const gate = current.gates[gateId]
+        return gate !== undefined && !isJudgeGate(gate) && freshness.forget(gateId, gate)
+      },
+    },
     close: () => cache.close(),
   }
 }

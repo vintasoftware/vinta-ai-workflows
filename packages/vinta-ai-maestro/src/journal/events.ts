@@ -340,6 +340,11 @@ interface RunPayloads {
     readonly gate: string
     readonly tree?: string
     readonly removed: number
+    /**
+     * `--databases`: whether the gate's next integration-worktree run will
+     * start from fresh state — false for a gate with no `fresh_cmd`.
+     */
+    readonly databases?: boolean
     readonly by?: Actor
     /** Why, in the caller's words. Payload, never a log field. The coordinator always gives one. */
     readonly reason?: string
@@ -420,7 +425,14 @@ interface RunPayloads {
    */
   integration_fresh_state: {
     readonly gate: string
-    readonly reason: 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported' | 'interrupted'
+    readonly reason:
+      | 'tree_moved'
+      | 'first_run'
+      | 'stale_schema'
+      | 'fixer_reported'
+      | 'interrupted'
+      | 'inputs_changed'
+      | 'requested'
   }
   /**
    * A harness could not be reached (`network`: DNS, connection refused, a

@@ -585,6 +585,19 @@ describe('gate-cache', () => {
     expect(r.out).toEqual(['gate unit: 1 cached result forgotten'])
   })
 
+  it('asks for fresh databases with --databases, and says when the gate has no fresh form', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ gate: 'unit', removed: 0, databases: true }))
+    expect(await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--databases', '--repo', emptyRepo()], r.io, { env: ENV, fetch: f.fetch })).toBe(OK)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ databases: true })
+    expect(r.out).toContain('gate unit: its next run in the integration worktree starts from fresh state')
+
+    const plain = recorder()
+    const g = fakeFetch(json({ gate: 'lint', removed: 0, databases: false }))
+    await gateCacheCommand(['invalidate', RUN_ID, 'lint', '--databases', '--repo', emptyRepo()], plain.io, { env: ENV, fetch: g.fetch })
+    expect(plain.err.join('\n')).toContain('declares no fresh_cmd')
+  })
+
   it('is a usage error without the verb, and is reachable from main', async () => {
     const r = recorder()
     expect(await gateCacheCommand([RUN_ID, 'unit'], r.io, { env: ENV })).toBe(USAGE)

@@ -470,6 +470,14 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "fresh_when": {
+                  "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (e.g. `apps/*/migrations/*.py`). When a file that matched at the gate's last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
                 "cold_cmd": {
                   "description": "What a phase gate runs in place of `scoped_cmd` when the lane lacks a `scope_cache` file (e.g. `make test`, the suite in parallel, instead of a `--testmon` run that without `.testmondata` runs every test serially). Defaults to `cmd`. Must check at least what `scoped_cmd` does.",
                   "type": "string",
@@ -536,6 +544,14 @@
                   "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
                   "type": "string",
                   "minLength": 1
+                },
+                "fresh_when": {
+                  "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (e.g. `apps/*/migrations/*.py`). When a file that matched at the gate's last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
                 },
                 "cold_cmd": {
                   "description": "What a phase gate runs in place of `scoped_cmd` when the lane lacks a `scope_cache` file (e.g. `make test`, the suite in parallel, instead of a `--testmon` run that without `.testmondata` runs every test serially). Defaults to `cmd`. Must check at least what `scoped_cmd` does.",
@@ -604,6 +620,14 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "fresh_when": {
+                  "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (e.g. `apps/*/migrations/*.py`). When a file that matched at the gate's last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
                 "cold_cmd": {
                   "description": "What a phase gate runs in place of `scoped_cmd` when the lane lacks a `scope_cache` file (e.g. `make test`, the suite in parallel, instead of a `--testmon` run that without `.testmondata` runs every test serially). Defaults to `cmd`. Must check at least what `scoped_cmd` does.",
                   "type": "string",
@@ -670,6 +694,14 @@
                   "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
                   "type": "string",
                   "minLength": 1
+                },
+                "fresh_when": {
+                  "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (e.g. `apps/*/migrations/*.py`). When a file that matched at the gate's last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
                 },
                 "cold_cmd": {
                   "description": "What a phase gate runs in place of `scoped_cmd` when the lane lacks a `scope_cache` file (e.g. `make test`, the suite in parallel, instead of a `--testmon` run that without `.testmondata` runs every test serially). Defaults to `cmd`. Must check at least what `scoped_cmd` does.",
@@ -740,6 +772,14 @@
                   "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
                   "type": "string",
                   "minLength": 1
+                },
+                "fresh_when": {
+                  "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (e.g. `apps/*/migrations/*.py`). When a file that matched at the gate's last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
                 },
                 "cold_cmd": {
                   "description": "What a phase gate runs in place of `scoped_cmd` when the lane lacks a `scope_cache` file (e.g. `make test`, the suite in parallel, instead of a `--testmon` run that without `.testmondata` runs every test serially). Defaults to `cmd`. Must check at least what `scoped_cmd` does.",
