@@ -250,6 +250,13 @@ export type AgentEvent =
  */
 export interface AgentSession {
   readonly id: string
+  /**
+   * The agent CLI's pid, where that process is this session's alone: the root
+   * of every command the agent runs, foreground or background, which is how
+   * the node view finds them (`processes/list.ts`). Absent where the process
+   * is shared between sessions (opencode's server) or there is none.
+   */
+  readonly pid?: number | undefined
   readonly events: AsyncIterable<AgentEvent>
   /**
    * Deliver a message into the running turn. Rejects with

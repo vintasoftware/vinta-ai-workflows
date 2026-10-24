@@ -142,6 +142,18 @@ export function NodeView({
     }
   }
 
+  async function stopProcess(pid: number): Promise<void> {
+    setError(null)
+    setNotice(null)
+    try {
+      await client.stopProcess(runId, nodeId, pid)
+      setNotice('Stopped. The phase carries on without it.')
+      setReloads((count) => count + 1)
+    } catch (cause: unknown) {
+      setError(messageOf(cause))
+    }
+  }
+
   if (detail === null) {
     return (
       <section className="node">
@@ -257,7 +269,14 @@ export function NodeView({
         </div>
         <div className="panels flex flex-col gap-4">
           <Changes client={client} runId={runId} nodeId={nodeId} ref={detail.diff} cursor={cursor} pullRequest={detail.pullRequest} />
-          <Gates gates={detail.gates} failing={failingGate} open={gateLog} onOpen={setGateLog} />
+          <Gates
+            gates={detail.gates}
+            processes={detail.processes}
+            onStopProcess={stopProcess}
+            failing={failingGate}
+            open={gateLog}
+            onOpen={setGateLog}
+          />
           <Sessions
             sessions={detail.sessions}
             live={status === 'running' && !detail.gates.some((gate) => gate.status === 'running')}

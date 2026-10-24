@@ -157,6 +157,12 @@ export interface Client {
    */
   readonly halt: (runId: string, mode: 'pause' | 'stop') => Promise<void>
   /**
+   * Stop one of a node's running processes and everything under it — an
+   * agent's command or a gate. Resolves once the daemon has signalled it; the
+   * next detail read is what shows it gone.
+   */
+  readonly stopProcess: (runId: string, nodeId: string, pid: number) => Promise<void>
+  /**
    * Ask the run's monitor a question. Resolves when the daemon has *accepted*
    * it, which is long before it is answered.
    *
@@ -265,6 +271,16 @@ export function createClient(origin: string, token: string): Client {
       if (!OkResponseSchema.safeParse(await response.json()).success) {
         throw new Error(`${path}: response did not match the daemon schema`)
       }
+    },
+    async stopProcess(runId, nodeId, pid) {
+      const path = `${nodePath(runId, nodeId)}/processes/${pid}/stop`
+      const response = await fetch(`${origin}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: '{}',
+      })
+      if (response.status === 404) throw new Error('That process is no longer running.')
+      if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
     },
     async conversation(runId) {
       const path = `/api/runs/${encodeURIComponent(runId)}/monitor`

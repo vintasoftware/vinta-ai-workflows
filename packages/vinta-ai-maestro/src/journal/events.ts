@@ -1110,6 +1110,19 @@ interface NodePayloads {
   integration_fix_replayed: {
     readonly files: number
   }
+  /**
+   * The operator or the coordinator stopped one of a node's processes from
+   * the node view (`processes/list.ts`): its pid and what it was. Never its
+   * command line (§11).
+   */
+  process_stopped: {
+    readonly pid: number
+    readonly kind: 'agent' | 'gate'
+    readonly mode: 'foreground' | 'background'
+    readonly gate?: string
+    readonly by?: Actor
+    readonly reason?: string
+  }
   wave_failed: {
     readonly wave: number
     readonly reason: string

@@ -1,6 +1,14 @@
 /**
- * The phase's gates: one headline row each, and the log of whichever one the
- * operator opens, in a dialog over the page.
+ * What the phase is running, and its gates: the processes it runs right now
+ * (`Processes.tsx`) above, and below them the gates as they always were —
+ * one headline row each, and the log of whichever one the operator opens, in
+ * a dialog over the page.
+ *
+ * The panel used to be the gates alone, and a phase whose only activity was a
+ * command its agent ran in the background showed nothing here at all: it read
+ * as stuck. Gates are processes too, and they appear in both places while
+ * they run — in the list of what is running, where they can be stopped, and
+ * in their own section, where their verdicts and logs are.
  *
  * **The panel is a list of headlines, never a log.** It has been a wall of
  * logs (every gate's in its own 13rem box, each swallowing the wheel) and then
@@ -43,6 +51,7 @@ import { Kbd } from 'vinta-design-system/ui/kbd'
 import type { NodeDetail } from '../../src/daemon/schemas.ts'
 import { Chip } from './Chip.tsx'
 import { EmptyNote, Panel } from './Panel.tsx'
+import { ProcessSection, SectionHeading } from './Processes.tsx'
 import type { Tone } from './status.ts'
 import { duration, elapsed, useNow } from './time.ts'
 
@@ -50,11 +59,16 @@ type Gate = NodeDetail['gates'][number]
 
 export function Gates({
   gates,
+  processes,
+  onStopProcess,
   failing,
   open,
   onOpen,
 }: {
   readonly gates: NodeDetail['gates']
+  /** What the phase runs right now; null when there is no list to give. */
+  readonly processes: NodeDetail['processes']
+  readonly onStopProcess: (pid: number) => Promise<void>
   /** The gate §9.1's question points at, if any. Its row is marked. */
   readonly failing: string | null
   /** The gate whose log is open, or null for none. */
@@ -62,43 +76,43 @@ export function Gates({
   readonly onOpen: (gateId: string | null) => void
 }) {
   return (
-    <Panel
-      title="Gates"
-      data-gates
-      description={gates.length === 0 ? undefined : <GateSummary gates={gates} />}
-    >
-      {gates.length === 0 ? (
-        <EmptyNote>No gate has run yet.</EmptyNote>
-      ) : (
-        <ul className="gates -mx-2 -my-1 flex flex-col">
-          {gates.map((gate) => (
-            <li key={gate.gateId} data-gate={gate.gateId}>
-              <button
-                type="button"
-                data-action="open-gate-log"
-                aria-haspopup="dialog"
-                aria-label={`Open the ${gate.gateId} gate log`}
-                onClick={() => onOpen(gate.gateId)}
-                className={cn(
-                  'group flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50',
-                  gate.gateId === failing && 'bg-tone-attention-soft/50 hover:bg-tone-attention-soft',
-                )}
-              >
-                <span className="flex min-w-0 flex-1 items-center gap-2">
-                  <span className="truncate font-mono text-[13px] font-medium">{gate.gateId}</span>
-                  <Chip tone={gateTone(gate.status)}>{GATE_LABELS[gate.status]}</Chip>
-                  {gate.gateId === failing && <Chip tone="attention">asked about</Chip>}
-                </span>
-                <GateTiming gate={gate} />
-                <ChevronRightIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
-                />
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+    <Panel title="Processes" data-gates contentClassName="flex flex-col gap-4">
+      <ProcessSection processes={processes} onStop={onStopProcess} />
+      <section data-gates-section className="flex flex-col gap-1">
+        <SectionHeading label="Gates" detail={gates.length === 0 ? null : <GateSummary gates={gates} />} />
+        {gates.length === 0 ? (
+          <EmptyNote>No gate has run yet.</EmptyNote>
+        ) : (
+          <ul className="gates -mx-2 -my-1 flex flex-col">
+            {gates.map((gate) => (
+              <li key={gate.gateId} data-gate={gate.gateId}>
+                <button
+                  type="button"
+                  data-action="open-gate-log"
+                  aria-haspopup="dialog"
+                  aria-label={`Open the ${gate.gateId} gate log`}
+                  onClick={() => onOpen(gate.gateId)}
+                  className={cn(
+                    'group flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50',
+                    gate.gateId === failing && 'bg-tone-attention-soft/50 hover:bg-tone-attention-soft',
+                  )}
+                >
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="truncate font-mono text-[13px] font-medium">{gate.gateId}</span>
+                    <Chip tone={gateTone(gate.status)}>{GATE_LABELS[gate.status]}</Chip>
+                    {gate.gateId === failing && <Chip tone="attention">asked about</Chip>}
+                  </span>
+                  <GateTiming gate={gate} />
+                  <ChevronRightIcon
+                    aria-hidden="true"
+                    className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
+                  />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       <GateLogDialog gates={gates} open={open} onOpen={onOpen} />
     </Panel>
   )

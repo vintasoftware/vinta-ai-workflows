@@ -498,6 +498,59 @@ describe('snapshots', () => {
     expect((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/changes?patch=yes`)).status).toBe(400)
   })
 
+  describe('a node’s processes', () => {
+    const running = {
+      pid: 4321,
+      kind: 'agent' as const,
+      mode: 'background' as const,
+      command: 'make test',
+      gateId: null,
+      startedAt: 1_700_000_000_000,
+      descendants: 3,
+    }
+    const live = async () => {
+      const r = await rig()
+      const stops: [string, number][] = []
+      r.daemon.register({
+        runId: RUN_ID,
+        control: runControl({ statuses: {}, answer: () => {} }),
+        pools: r.pools,
+        admission: { ceiling: () => 1, inFlight: () => 0, wakeAt: () => undefined },
+        processes: {
+          list: async () => [running],
+          stop: async (nodeId, pid) => {
+            stops.push([nodeId, pid])
+            return pid === running.pid ? { stopped: true, process: running } : { stopped: false }
+          },
+        },
+      })
+      return { r, stops }
+    }
+
+    it('lists them on the node detail while the run is live, and null when it is not', async () => {
+      const { r } = await live()
+      const detail = NodeDetailSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body)
+      expect(detail.processes).toEqual([running])
+
+      const idle = await rig()
+      const offline = NodeDetailSchema.parse((await call(idle.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body)
+      expect(offline.processes).toBeNull()
+    })
+
+    it('stops one of them, journals it without its command, and refuses a pid that is not the node’s', async () => {
+      const { r, stops } = await live()
+      const stopped = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/processes/4321/stop`, { method: 'POST', body: {} })
+      expect(stopped.status).toBe(200)
+      expect(stops).toEqual([['a', 4321]])
+      const event = r.journal.events(RUN_ID).find((entry) => entry.type === 'process_stopped')
+      expect(event?.payload).toEqual({ pid: 4321, kind: 'agent', mode: 'background' })
+
+      const other = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/processes/1/stop`, { method: 'POST', body: {} })
+      expect(other.status).toBe(404)
+      expect(ErrorResponseSchema.parse(other.body).error).toBe('process_not_found')
+    })
+  })
+
   it('serves a node detail: transcript page, gate log and diff ref', async () => {
     const r = await rig()
     for (const index of [1, 2, 3]) {

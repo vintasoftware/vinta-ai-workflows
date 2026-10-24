@@ -128,7 +128,38 @@ export interface RunGateOptions {
  * nothing ends it when its host goes away — a cancelled run whose e2e suite
  * kept going for twenty minutes after `stop` would be exactly that.
  */
-const live = new Set<ChildProcess>()
+const live = new Map<ChildProcess, { readonly gateId: string; readonly cwd: string; readonly startedAt: number }>()
+
+/** A gate running now, as the node view lists it (`processes/list.ts`). */
+export interface LiveGate {
+  readonly pid: number
+  readonly gateId: string
+  /** Where it runs: a lane, or the integration worktree — which is how it is attributed to a phase. */
+  readonly cwd: string
+  readonly startedAt: number
+}
+
+/** Every gate this process has running, with a pid. */
+export function liveGates(): readonly LiveGate[] {
+  const found: LiveGate[] = []
+  for (const [child, gate] of live) if (child.pid !== undefined) found.push({ pid: child.pid, ...gate })
+  return found
+}
+
+/**
+ * Ends one running gate as `killLiveGates` ends them all: its result says it
+ * did not pass, and whatever containers it left are stopped. False when no
+ * gate of this process has that pid.
+ */
+export function stopLiveGate(pid: number): boolean {
+  for (const child of live.keys()) {
+    if (child.pid !== pid) continue
+    cancelled.add(child)
+    killTree(pid)
+    return true
+  }
+  return false
+}
 
 /** Gates `killLiveGates` ended, as opposed to ones that exited on their own. */
 const cancelled = new WeakSet<ChildProcess>()
@@ -146,7 +177,7 @@ const owedSweeps = new Map<string, number>()
  * the node unwinds at that boundary.
  */
 export function killLiveGates(): void {
-  for (const child of live) {
+  for (const child of live.keys()) {
     cancelled.add(child)
     killTree(child.pid)
   }
@@ -207,7 +238,7 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
     detached: ownProcessGroup(),
     ...spawnOptionsFor(shell),
   })
-  live.add(child)
+  live.set(child, { gateId: options.gateId, cwd: options.cwd, startedAt })
   child.once('close', () => live.delete(child))
   // Combined output, in arrival order. `end: false` because the log is closed
   // once, after the child is gone, rather than by whichever pipe drains first.

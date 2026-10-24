@@ -28,6 +28,9 @@
  * was mid-turn when the process died runs again from the top of its pipeline,
  * because the turn it was in the middle of belonged to a process that is gone.
  */
+import { liveGates, stopLiveGate } from '../gates/runner.ts'
+import { readProcessTable } from '../platform/processes.ts'
+import { nodeProcesses, stopNodeProcess, type ProcessSources } from '../processes/list.ts'
 import { createGateGuard } from '../guard/guard.ts'
 import { AdmissionControl } from '../admission/admission.ts'
 import type { AmendRunner } from '../amend/amend.ts'
@@ -590,9 +593,36 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
           },
         })
 
+  // What a node is running, for the node view. Its lane and the integration
+  // worktree are the host's, resolved the way `exec` resolves them.
+  const workspace = host.workspace
+  const processSources: ProcessSources | undefined =
+    workspace === undefined
+      ? undefined
+      : {
+          liveTurn: (nodeId) => scheduler.liveTurn(nodeId),
+          lanePath: (nodeId) => {
+            const lane = journal.nodes(runId).find((node) => node.node_id === nodeId)?.lane ?? null
+            return lane === null ? null : (workspace(lane)?.path ?? null)
+          },
+          integrationPath: workspace('integration')?.path ?? null,
+          integrationHolder: host.integrationHolder ?? (() => null),
+          gates: liveGates,
+          table: () => readProcessTable(),
+          stopGate: stopLiveGate,
+        }
+
   const registered: DaemonRun = {
     runId,
     control: runControl(scheduler),
+    ...(processSources === undefined
+      ? {}
+      : {
+          processes: {
+            list: (nodeId) => nodeProcesses(processSources, nodeId),
+            stop: (nodeId, pid) => stopNodeProcess(processSources, nodeId, pid),
+          },
+        }),
     coordinatorAuthority: options.coordinatorAuthority ?? 'standard',
     ...(host.fixer === undefined ? {} : { fixer: fixerControl(host.fixer, adapters) }),
     pools,

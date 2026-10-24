@@ -552,6 +552,10 @@ class ClaudeCodeSession implements AgentSession {
     this.#idleMs = idleMs
   }
 
+  get pid(): number | undefined {
+    return this.#child.pid
+  }
+
   /**
    * What a raw frame says about the session's lifetime, read before the frame
    * is mapped: the mapping of a `result` is what asks whether to end.

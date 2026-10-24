@@ -746,6 +746,18 @@ export const PullRequestRefSchema = z.strictObject({
   reason: z.enum(['unavailable', 'failed']).nullable(),
 })
 
+/** One process a node is running (`processes/list.ts`). The command is the agent's or the gate's own text. */
+export const NodeProcessSchema = z.strictObject({
+  pid: z.number().int(),
+  kind: z.enum(['agent', 'gate']),
+  mode: z.enum(['foreground', 'background']),
+  command: z.string(),
+  gateId: z.string().nullable(),
+  /** Epoch ms. */
+  startedAt: z.number(),
+  descendants: z.number().int(),
+})
+
 export const NodeDetailSchema = z.strictObject({
   runId: z.string(),
   node: NodeSummarySchema,
@@ -795,6 +807,13 @@ export const NodeDetailSchema = z.strictObject({
   /** Every agent turn's session decision, oldest first (§15). */
   sessions: z.array(SessionTurnSchema),
   question: HumanQuestionSchema.nullable(),
+  /**
+   * What the node is running right now as processes — its agent's commands,
+   * foreground and background, and its gates — so a phase waiting on one is
+   * not read as stuck (`processes/list.ts`). Null when there is no list to
+   * give: the run is not live here, or the process table cannot be read.
+   */
+  processes: z.array(NodeProcessSchema).nullable(),
 })
 
 // ---------------------------------------------------------------------------

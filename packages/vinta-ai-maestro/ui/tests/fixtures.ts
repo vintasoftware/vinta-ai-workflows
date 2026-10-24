@@ -208,6 +208,24 @@ export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
     gates: [],
     sessions: [],
     question: null,
+    processes: [],
+    ...parts,
+  }
+}
+
+/** One process on the node detail: an agent's foreground command, unless told otherwise. */
+export function nodeProcess(
+  pid: number,
+  parts: Partial<NonNullable<NodeDetail['processes']>[number]> = {},
+): NonNullable<NodeDetail['processes']>[number] {
+  return {
+    pid,
+    kind: 'agent',
+    mode: 'foreground',
+    command: 'pytest -x',
+    gateId: null,
+    startedAt: 1_700_000_000_000,
+    descendants: 0,
     ...parts,
   }
 }

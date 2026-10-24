@@ -21,6 +21,7 @@ import {
   node,
   nodeChanges,
   nodeDetail,
+  nodeProcess,
   RUN_ID,
   runSummary,
   snapshot,
@@ -668,6 +669,66 @@ test('the gate panel names each verdict, and reads a log in a dialog', async () 
   expect(textOf(container, '[data-diff-branch]')).toBe('phase/impl')
   expect(textOf(container, '[data-diff-base]')).toBe('wave-0')
   expect(textOf(container, '[data-diff-lane]')).toBe('lane-2')
+})
+
+/**
+ * A phase whose agent waited on a suite it had started in the background read
+ * as stuck: nothing on the page said anything was running.
+ */
+test('the panel shows what the phase is running, two at a time, and stops one on a second click', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({
+        gates: [gate('lint')],
+        processes: [
+          nodeProcess(301, { command: 'make test', descendants: 4 }),
+          nodeProcess(302, { kind: 'gate', gateId: 'unit', command: 'pytest -n auto' }),
+          nodeProcess(303, { mode: 'background', command: 'pnpm dev' }),
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-process="301"]')).not.toBe(null))
+  // Two rows, the third behind a button; the gates keep their own section.
+  expect(container.querySelectorAll('[data-processes] > ul [data-process]')).toHaveLength(2)
+  expect(container.querySelector('[data-process="303"]')).toBe(null)
+  expect(textOf(container, '[data-process="301"]')).toContain('waiting on it')
+  expect(textOf(container, '[data-process="301"]')).toContain('+4')
+  expect(textOf(container, '[data-process="302"]')).toContain('gate unit')
+  expect(container.querySelector('[data-gates-section] [data-gate="lint"]')).not.toBe(null)
+
+  fireEvent.click(container.querySelector('[data-action="show-all-processes"]')!)
+  await waitFor(() => expect(document.querySelector('[data-processes-dialog] [data-process="303"]')).not.toBe(null))
+  expect(textOf(document.body, '[data-processes-dialog] [data-process="303"]')).toContain('background')
+  fireEvent.keyDown(document.querySelector('[data-processes-dialog]')!, { key: 'Escape' })
+  await waitFor(() => expect(document.querySelector('[data-processes-dialog]')).toBe(null))
+
+  // The first click arms the row; only the second stops anything.
+  fireEvent.click(container.querySelector('[data-process="301"] [data-action="stop-process"]')!)
+  expect(stub.stops).toEqual([])
+  fireEvent.click(container.querySelector('[data-process="301"] [data-action="confirm-stop-process"]')!)
+  await waitFor(() => expect(stub.stops).toEqual([{ runId: RUN_ID, nodeId: 'impl', pid: 301 }]))
+})
+
+test('the panel says nothing is running, or that there is no list, rather than staying blank', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running'), node('done', 'done')] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({ processes: [] }),
+      [`${RUN_ID}/done`]: nodeDetail({ node: node('done', 'done'), processes: null }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+  await waitFor(() => expect(textOf(container, '[data-processes]')).toContain('Nothing is running.'))
+  const other = open(stub, 'done')
+  await waitFor(() => expect(textOf(other.container, '[data-processes]')).toContain('the run is not live here'))
 })
 
 test('a running gate counts up from the daemon’s clock, and a cached verdict says so', async () => {
