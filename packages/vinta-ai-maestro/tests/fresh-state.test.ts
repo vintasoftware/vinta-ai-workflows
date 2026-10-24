@@ -104,6 +104,24 @@ describe('fresh state for integration gates', () => {
     expect(ran).toEqual(['pytest --create-db', 'pytest --reuse-db'])
   })
 
+  /**
+   * A suite killed by its timeout left one worker database with 71 of 134
+   * migrations; the next run on the same tree reused it and failed on columns
+   * that were not there yet.
+   */
+  it('starts fresh after a run that was killed, even on the same tree', async () => {
+    const { ran, fresh, tracker, pass } = recorder()
+    await tracker.run('test', gate, root, pass)
+    await tracker.run('test', gate, root, async (chosen) => {
+      ran.push(chosen.cmd)
+      return { status: 'timed_out', logPath: join(root, 'none.log') }
+    })
+    await tracker.run('test', gate, root, pass)
+    await tracker.run('test', gate, root, pass)
+    expect(ran).toEqual(['pytest --create-db', 'pytest --reuse-db', 'pytest --create-db', 'pytest --reuse-db'])
+    expect(fresh).toEqual(['first_run', 'interrupted'])
+  })
+
   it('runs `cmd` everywhere for a gate without `fresh_cmd`', async () => {
     const { ran, tracker, pass } = recorder()
     const plain: CommandGate = { cmd: 'pytest', requires: [], timeout_s: 60 }

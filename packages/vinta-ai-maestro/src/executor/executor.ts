@@ -771,6 +771,7 @@ export class RunEffectExecutor implements EffectExecutor {
               },
             }),
         ...(result.containersStopped === undefined ? {} : { containers_stopped: result.containersStopped }),
+        ...(result.orphanCheck === undefined ? {} : { orphan_check: result.orphanCheck }),
       },
     })
     // And again in the node's transcript, which is where somebody reading
@@ -1120,6 +1121,7 @@ export class RunEffectExecutor implements EffectExecutor {
           exit_code: exitCode,
           status: result.status,
           duration_ms: result.durationMs,
+          ...(result.orphanCheck === undefined ? {} : { orphan_check: result.orphanCheck }),
         },
       })
       // First red stops the wave, for `run_gate`'s reason: the merge fails on

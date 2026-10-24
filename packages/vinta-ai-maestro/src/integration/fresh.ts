@@ -27,6 +27,10 @@
  *   extra columns and relations. Run once more from fresh state before the red
  *   is believed, so no fix round is charged for the database's mistake.
  * - **A fixer said so** (`ENVIRONMENT_STALE`), handled by the integrator.
+ * - **Its last run was killed** (`interrupted`): a suite stopped mid-way can
+ *   leave a database half-migrated — one observed worker database had 71 of
+ *   134 migrations after a timeout — and a run reusing it fails on columns
+ *   that are simply not there yet.
  *
  * `fresh_cmd` checks at least what `cmd` does, so running it never weakens a
  * gate; a gate without one runs `cmd` everywhere, as before.
@@ -36,7 +40,7 @@ import { readFile } from 'node:fs/promises'
 import { gitOk, git } from './git.ts'
 import type { CommandGate } from '../types.ts'
 
-export type FreshReason = 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported'
+export type FreshReason = 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported' | 'interrupted'
 
 /**
  * Errors a database left by another tree produces, across the usual drivers:
@@ -85,6 +89,8 @@ export interface FreshRun {
 /** One run's view of the integration worktree's gate state, shared by every caller that gates there. */
 export class IntegrationFreshness {
   readonly #last = new Map<string, string>()
+  /** Gates whose last run here was killed, so their state is unknown whatever the tree. */
+  readonly #interrupted = new Set<string>()
   readonly #onFresh: ((gateId: string, reason: FreshReason) => void) | undefined
 
   constructor(options: { readonly onFresh?: (gateId: string, reason: FreshReason) => void } = {}) {
@@ -100,6 +106,7 @@ export class IntegrationFreshness {
     if (gate.fresh_cmd === undefined) return { gate, reason: null, head }
     const last = this.#last.get(gateId)
     let reason: FreshReason | null = force ?? null
+    if (reason === null && this.#interrupted.has(gateId)) reason = 'interrupted'
     if (reason === null && (head === '' || last === undefined)) reason = 'first_run'
     if (reason === null && last !== undefined && last !== head) {
       if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', last, head]))) reason = 'tree_moved'
@@ -138,7 +145,14 @@ export class IntegrationFreshness {
     const decision = await this.decide(gateId, gate, cwd, force)
     if (decision.reason !== null) this.#onFresh?.(gateId, decision.reason)
     const result = await execute(decision.gate)
-    if (result.cached !== true && decision.head !== '') this.#last.set(gateId, decision.head)
+    if (result.cached === true) return { result, reason: decision.reason }
+    if (result.status === 'timed_out') {
+      this.#interrupted.add(gateId)
+      this.#last.delete(gateId)
+    } else {
+      this.#interrupted.delete(gateId)
+      if (decision.head !== '') this.#last.set(gateId, decision.head)
+    }
     return { result, reason: decision.reason }
   }
 }

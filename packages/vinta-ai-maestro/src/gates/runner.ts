@@ -63,6 +63,13 @@ export interface GateResult {
    * killed or left none.
    */
   readonly containersStopped?: number
+  /**
+   * Whether docker was asked about those containers and answered (`done`), or
+   * did not answer in time (`failed`) — in which case the next gate in the same
+   * compose project checks again before it starts. Present only on a gate
+   * that was killed in a compose project.
+   */
+  readonly orphanCheck?: 'done' | 'failed'
 }
 
 /**
@@ -127,6 +134,13 @@ const live = new Set<ChildProcess>()
 const cancelled = new WeakSet<ChildProcess>()
 
 /**
+ * Compose projects whose killed gate could not be cleaned up after, with the
+ * earliest such gate's start: the next gate in that project sweeps before it
+ * starts, rather than run beside a suite nobody stopped.
+ */
+const owedSweeps = new Map<string, number>()
+
+/**
  * Ends every gate this process started that is still running. For a run being
  * cancelled (`Scheduler.halt`); the gate's own effect then returns failed, and
  * the node unwinds at that boundary.
@@ -165,9 +179,25 @@ export async function runGate(options: RunGateOptions): Promise<GateResult> {
  * rather than documented.
  */
 export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promise<GateResult> {
+  const log = createWriteStream(options.logPath)
+  const cleanup = options.stopContainers ?? stopComposeOneOffs
+  const project = options.env.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME
+  const composed = project !== undefined && project !== ''
+  const owed = composed ? owedSweeps.get(project) : undefined
+  if (composed && owed !== undefined) {
+    const stopped = await cleanup(project, owed)
+    if (stopped === null) {
+      log.write('[vinta-ai-maestro] docker still did not answer whether an earlier killed gate left containers running\n')
+    } else {
+      owedSweeps.delete(project)
+      if (stopped.length > 0) {
+        log.write(`[vinta-ai-maestro] stopped ${stopped.length} container(s) an earlier killed gate left running\n`)
+      }
+    }
+  }
+
   const startedAt = Date.now()
   options.onStart?.(startedAt)
-  const log = createWriteStream(options.logPath)
 
   const shell = shellInvocation(options.gate.cmd)
   const child = spawn(shell.file, [...shell.args], {
@@ -210,12 +240,24 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
   // before the result returns, because the caller releases the gate's pools on
   // return — and the next holder must not share the lane's databases with it.
   let containersStopped = 0
-  const project = options.env.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME
-  if ((timeout !== undefined || cancelled.has(child)) && project !== undefined && project !== '') {
-    const stopped = await (options.stopContainers ?? stopComposeOneOffs)(project, startedAt)
-    containersStopped = stopped.length
-    if (containersStopped > 0) {
-      log.write(`\n[vinta-ai-maestro] stopped ${containersStopped} container(s) the killed gate left running\n`)
+  let orphanCheck: 'done' | 'failed' | undefined
+  if ((timeout !== undefined || cancelled.has(child)) && composed) {
+    const stopped = await cleanup(project, startedAt)
+    if (stopped === null) {
+      orphanCheck = 'failed'
+      owedSweeps.set(project, Math.min(owedSweeps.get(project) ?? startedAt, startedAt))
+      log.write(
+        '\n[vinta-ai-maestro] docker did not answer whether the killed gate left containers running; ' +
+          'the next gate in this compose project checks again before it starts\n',
+      )
+    } else {
+      orphanCheck = 'done'
+      containersStopped = stopped.length
+      log.write(
+        containersStopped > 0
+          ? `\n[vinta-ai-maestro] stopped ${containersStopped} container(s) the killed gate left running\n`
+          : '\n[vinta-ai-maestro] the killed gate left no containers running\n',
+      )
     }
   }
   await new Promise<void>((resolve) => log.end(resolve))
@@ -228,6 +270,7 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
     logPath: options.logPath,
     ...(timeout === undefined ? {} : { timeout }),
     ...(containersStopped > 0 ? { containersStopped } : {}),
+    ...(orphanCheck === undefined ? {} : { orphanCheck }),
   }
 }
 

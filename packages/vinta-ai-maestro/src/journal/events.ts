@@ -420,7 +420,7 @@ interface RunPayloads {
    */
   integration_fresh_state: {
     readonly gate: string
-    readonly reason: 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported'
+    readonly reason: 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported' | 'interrupted'
   }
   /**
    * A harness could not be reached (`network`: DNS, connection refused, a
@@ -1088,6 +1088,8 @@ interface NodePayloads {
     readonly exit_code: number
     readonly status: GateStatus
     readonly duration_ms: number
+    /** As `gate_result`'s: present only on a gate that was killed in a compose project. */
+    readonly orphan_check?: 'done' | 'failed'
   }
   gate_result: {
     readonly gate: string
@@ -1114,6 +1116,11 @@ interface NodePayloads {
      * Absent when there were none.
      */
     readonly containers_stopped?: number
+    /**
+     * Whether docker answered the check for those containers. `failed` means
+     * it did not in time, and the next gate in the project checks first.
+     */
+    readonly orphan_check?: 'done' | 'failed'
   }
   /**
    * A gate red again on the tree it was red on before a fixer round, so the
