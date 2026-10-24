@@ -1909,7 +1909,7 @@ describe('the git verbs', () => {
      * three in one run; one was a worker database missing two columns.
      */
     it('names a stale test database rather than a regression when the base gate has no fresh form', async () => {
-      const stale = renderGate({ stdout: ['psycopg.errors.UndefinedColumn: column "workshop_id" does not exist'], exit: 1 })
+      const stale = renderGate({ stdout: ['psycopg.errors.UndefinedColumn: column workshop_id does not exist'], exit: 1 })
       const rig = setup(gatedDiamond(stale), { cache: true })
       await work(rig, 'p1', 0).catch(() => {})
       await work(rig, 'p2', 1).catch(() => {})
