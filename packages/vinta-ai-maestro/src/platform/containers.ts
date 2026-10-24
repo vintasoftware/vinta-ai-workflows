@@ -74,6 +74,28 @@ export function dockerTimedOut(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { killed?: unknown }).killed === true
 }
 
+/** How docker answered `docker info`: in time, too late, refusing (no daemon), or not installed. */
+export type DockerState = 'ok' | 'slow' | 'down' | 'absent'
+
+/** How long `dockerState` waits before calling the daemon slow. */
+const PROBE_TIMEOUT_MS = 10_000
+
+/**
+ * Whether the docker daemon answers at all, and quickly. For a command that
+ * timed out, the difference between "waiting for a password" and "waiting for
+ * a daemon stalled under load" — one observed hint sent an operator after a
+ * password that a Docker stall had nothing to do with.
+ */
+export async function dockerState(exec: DockerExec = dockerWithin(PROBE_TIMEOUT_MS)): Promise<DockerState> {
+  try {
+    await exec(['info', '--format', '{{.ServerVersion}}'])
+    return 'ok'
+  } catch (error) {
+    if (dockerTimedOut(error)) return 'slow'
+    return (error as { code?: unknown }).code === 'ENOENT' ? 'absent' : 'down'
+  }
+}
+
 export interface OneOff {
   readonly id: string
   readonly createdAtMs: number

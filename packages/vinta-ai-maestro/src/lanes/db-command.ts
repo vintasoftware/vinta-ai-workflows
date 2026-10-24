@@ -13,6 +13,7 @@
  */
 import { spawn } from 'node:child_process'
 
+import { dockerState, type DockerState } from '../platform/containers.ts'
 import { killTree, ownProcessGroup, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 
 /** Long enough for a template clone of a large database, short enough to notice. */
@@ -28,28 +29,43 @@ export class DatabaseCommandError extends Error {
     readonly exitCode: number | null,
     readonly timedOut: boolean,
     readonly detail: string,
+    /** For a timed-out command that goes through docker: how the daemon answered then. */
+    readonly docker?: DockerState,
   ) {
-    const how = timedOut
-      ? 'timed out — it is most likely waiting for a password nobody can type'
-      : exitCode === null
+    const stalled = timedOut && (docker === 'slow' || docker === 'down')
+    const how = !timedOut
+      ? exitCode === null
         ? 'was killed'
         : `exited ${exitCode}`
+      : docker === 'slow'
+        ? 'timed out — and the Docker daemon did not answer `docker info` in time either, so it is ' +
+          'most likely stalled under load rather than waiting for a password'
+        : docker === 'down'
+          ? 'timed out — and the Docker daemon is not answering at all'
+          : 'timed out — it is most likely waiting for a password nobody can type'
     super(
       `the database command ${how}: ${command}` +
         (detail === '' ? '' : `\n${detail}`) +
-        (timedOut || /password/i.test(detail)
-          ? '\nNo password reached it. Set PGPASSWORD or ~/.pgpass, or point `createdb_cmd` / ' +
-            '`dropdb_cmd` at a command that needs none, e.g. `docker compose exec -T db createdb`.'
-          : ''),
+        (stalled
+          ? '\nWait for the load to drop or restart Docker, then retry.'
+          : timedOut || /password/i.test(detail)
+            ? '\nNo password reached it. Set PGPASSWORD or ~/.pgpass, or point `createdb_cmd` / ' +
+              '`dropdb_cmd` at a command that needs none, e.g. `docker compose exec -T db createdb`.'
+            : ''),
     )
     this.name = 'DatabaseCommandError'
   }
 }
 
+/** A command that would wait on the docker daemon rather than on a server it reaches itself. */
+const THROUGH_DOCKER = /\b(docker|docker-compose|podman)\b/
+
 export interface DbCommandOptions {
   readonly cwd: string
   readonly env?: Readonly<Record<string, string>>
   readonly timeoutMs?: number
+  /** Asked after a timeout of a command that goes through docker. Injected in tests. */
+  readonly dockerState?: () => Promise<DockerState>
 }
 
 /** The tail of a stream, bounded: a stack trace puts the cause last. */
@@ -96,7 +112,8 @@ export async function runDatabaseCommand(
       child.once('close', (code) => resolve({ code }))
     })
     if (outcome.code === 0 && !timedOut) return
-    throw new DatabaseCommandError(command, outcome.code, timedOut, tail(stderr.trim() === '' ? stdout : stderr))
+    const docker = timedOut && THROUGH_DOCKER.test(command) ? await (options.dockerState ?? dockerState)() : undefined
+    throw new DatabaseCommandError(command, outcome.code, timedOut, tail(stderr.trim() === '' ? stdout : stderr), docker)
   } catch (error) {
     if (error instanceof DatabaseCommandError) throw error
     throw new DatabaseCommandError(command, null, false, (error as Error).message)
