@@ -2287,6 +2287,13 @@ export function createApi(options: ApiOptions): Hono {
       // A refusal of the coordinator is its own code: it is not a failure of
       // the operation, and the coordinator reads it to know to stop asking.
       if (error instanceof CoordinatorForbidden) return fail(c, 403, 'coordinator_forbidden')
+      // An answer to a question somebody already answered says who: refused
+      // with a bare `operation_failed`, an operator answering the moment an
+      // unattended retry did had no way to tell it had.
+      if (error instanceof Error && error.name === 'NotAwaitingAnswer') {
+        const answered = lastAnswer(journal, found.runId, found.node.node_id)
+        return fail(c, 409, 'not_awaiting_answer', answered === null ? undefined : [{ path: '', code: 'already_answered', message: answered }])
+      }
       // A reassignment or a step the run cannot make says which and why —
       // ids only, composed by the scheduler for exactly this.
       const refused = refusalOf(error)
@@ -2593,6 +2600,23 @@ const STATUS_FOR: Readonly<Record<RunStartRefusal, 404 | 409>> = {
  * the run cannot make, a harness with no adapter — as a code and its message.
  * Those messages are ids by construction; nothing else thrown is repeated.
  */
+/**
+ * Who answered the node's last question, and when — for an answer that came
+ * too late. The answer itself only when it is a short choice (`retry`,
+ * `stop`); an agent's encoded answers are its words, not this message's (§11).
+ */
+function lastAnswer(journal: Journal, runId: string, nodeId: string): string | null {
+  const answered = journal
+    .events(runId)
+    .filter((event) => event.type === 'human_answered' && event.nodeId === nodeId)
+    .at(-1)
+  if (answered === undefined || answered.type !== 'human_answered') return null
+  const { answer, unattended, by } = answered.payload
+  const who = unattended === true ? 'unattended, by the --retry-after timer' : by === 'coordinator' ? 'by the run coordinator' : 'by the operator'
+  const choice = typeof answer === 'string' && /^[\w -]{1,40}$/.test(answer) ? `"${answer}" ` : ''
+  return `the question was already answered ${choice}${who} at ${new Date(answered.ts).toISOString()}`
+}
+
 function refusalOf(error: unknown): { readonly code: string; readonly message: string } | null {
   if (error instanceof ReassignRefused || error instanceof UnknownHarness) {
     return { code: 'reassign_refused', message: error.message }

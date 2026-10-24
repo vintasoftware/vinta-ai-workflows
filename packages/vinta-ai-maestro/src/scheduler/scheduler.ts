@@ -1190,6 +1190,18 @@ function recycleFailure(lane: string, error: unknown): string {
   return `lane "${lane}" could not be recycled (${typeof named.code === 'string' ? `${name}: ${named.code}` : name})`
 }
 
+/**
+ * An answer to a node that is not asking anything — most often because a
+ * timer or the coordinator answered first. By name across the API seam, which
+ * looks up who did (`daemon/api.ts`).
+ */
+export class NotAwaitingAnswer extends Error {
+  constructor(readonly nodeId: string) {
+    super(`node "${nodeId}" is not awaiting an answer`)
+    this.name = 'NotAwaitingAnswer'
+  }
+}
+
 export class Scheduler {
   readonly #options: SchedulerOptions
   /** Stamped with this run's id, so every record the loop writes is addressed. */
@@ -1839,9 +1851,7 @@ export class Scheduler {
    */
   answer(nodeId: string, facts: GuardContext, actor: Actor = 'operator', reason?: string): void {
     const state = this.#states.get(nodeId)
-    if (state === undefined || state.resume === null) {
-      throw new Error(`node "${nodeId}" is not awaiting an answer`)
-    }
+    if (state === undefined || state.resume === null) throw new NotAwaitingAnswer(nodeId)
     if (actor === 'coordinator') {
       const refusal = this.#coordinatorMayNotAnswer(state)
       if (refusal !== null) throw new CoordinatorForbidden(refusal)
