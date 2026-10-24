@@ -214,6 +214,27 @@ export class BaseGateError extends Error {
   }
 }
 
+/**
+ * Assembling a wave failed — a merge the fixer could not settle, a red gate on
+ * the merged tree, git refusing. The original is the `cause`.
+ *
+ * Its own type because the failure is the wave's and not the phase's that
+ * happened to complete it. Raised as that phase's failure, it re-drove the
+ * phase's whole pipeline: one observed phase ran implement, gates, review,
+ * polish and verify four times — an hour each — and failed every time on the
+ * same sibling's merge into its wave. The scheduler parks the phase on it and
+ * retries the wave alone (`Scheduler.#waveMerge`).
+ */
+export class WaveBuildError extends Error {
+  constructor(
+    readonly wave: number,
+    cause: unknown,
+  ) {
+    super(`wave ${wave} could not be assembled: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = 'WaveBuildError'
+  }
+}
+
 export class WaveGateError extends Error {
   constructor(
     readonly wave: number,
@@ -926,10 +947,23 @@ export class RunEffectExecutor implements EffectExecutor {
     // its wave against is the plan whose last wave this is or is not.
     const final = this.#finalWave()
     let built: readonly number[] = []
-    await this.#integration(async () => {
-      this.#queuedBuilds.delete(wave)
-      built = await this.#buildWaves(nodeId, wave, plan)
-    }, nodeId)
+    try {
+      await this.#integration(async () => {
+        this.#queuedBuilds.delete(wave)
+        built = await this.#buildWaves(nodeId, wave, plan)
+      }, nodeId)
+    } catch (error) {
+      // A harness refusing the fixer is capacity, and the scheduler waits it
+      // out where it waits out every other refusal.
+      if (error instanceof Error && error.name === 'ConflictFixerRefused') throw error
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        nodeId,
+        type: 'wave_failed',
+        payload: { wave, reason: error instanceof Error ? error.message : String(error) },
+      })
+      throw new WaveBuildError(wave, error)
+    }
     // Opened by this node's own `open_pr`, not here. `git_merge` runs before
     // `open_pr` in the phase pipeline, so a plan PR opened now would be written
     // before the last phase's PR exists and could not list it.
@@ -1082,8 +1116,9 @@ export class RunEffectExecutor implements EffectExecutor {
    * is inside its own `integrate` step and may still hold the pool a suite
    * would ask for. Not cached either: a merge produces a tree no lane has had.
    *
-   * Red fails the merge, and with it the node that built the wave — the wave
-   * branch is left as it is for whoever picks it up.
+   * Red fails the merge, and the wave: the node that built it parks on the
+   * wave (`WaveBuildError`, `Scheduler.#waveMerge`) and the branch is left as
+   * it is, every merge before the red one kept, for the retry.
    */
   async #waveGates(
     nodeId: string,
@@ -1805,6 +1840,26 @@ export class RunEffectExecutor implements EffectExecutor {
       integrator.runBase(),
       ...node.depends_on.map((dep) => integrator.nodeBranch(dep.node)),
     ]
+    const gateIds = [...new Set(node.depends_on.flatMap((dep) => this.#node(dep.node)?.gates ?? []))]
+    return await this.#inputsOf(branches, gateIds)
+  }
+
+  /** `EffectExecutor.waveInputs`: the wave under, every member's tip, the members' gates. */
+  async waveInputs(nodeId: string): Promise<SetupInputs | null> {
+    const wave = this.#waves.get(nodeId)
+    if (wave === undefined) return null
+    const integrator = this.#options.integrator
+    const members = this.#wavePlan().get(wave) ?? []
+    const branches = [
+      integrator.runBase(),
+      ...(wave > 1 ? [integrator.waveBranch(wave - 1)] : []),
+      ...members.map((member) => integrator.nodeBranch(member)),
+    ]
+    return await this.#inputsOf(branches, [...new Set(members.flatMap((member) => this.#node(member)?.gates ?? []))])
+  }
+
+  /** Branch tips and gate definitions, as one key and a label of identifiers. */
+  async #inputsOf(branches: readonly string[], gateIdsIn: readonly string[]): Promise<SetupInputs> {
     const tips: string[] = []
     for (const branch of branches) {
       const [tip] = await gitLines(this.#options.integrationPath, [
@@ -1815,7 +1870,7 @@ export class RunEffectExecutor implements EffectExecutor {
       ]).catch(() => [])
       tips.push(`${branch}@${tip === undefined ? '-' : tip.slice(0, 10)}`)
     }
-    const gateIds = [...new Set(node.depends_on.flatMap((dep) => this.#node(dep.node)?.gates ?? []))].sort()
+    const gateIds = [...gateIdsIn].sort()
     const gates = createHash('sha256')
       .update(JSON.stringify(gateIds.map((id) => [id, this.#workflow.gates[id] ?? null])))
       .digest('hex')

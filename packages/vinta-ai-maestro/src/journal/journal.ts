@@ -976,6 +976,7 @@ export class Journal {
       case 'wave_gate_result':
       case 'wave_built':
       case 'wave_deferred':
+      case 'wave_failed':
       case 'workspace_exec':
       case 'gate_cache_invalidated':
       case 'gate_stalled':

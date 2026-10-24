@@ -1096,6 +1096,16 @@ interface NodePayloads {
     readonly wave: number
     readonly missing: number
   }
+  /**
+   * A wave could not be assembled (`WaveBuildError`): the phase that completed
+   * it is parked on whether to try the wave again, instead of failing. `reason`
+   * is the integrator's own message — branch names, node ids, a gate id and
+   * its log path.
+   */
+  wave_failed: {
+    readonly wave: number
+    readonly reason: string
+  }
   wave_gate_result: {
     readonly wave: number
     readonly gate: string

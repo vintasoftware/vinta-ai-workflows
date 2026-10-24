@@ -150,6 +150,12 @@ export interface EffectExecutor {
    * an executor with no integration (`Scheduler.#sameInputs`).
    */
   setupInputs?(nodeId: string): Promise<SetupInputs | null>
+  /**
+   * What the wave `nodeId` completes is assembled from, in the same form: the
+   * wave under it, each member's tip and the gates run on the merged tree.
+   * A wave that failed twice on the same inputs is not retried unattended.
+   */
+  waveInputs?(nodeId: string): Promise<SetupInputs | null>
 }
 
 /** See `EffectExecutor.setupInputs`. Branch names, short commit ids and a hash (§11). */

@@ -300,6 +300,8 @@ function rig(
     readonly coordinatorAuthority?: 'standard' | 'full'
     /** `EffectExecutor.setupInputs`: what a node's setup is built from. */
     readonly setupInputs?: (nodeId: string) => { readonly key: string; readonly label: string } | null
+    /** `EffectExecutor.waveInputs`: what the wave a node completes is built from. */
+    readonly waveInputs?: (nodeId: string) => { readonly key: string; readonly label: string } | null
   readonly retryAfterMs?: number
     readonly agentAnswerAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
@@ -362,9 +364,11 @@ function rig(
     baseBackoffMs: 1_000,
   })
   const inputsOf = options.setupInputs
+  const waveOf = options.waveInputs
   const executor = Object.assign(
     recorder(options.outcomes ?? {}, options.tap),
     inputsOf === undefined ? {} : { setupInputs: async (nodeId: string) => inputsOf(nodeId) },
+    waveOf === undefined ? {} : { waveInputs: async (nodeId: string) => waveOf(nodeId) },
   )
   const takeovers = new PtyRegistry()
 
@@ -6358,6 +6362,100 @@ describe('a failure before any agent ran', () => {
     r.scheduler.answer('a', { human: { answer: 'stop' } })
     await running
     expect(answersOf(r)[0]).toMatchObject({ answer: 'retry', unattended: true })
+    expectDrained(r)
+  })
+})
+
+describe('a wave that cannot be assembled', () => {
+  /** What the executor raises when the wave a phase completes cannot be built. */
+  class WaveBuildError extends Error {
+    override name = 'WaveBuildError'
+    readonly wave = 2
+  }
+
+  /** `a` completes wave 2, whose build fails `failures` times; `b` builds on `a`. */
+  const waveRig = (failures: number, options: Parameters<typeof rig>[1] = {}) => {
+    let merges = 0
+    const r = rig(
+      standardWorkflow([node('a', [], { gates: ['unit'] }), node('b', ['a'], { gates: ['unit'] })]),
+      {
+        outcomes: APPROVED,
+        ...options,
+        tap: (call) => {
+          if (call.nodeId !== 'a' || call.effect !== 'e-merge') return
+          merges += 1
+          if (merges <= failures) throw new WaveBuildError('wave 2 could not be assembled: merge of plan/x/phase-p2 fails gate unit')
+        },
+      },
+    )
+    return { r, merges: () => merges }
+  }
+
+  /**
+   * The observed phase: last of its wave, it ran its whole pipeline four
+   * times, an hour each, failing each time on a sibling's merge into the wave.
+   */
+  it('parks the phase on the wave rather than failing it, and lets its dependents start', async () => {
+    const { r, merges } = waveRig(1)
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    // Landed: b starts on a's branch while a waits on its wave.
+    await until(() => r.scheduler.statuses['b'] === 'done', 'the dependent to finish')
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('Wave 2 could not be assembled')
+    expect(question?.choices).toEqual(['retry', 'skip', 'stop'])
+
+    r.scheduler.answer('a', { human: { answer: 'retry' } })
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // The wave again, and nothing else of a's: one implementer turn, one gate.
+    expect(merges()).toBe(2)
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(1)
+    expect(r.calls.filter((call) => call.nodeId === 'a' && call.effect === 'e-gate')).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('lets the phase finish without its wave on skip', async () => {
+    const { r, merges } = waveRig(5)
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    r.scheduler.answer('a', { human: { answer: 'skip' } })
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done' })
+    expect(merges()).toBe(1)
+    expectDrained(r)
+  })
+
+  it('fails the phase on stop, with no automatic attempt behind it', async () => {
+    const { r } = waveRig(5, { onFailure: 'retry' })
+    const report = await runAnsweringStop(r, 'a')
+    expect(report.statuses['a']).toBe('failed')
+    expect(report.failures['a']).toContain('wave 2 could not be assembled')
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('retries unattended once, and then waits for the wave’s inputs to move', async () => {
+    let tip = 'p2@aaaa'
+    const { r, merges } = waveRig(2, {
+      retryAfterMs: 60_000,
+      waveInputs: () => ({ key: tip, label: tip }),
+    })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first wave question')
+    // The first failure on these inputs gets the timer's retry.
+    await r.advance(60_000)
+    await until(() => merges() === 2 && r.scheduler.statuses['a'] === 'awaiting_human', 'the second wave question')
+    expect(questionsOf(r, 'a').at(-1)?.question).toContain('2 times in a row on the same inputs (p2@aaaa)')
+
+    // The same inputs: windows pass and nothing retries.
+    await r.advance(60_000 * 30)
+    expect(merges()).toBe(2)
+
+    // A member's tip moves: retried, and built.
+    tip = 'p2@bbbb'
+    await r.advance(60_000)
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done' })
+    expect(merges()).toBe(3)
     expectDrained(r)
   })
 })

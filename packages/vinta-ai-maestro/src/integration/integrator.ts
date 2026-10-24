@@ -1116,6 +1116,25 @@ export class Integrator {
     // fixer so the retry continues it: one observed retry restarted a 13-file
     // resolution from scratch after its predecessor ran out of time.
     const previous = await this.#previousAttempt(cwd, into, incoming)
+    // **And it is started from, not only pointed at.** A wave assembly that ran
+    // out of fix rounds — on a red gate as often as on a conflict — was kept
+    // and then redone from the raw conflict on every retry: one observed phase
+    // re-resolved the same 7 to 12 conflicts four times, and lost the one
+    // that failed only on an unsorted import. The kept tree goes in first; if
+    // it is free of markers and the gates pass on it, it is the resolution and
+    // no round is spent. Otherwise the rounds start from it, with the red gate
+    // named, and a fresh budget.
+    if (previous !== null && (await gitOk(cwd, ['read-tree', '--reset', '-u', `${previous}^{tree}`]))) {
+      if (codegen !== undefined) await codegen.resettle(cwd, paths)
+      if (!(await this.#unresolved(paths))) {
+        red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+        if (red === null) {
+          await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'])
+          await gitOk(cwd, ['update-ref', '-d', previous])
+          return { nodes, paths, rounds: 0 }
+        }
+      }
+    }
     const request = {
       cwd,
       into,

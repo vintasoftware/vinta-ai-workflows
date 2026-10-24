@@ -115,7 +115,7 @@ import {
   UnresolvedConflictError,
 } from '../integration/integrator.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
-import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
+import type { EffectExecutor, EffectInvocation, EffectOutcome, SetupInputs } from '../pipeline/effects.ts'
 import type { ContextValue, GuardContext } from '../pipeline/guard.ts'
 import {
   createPipelineRun,
@@ -207,6 +207,8 @@ export function unattendedAnswerFor(declared: unknown, given: number): string | 
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
 const RETRY = 'retry'
 const STOP = 'stop'
+/** The wave question's third answer: leave the wave unbuilt and let the phase finish. */
+const SKIP_WAVE = 'skip'
 /**
  * Identical setup failures in a row before the unattended retry is withheld:
  * the first is an attempt, the second is the proof it is deterministic.
@@ -639,6 +641,11 @@ class SpawnFatal extends Error {}
  */
 class LoginDeclined extends SpawnFatal {}
 /**
+ * The wave question answered `stop` (`#waveMerge`): the phase fails on the
+ * wave's error, as a person chose, and no automatic attempt re-drives it.
+ */
+class WaveStopped extends SpawnFatal {}
+/**
  * The same harness ended `EMPTY_TURN_FAULT` turns in a row without the agent
  * doing anything. Not the work's failure and not one a retry changes, so
  * `#recover` spends no automatic attempt on it and asks instead.
@@ -1030,6 +1037,10 @@ interface NodeState {
    * can reverse once, and not a third time on the same tips.
    */
   setupInputs: { readonly key: string; readonly label: string; readonly count: number } | null
+  /** `setupInputs`' twin for the wave this node completes (`#waveMerge`). */
+  waveInputs: { readonly key: string; readonly label: string; readonly count: number } | null
+  /** Wave questions asked, for distinct effect ids. */
+  waveAsks: number
   /**
    * The harness whose turns on this node have ended empty, and how many in a
    * row — across attempts, since the attempt boundary is exactly what an
@@ -1421,6 +1432,8 @@ export class Scheduler {
       agentRan: false,
       setupFailure: null,
       setupInputs: null,
+      waveInputs: null,
+      waveAsks: 0,
       emptyTurns: null,
       harnessFault: false,
       reviewRejections: 0,
@@ -2816,7 +2829,7 @@ export class Scheduler {
         const reason = failureReason(error)
         this.#recordAttemptFailure(state, reason, error)
         // The operator was asked and said stop: no retry policy overrides that.
-        if (error instanceof LoginDeclined) {
+        if (error instanceof LoginDeclined || error instanceof WaveStopped) {
           this.#fail(state, attempted(reason, state))
           return
         }
@@ -3564,8 +3577,9 @@ export class Scheduler {
     // On unchanged inputs the timer gives way to a watch on them: the retry
     // comes when a dependency moves, which is the one thing that can change
     // the answer, and not before.
-    const cancel = unchanged
-      ? this.#watchInputs(state)
+    const watched = state.setupInputs
+    const cancel = unchanged && watched !== null
+      ? this.#watchInputs(state, watched, () => this.#options.executor.setupInputs?.(state.node.id) ?? Promise.resolve(null))
       : repeated
         ? () => {}
         : this.#armUnattendedRetry(state, fault)
@@ -3631,18 +3645,21 @@ export class Scheduler {
    * like any other. Polled, because a tip moves by means the scheduler does
    * not see: a coordinator's `exec`, a `propagate`, a person's commit.
    */
-  #watchInputs(state: NodeState): () => void {
+  #watchInputs(
+    state: NodeState,
+    watched: { readonly key: string },
+    read: () => Promise<SetupInputs | null>,
+  ): () => void {
     const after = this.#options.retryAfterMs
-    const watched = state.setupInputs
-    if (after === undefined || after <= 0 || watched === null) return () => {}
+    if (after === undefined || after <= 0) return () => {}
     const clock = this.#options.clock ?? systemClock
     let stopped = false
     let cancel = (): void => {}
     const look = async (): Promise<void> => {
       if (stopped || state.resume === null || state.aborted) return
-      const now = await this.#options.executor.setupInputs?.(state.node.id).catch(() => null)
+      const now = await read().catch(() => null)
       if (stopped || state.resume === null || state.aborted) return
-      if (now === undefined || now === null || now.key === watched.key || state.held) {
+      if (now === null || now.key === watched.key || state.held) {
         cancel = clock.at(clock.now() + INPUTS_POLL_MS, () => void look())
         return
       }
@@ -3981,6 +3998,9 @@ export class Scheduler {
         if (verb === 'run_gate') {
           await this.#acquireGate(state, invocation)
           return this.#observe(state, await this.#runGate(state, invocation))
+        }
+        if (verb === 'git_merge' && invocation.effect.params['branch'] === undefined) {
+          return this.#observe(state, await this.#waveMerge(state, invocation))
         }
         // The question is journalled before the host executor runs, because
         // the host executor is what raises the notification: the record of the
@@ -4929,6 +4949,91 @@ export class Scheduler {
     const drained = await this.#drain(state, granted, turn, watch)
     // An agent that stops to ask instead is answered the usual way.
     return (await this.#agentQuestions(state, turn, watch, drained.sessionId)).watch
+  }
+
+  /**
+   * The phase's own merge, which is where the wave it completes is built — and
+   * a wave that cannot be built is the wave's failure, not the phase's.
+   *
+   * It used to fail the phase, and a failed phase is re-driven from its
+   * initial state. One observed phase — the last of its wave to finish — ran
+   * its whole pipeline four times, about an hour each, and failed each time on
+   * the same sibling's merge into the wave: a red test gate twice, then one
+   * unsorted import twice. Nothing in the phase was wrong.
+   *
+   * So the phase parks here instead, in its integrate step, with its lane, and
+   * is landed meanwhile: its dependents build on its branch, not on the wave.
+   * `retry` builds the wave again — the merges already made on it are kept, so
+   * it resumes at the one that failed, and a fixer's unfinished resolution is
+   * picked up rather than redone (`Integrator`). `skip` leaves the wave unbuilt
+   * and lets the phase finish; a later wave's build, or a person, assembles it.
+   * `stop` fails the phase as before.
+   *
+   * Unattended, the retry follows the setup rule (`#sameInputs`): the first
+   * failure on a set of inputs gets the timer's retry, and a second on the
+   * same inputs waits for one of them to move.
+   */
+  async #waveMerge(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
+    for (;;) {
+      try {
+        const outcome = await this.#options.executor.execute(invocation)
+        state.waveInputs = null
+        return outcome
+      } catch (error) {
+        if (!(error instanceof Error && error.name === 'WaveBuildError')) throw error
+        const answer = await this.#offerWaveRetry(state, error)
+        if (answer === SKIP_WAVE) return {}
+        if (answer !== RETRY) throw new WaveStopped(error.message)
+      }
+    }
+  }
+
+  async #offerWaveRetry(state: NodeState, error: Error): Promise<string> {
+    if (state.aborted) throw new Aborted()
+    const wave = (error as { wave?: unknown }).wave
+    const inputs = await this.#options.executor.waveInputs?.(state.node.id).catch(() => null)
+    const previous = state.waveInputs
+    state.waveInputs =
+      inputs === undefined || inputs === null
+        ? null
+        : { ...inputs, count: previous?.key === inputs.key ? previous.count + 1 : 1 }
+    const unchanged = (state.waveInputs?.count ?? 0) >= SAME_INPUTS_FAILURES
+
+    // Landed: merged into nothing yet, but its dependents build on its branch.
+    if (!state.landed) {
+      state.landed = true
+      this.#wake()
+    }
+    this.#log.warn('node.wave_failed', { node: state.node.id, wave, same_inputs: state.waveInputs?.count ?? 0 })
+
+    state.waveAsks += 1
+    const effectId = `wave:${state.node.id}:${state.waveAsks}`
+    this.#ask(state, effectId, {
+      question:
+        `Wave ${String(wave)} could not be assembled. This phase is finished and its dependents may ` +
+        'start; only the wave is left. Try the wave again?' +
+        (unchanged && state.waveInputs !== null
+          ? ` It has failed ${state.waveInputs.count} times in a row on the same inputs (${state.waveInputs.label}), ` +
+            'so it will not be retried unattended until one of them changes.'
+          : ''),
+      kind: 'choice',
+      choices: [RETRY, SKIP_WAVE, STOP],
+    })
+    state.parkedEffectId = effectId
+    state.delegable = true
+    const watched = state.waveInputs
+    const cancel =
+      unchanged && watched !== null
+        ? this.#watchInputs(state, watched, () => this.#options.executor.waveInputs?.(state.node.id) ?? Promise.resolve(null))
+        : this.#armUnattendedRetry(state)
+    let facts: GuardContext
+    try {
+      facts = await this.#park(state)
+    } finally {
+      cancel()
+    }
+    const answer = facts.human?.['answer']
+    return typeof answer === 'string' ? answer : answer === true ? RETRY : STOP
   }
 
   /**

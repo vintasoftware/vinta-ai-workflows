@@ -2422,6 +2422,45 @@ describe('a fix round stopped by its time limit', () => {
   })
 })
 
+describe('a merge that ran out of fix rounds', () => {
+  /**
+   * One observed wave failed four times on the same merges, each retry
+   * re-resolving 7 to 12 conflicts from scratch — the last time over one
+   * unsorted import. The retry starts from the tree the last fixer left.
+   */
+  it('is retried from the tree the last fixer left, and spends no round when that tree passes', async () => {
+    const repo = await conflictingPair()
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    let green = false
+    const first = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan(nodes),
+      integrationPath: repo.integ,
+      fixer: first,
+      maxFixRounds: 1,
+      verify: async () => (green ? true : RED_GATE),
+    })
+
+    const failure = await integrator.prepareBase('c').then(() => null, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(IntegrationVerifyError)
+    expect(first.calls).toHaveLength(1)
+
+    // Whatever made the gate red is fixed outside the merge — a database, a
+    // flaky test — and the phase is retried.
+    green = true
+    const retry = spyFixer()
+    integrator.adopt(plan(nodes), retry)
+    const base = await integrator.prepareBase('c')
+
+    expect(retry.calls).toHaveLength(0)
+    expect(run(repo.integ, 'show', `${base}:app.ts`)).toBe('const value = "a" + "b"')
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'for-each-ref', 'refs/vinta-ai-maestro/abandoned/')).toBe('')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // A branch that is no phase's: sync-base's wave merges
 // ---------------------------------------------------------------------------
