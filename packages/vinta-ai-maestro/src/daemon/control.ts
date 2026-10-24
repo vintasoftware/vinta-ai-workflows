@@ -21,6 +21,7 @@
  * objects satisfy them with no adapter and a stub satisfies them with three
  * methods.
  */
+import type { NodeProcess } from '../processes/list.ts'
 import type { GateGuardPort } from '../guard/guard.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import type { Actor, NodeStatus, OperatorDelivery } from '../journal/events.ts'
@@ -199,6 +200,14 @@ export interface AgentGatePort {
   running?(): readonly AgentGateRunning[]
 }
 
+/** See `DaemonRun.processes`. */
+export interface ProcessPort {
+  /** The node's processes, or null when the process table cannot be read. */
+  list(nodeId: string): Promise<readonly NodeProcess[] | null>
+  /** Stops one of them and its tree; `stopped` false when the pid is not the node's now. */
+  stop(nodeId: string, pid: number): Promise<{ readonly stopped: boolean; readonly process?: NodeProcess }>
+}
+
 /** See `DaemonRun.gateCache`. Returns how many entries went. */
 export interface GateCachePort {
   invalidate(gateId: string, treeHash?: string): number
@@ -327,6 +336,11 @@ export interface DaemonRun {
    * `gate <id> --no-cache`, which replaces the entry for its own lane only.
    */
   readonly gateCache?: GateCachePort
+  /**
+   * What a node is running as processes, and stopping one (`processes/list.ts`).
+   * Absent on a host with no lanes: the node view then shows no list.
+   */
+  readonly processes?: ProcessPort
 }
 
 /** What the daemon asks on a judged session's behalf. The input never leaves the call. */

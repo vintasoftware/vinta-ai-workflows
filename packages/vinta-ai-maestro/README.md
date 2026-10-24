@@ -855,6 +855,14 @@ the project, this chore posts a topic-grouped review canvas on every phase PR:
 }
 ```
 
+The node view's **Processes** panel lists what the phase is running right
+now: its agent's shell commands, marked `waiting on it` while the agent waits
+for one and `background` otherwise, and its gates. Two are shown, the rest
+behind **Show all**. **Stop** (two clicks) ends a process and everything
+under it; a gate stopped this way fails like a cancelled one. The gates and
+their logs follow in the same panel. The list needs a live run, and a harness
+whose CLI is one process per session: claude-code and codex, not opencode.
+
 The node view links the phase's PR on its **Changes** card, or says why none
 opened.
 

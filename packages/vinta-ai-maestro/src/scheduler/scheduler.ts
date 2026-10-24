@@ -800,6 +800,14 @@ interface NodeState {
    */
   live: { readonly session: AgentSession; readonly adapter: HarnessAdapter } | null
   /**
+   * The shell lines the live turn has started and not had a result for, by
+   * tool call id: what the agent is waiting on in the foreground. A command
+   * started in the background has its result at once and is not here. Read
+   * by `liveTurn`, for the node view's process list; never journalled — it is
+   * the agent's own text (§11).
+   */
+  openShell: Map<string, string>
+  /**
    * Operator text that had nowhere to go — no live session, or a harness that
    * cannot inject — waiting for the node's next resume (§9). The queue lives
    * here because the resume does, and each entry remembers which operation
@@ -1389,6 +1397,7 @@ export class Scheduler {
       pipeline,
       status: 'pending',
       live: null,
+      openShell: new Map(),
       pending: [],
       undelivered: [],
       decisions: [],
@@ -2554,6 +2563,17 @@ export class Scheduler {
   }
 
   /** Node statuses as of now. A projection of the same facts the journal holds. */
+  /**
+   * The node's live agent turn, as far as its processes go: the CLI's pid
+   * where it has one of its own, and the shell lines it is waiting on. Null
+   * when no turn is live. For the node view's process list.
+   */
+  liveTurn(nodeId: string): { readonly pid: number | undefined; readonly foreground: readonly string[] } | null {
+    const state = this.#states.get(nodeId)
+    if (state === undefined || state.live === null) return null
+    return { pid: state.live.session.pid, foreground: [...state.openShell.values()] }
+  }
+
   get statuses(): Readonly<Record<string, NodeStatus>> {
     return Object.fromEntries([...this.#states].map(([id, state]) => [id, state.status]))
   }
@@ -4743,8 +4763,12 @@ export class Scheduler {
         if (event.type === 'tool_use') this.#detectBareGate(state, adapter.id, event.name, event.input)
         if (event.type === 'tool_use' && isShellCall(adapter.id, event.name, event.input)) {
           openCalls.set(event.id, event.name)
+          state.openShell.set(event.id, shellLineOf(adapter.id, event.name, event.input) ?? commandOf(event.input))
         }
-        if (event.type === 'tool_result') openCalls.delete(event.id)
+        if (event.type === 'tool_result') {
+          openCalls.delete(event.id)
+          state.openShell.delete(event.id)
+        }
         if (event.type === 'session_started') {
           sessionId = event.sessionId
           this.#assign(state, { session_id: event.sessionId })
@@ -4758,6 +4782,7 @@ export class Scheduler {
     } finally {
       withdraw()
       state.live = null
+      state.openShell.clear()
       // Frees the harness in-flight slot: the ceiling counts running agents.
       outcome.release()
       // What the session's commands still hold or wait for, released. The
@@ -5878,6 +5903,12 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = done
   })
   return { promise, resolve }
+}
+
+/** A `Bash` call's command, or empty. */
+function commandOf(input: unknown): string {
+  const command = (input as { command?: unknown } | null)?.command
+  return typeof command === 'string' ? command : ''
 }
 
 /** A tool call that runs a shell command, on any harness: claude-code's `Bash` as well as `shellLineOf`'s. */

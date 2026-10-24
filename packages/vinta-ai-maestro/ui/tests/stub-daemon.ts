@@ -167,6 +167,8 @@ export interface StubDaemon {
   readonly posts: readonly Post[]
   /** Every run-level pause or stop the stub accepted (§9.3), in order. */
   readonly halts: readonly { runId: string; mode: 'pause' | 'stop' }[]
+  /** Every process stop the view posted, in order. */
+  readonly stops: readonly { runId: string; nodeId: string; pid: number }[]
   /** Makes the next pause or stop answer 409 with this error code. */
   readonly refuseHalt: (code: string) => void
   /** Every workflow save the stub accepted, in order. */
@@ -208,6 +210,7 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
   const usageByRun = new Map(Object.entries(options.usage ?? {}))
   const posts: Post[] = []
   const halts: { runId: string; mode: 'pause' | 'stop' }[] = []
+  const stops: { runId: string; nodeId: string; pid: number }[] = []
   let haltRefusal: string | null = null
   const puts: WorkflowPut[] = []
   const workflows = new Map(Object.entries(options.workflows ?? {}))
@@ -293,6 +296,16 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       }
       halts.push({ runId: decodeURIComponent(halt[1] ?? ''), mode: halt[2] as 'pause' | 'stop' })
       return json(response, 202, OkResponseSchema.parse({ ok: true }))
+    }
+
+    const stop = /^\/api\/runs\/([^/]+)\/nodes\/([^/]+)\/processes\/(\d+)\/stop$/.exec(url.pathname)
+    if (request.method === 'POST' && stop !== null) {
+      stops.push({
+        runId: decodeURIComponent(stop[1] ?? ''),
+        nodeId: decodeURIComponent(stop[2] ?? ''),
+        pid: Number(stop[3]),
+      })
+      return json(response, 200, { stopped: true })
     }
 
     // The five §9 operations. Validated with the daemon's request schemas, so
@@ -509,6 +522,7 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     },
     posts,
     halts,
+    stops,
     refuseHalt: (code: string) => {
       haltRefusal = code
     },

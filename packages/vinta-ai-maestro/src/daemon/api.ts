@@ -1280,7 +1280,7 @@ export function createApi(options: ApiOptions): Hono {
     return c.json(decided.allow ? { allow: true } : { allow: false, reason: decided.reason ?? '' })
   })
 
-  app.get('/api/runs/:runId/nodes/:nodeId', (c) => {
+  app.get('/api/runs/:runId/nodes/:nodeId', async (c) => {
     const found = resolveNode(c)
     if ('response' in found) return found.response
 
@@ -1331,8 +1331,52 @@ export function createApi(options: ApiOptions): Hono {
       gates,
       sessions: sessionTurns(journal, runId, node.node_id),
       question: question(runId, found.run, node),
+      processes: await (found.run?.processes?.list(node.node_id) ?? Promise.resolve(null)).then(
+        (listed) => (listed === null ? null : [...listed]),
+        () => null,
+      ),
     }
     return c.json(detail)
+  })
+
+  /**
+   * Stops one process a node is running, and everything under it — an
+   * agent's command, foreground or background, or a gate (`processes/list.ts`).
+   * The operator's and the coordinator's; the coordinator says why. Only a pid
+   * the node is running now: anything else is `404 process_not_found`.
+   * Journalled `process_stopped`, with the pid and what kind of process it was
+   * — never its command line, which is the agent's text (§11).
+   */
+  app.post('/api/runs/:runId/nodes/:nodeId/processes/:pid/stop', async (c) => {
+    const found = resolveNode(c)
+    if ('response' in found) return found.response
+    if (found.run === null) return fail(c, 409, 'run_not_live')
+    if (found.run.processes === undefined) return fail(c, 501, 'processes_unavailable')
+    const pid = Number(c.req.param('pid'))
+    if (!Number.isInteger(pid) || pid <= 0) return fail(c, 400, 'invalid_request')
+    const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
+    const body = await readBody(c, NoArgsRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+
+    const result = await found.run.processes.stop(found.node.node_id, pid)
+    if (!result.stopped || result.process === undefined) return fail(c, 404, 'process_not_found')
+    journal.append({
+      runId: found.runId,
+      nodeId: found.node.node_id,
+      type: 'process_stopped',
+      payload: {
+        pid,
+        kind: result.process.kind,
+        mode: result.process.mode,
+        ...(result.process.gateId === null ? {} : { gate: result.process.gateId }),
+        ...(actor === 'coordinator' ? { by: actor } : {}),
+        ...(reason === undefined ? {} : { reason }),
+      },
+    })
+    log.info('runs.process_stopped', { run: found.runId, node: found.node.node_id, pid, kind: result.process.kind, actor })
+    return c.json({ stopped: true })
   })
 
   /**

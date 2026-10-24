@@ -38,6 +38,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro` UI: what a phase is running, and a way to stop it.**
+  The node view's gates panel is now a **Processes** panel. It lists the
+  phase's running processes: the agent's shell commands, marked as waiting
+  on it or in the background, and its gates. Two are shown, and the rest
+  open in a dialog. A two-click **Stop** ends a process and everything under
+  it (`POST /api/runs/<run>/nodes/<node>/processes/<pid>/stop`, journalled
+  `process_stopped`). The gates section below is unchanged. A phase waiting
+  on a background command no longer reads as stuck. It needs a live run and
+  a harness with one CLI process per session (claude-code, codex).
 - **`vinta-ai-maestro`: resource pools shared by every run on the machine.**
   A pool declared `scope: host` also counts every other maestro run holding
   a pool of the same name, through lock files under

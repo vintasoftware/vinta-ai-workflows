@@ -705,6 +705,10 @@ class CodexSession implements AgentSession {
   #totals: TokenTotals | undefined
   #reportedTotals: TokenTotals | undefined
 
+  get pid(): number | undefined {
+    return this.#child.pid
+  }
+
   constructor(child: ChildProcess, rpc: Rpc, queue: EventQueue, idleMs: number) {
     this.#child = child
     this.#rpc = rpc
