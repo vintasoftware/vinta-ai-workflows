@@ -7,6 +7,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] — YYYY-MM-DD
 
+<!-- pre-release: 0.7.0-alpha39 on 2026-10-24 -->
 <!-- pre-release: 0.7.0-alpha38 on 2026-10-22 -->
 <!-- pre-release: 0.7.0-alpha37 on 2026-10-20 -->
 <!-- pre-release: 0.7.0-alpha36 on 2026-10-18 -->
