@@ -2422,6 +2422,58 @@ describe('a fix round stopped by its time limit', () => {
   })
 })
 
+describe('an integration branch whose first dependency moved on', () => {
+  /**
+   * integ-p14 carried a coordinator's fix for the one tsc error failing its
+   * base gate; the next attempt reset it to phase-p3's new tip and re-merged,
+   * and the fix was gone within minutes.
+   */
+  it('keeps the branch and its own commits when the dependency moved forward, and merges the new tip', async () => {
+    const repo = await makeRepo({ 'a.ts': 'a\n', 'b.ts': 'b\n', 'glue.ts': 'glue\n' })
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a1\n' }, 'phase a')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'b.ts': 'b1\n' }, 'phase b')
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    const integrator = new Integrator({ plan: plan(nodes), integrationPath: repo.integ, fixer: spyFixer() })
+    await integrator.prepareBase('c')
+
+    // A fix made on the integration branch by hand.
+    await repo.commit(repo.integ, { 'glue.ts': 'glue fixed\n' }, 'coordinator: fix the cross-phase break')
+    // The first dependency moves forward.
+    await repo.commit(one, { 'a.ts': 'a2\n' }, 'phase a, again')
+
+    const base = await integrator.prepareBase('c')
+    expect(run(repo.integ, 'show', `${base}:glue.ts`)).toBe('glue fixed')
+    expect(run(repo.integ, 'show', `${base}:a.ts`)).toBe('a2')
+    expect(run(repo.integ, 'show', `${base}:b.ts`)).toBe('b1')
+  })
+
+  it('rebuilds it when the dependency was redone rather than moved forward', async () => {
+    const repo = await makeRepo({ 'a.ts': 'a\n', 'b.ts': 'b\n', 'glue.ts': 'glue\n' })
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a1\n' }, 'phase a')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'b.ts': 'b1\n' }, 'phase b')
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    const integrator = new Integrator({ plan: plan(nodes), integrationPath: repo.integ, fixer: spyFixer() })
+    await integrator.prepareBase('c')
+    await repo.commit(repo.integ, { 'glue.ts': 'glue fixed\n' }, 'coordinator: fix')
+
+    // Redone from main: the old a1 is in no branch the base is built from.
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a-redone\n' }, 'phase a, redone')
+
+    const base = await integrator.prepareBase('c')
+    expect(run(repo.integ, 'show', `${base}:a.ts`)).toBe('a-redone')
+    expect(run(repo.integ, 'show', `${base}:glue.ts`)).toBe('glue')
+  })
+})
+
 describe('a merge that ran out of fix rounds', () => {
   /**
    * One observed wave failed four times on the same merges, each retry

@@ -317,6 +317,14 @@ export const RESOLUTION_REFS = 'refs/vinta-ai-maestro/resolutions'
  */
 export const ABANDONED_REFS = 'refs/vinta-ai-maestro/abandoned'
 
+/**
+ * Where an integration or wave branch was cut: the tip of the branch it was
+ * cut from, at the time. One ref per branch, rewritten at every cut. What lets
+ * a kept branch tell a dependency that moved on from one that was redone
+ * (`Integrator.#reusable`).
+ */
+export const CUT_REFS = 'refs/vinta-ai-maestro/cut'
+
 /** An unfinished merge this run started, taken down so it can be redone. Identifiers only. */
 export interface ReclaimedMerge {
   /** The branch the merge was being made on. */
@@ -583,13 +591,9 @@ export class Integrator {
     // re-implemented has a new tip this base has never seen, and reusing a base
     // built on the old one would hand the phase work that is no longer there:
     // `#reusable` rebuilds then, and merges on top what a kept base lacks.
-    const missing = await this.#reusable(cwd, base.branch, this.nodeBranch(first as string), rest)
-    await git(
-      cwd,
-      missing === null
-        ? ['checkout', '-B', base.branch, this.nodeBranch(first as string)]
-        : ['checkout', base.branch],
-    )
+    const missing = await this.#reusable(cwd, base.branch, this.nodeBranch(first as string), rest, [], first)
+    if (missing === null) await this.#cut(cwd, base.branch, this.nodeBranch(first as string))
+    else await git(cwd, ['checkout', base.branch])
 
     const merged = [first as string, ...rest.filter((dep) => missing !== null && !missing.includes(dep))]
     for (const dep of missing ?? rest) {
@@ -750,7 +754,8 @@ export class Integrator {
     // (`#reusable`). Rebuilding from `under` threw that resolution away and
     // brought the same conflict back on every attempt.
     const missing = await this.#reusable(cwd, branch, under, order, catchUp ? [this.#runBase()] : [])
-    await git(cwd, missing === null ? ['checkout', '-B', branch, under] : ['checkout', branch])
+    if (missing === null) await this.#cut(cwd, branch, under)
+    else await git(cwd, ['checkout', branch])
     // Wave 1 starts at the plan branch's tip, so it already has every commit
     // made there. A later wave starts at the wave before it, which was cut
     // before anything committed to the plan branch since — a config change
@@ -797,10 +802,27 @@ export class Integrator {
     under: string,
     members: readonly string[],
     extra: readonly string[] = [],
+    underNode?: string,
   ): Promise<string[] | null> {
     if (!(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))) return null
-    if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', under, branch]))) return null
-    const tips = [...members.map((id) => this.nodeBranch(id)), ...extra]
+    // **A branch whose base moved on is kept too, when it moved forward.** An
+    // `integ-` branch is cut at its first dependency's tip, and that tip moves
+    // whenever the dependency is retried or fixed. Rebuilding then threw away
+    // every commit made on the branch itself — one observed coordinator fix
+    // for the tsc error failing a base gate was gone within minutes, on the
+    // next attempt. Where the branch was cut (`CUT_REFS`) is still in the new
+    // tip, the move was forward: the branch is kept, and the base merged on
+    // top like any member that moved. A tip that no longer contains the cut
+    // was redone, and the rebuild is what drops its old commits.
+    let underMoved = false
+    if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', under, branch]))) {
+      const cut = await this.#cutPoint(cwd, branch)
+      if (underNode === undefined || cut === null) return null
+      if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', cut, under]))) return null
+      if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', cut, branch]))) return null
+      underMoved = true
+    }
+    const tips = [...members.map((id) => this.nodeBranch(id)), ...extra, ...(underMoved ? [under] : [])]
     for (const line of await gitLines(cwd, ['rev-list', '--merges', '--parents', `${under}..${branch}`])) {
       const [, , ...incoming] = line.split(' ')
       for (const commit of incoming) {
@@ -814,11 +836,26 @@ export class Integrator {
         if (!current) return null
       }
     }
-    const missing: string[] = []
+    const missing: string[] = underMoved && underNode !== undefined ? [underNode] : []
     for (const id of members) {
       if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', this.nodeBranch(id), branch]))) missing.push(id)
     }
     return missing
+  }
+
+  /** `checkout -B branch from`, remembering where it was cut (`CUT_REFS`). */
+  async #cut(cwd: string, branch: string, from: string): Promise<void> {
+    await git(cwd, ['checkout', '-B', branch, from])
+    await gitOk(cwd, ['update-ref', this.#cutRef(branch), 'HEAD'])
+  }
+
+  async #cutPoint(cwd: string, branch: string): Promise<string | null> {
+    const [sha] = await gitLines(cwd, ['rev-parse', '--verify', '--quiet', `${this.#cutRef(branch)}^{commit}`]).catch(() => [])
+    return sha ?? null
+  }
+
+  #cutRef(branch: string): string {
+    return `${CUT_REFS}/${branch.slice(`plan/${this.#plan.id}/`.length)}`
   }
 
   /** Merges the plan branch into `branch` when it has commits `branch` lacks. */
