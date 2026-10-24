@@ -17,14 +17,16 @@
  * operator's own command lines — and it sits under `runs/`, so `purge` takes
  * it with the run.
  */
-import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { firstFailure } from '../gates/failures.ts'
 import { isAlive, jobLogPathFor, readJob } from '../job/job.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const LOGS_USAGE = `usage: vinta-ai-maestro logs <runId> [--repo <dir>] [--follow] [--lines <n>]
+       vinta-ai-maestro logs --failures <gate-log>
 
   Prints the run's job log: what the run would have printed to a terminal,
   and its daemon's records, one per line. Every attempt — the original and
@@ -32,7 +34,11 @@ export const LOGS_USAGE = `usage: vinta-ai-maestro logs <runId> [--repo <dir>] [
 
   --repo <dir>     The project. Defaults to the current directory.
   -f, --follow     Keep printing as the job writes, until it exits.
-  -n, --lines <n>  Only the last n lines. Defaults to all of them.`
+  -n, --lines <n>  Only the last n lines. Defaults to all of them.
+  --failures <gate-log>
+                   Print only the first failing test in a gate's log and the
+                   first line saying what went wrong, with their line
+                   numbers — the log a red gate's error names.`
 
 export interface LogsDeps {
   readonly alive?: (pid: number) => boolean
@@ -52,6 +58,7 @@ export async function logsCommand(
         repo: { type: 'string' },
         follow: { type: 'boolean', short: 'f' },
         lines: { type: 'string', short: 'n' },
+        failures: { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -59,6 +66,7 @@ export async function logsCommand(
     io.err(LOGS_USAGE)
     return USAGE
   }
+  if (parsed.values.failures !== undefined) return failuresOf(parsed.values.failures, io)
   const runId = parsed.positionals[0]
   if (runId === undefined || parsed.positionals.length > 1) {
     io.err(LOGS_USAGE)
@@ -118,6 +126,25 @@ export async function logsCommand(
     }
     await sleep(250)
   }
+}
+
+/** `--failures`: the first failure in one gate log, printed here and nowhere else. */
+function failuresOf(path: string, io: Io): number {
+  let text: string
+  try {
+    text = readFileSync(resolve(path), 'utf8')
+  } catch {
+    io.err(`vinta-ai-maestro: cannot read ${path}`)
+    return FAILED
+  }
+  const found = firstFailure(text)
+  if (found === null) {
+    io.out(`no failure this recognises in ${path}; read it whole`)
+    return OK
+  }
+  if (found.test !== null) io.out(`${found.testLine}: ${found.test}`)
+  if (found.cause !== null) io.out(`${found.causeLine}: ${found.cause}`)
+  return OK
 }
 
 function readFrom(path: string, offset: number): Buffer {

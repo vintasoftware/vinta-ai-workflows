@@ -68,6 +68,7 @@ usage: vinta-ai-maestro <command> [options]
   run --resume <run-id>      Pick a paused, interrupted or failed run back up.
   status [run-id]            What every run — or one run — is doing.
   logs <run-id> [-f]         A run's job log; -f follows it to the end.
+  logs --failures <gate-log> The first failure in a gate's log.
   pause <run-id>             Let running steps finish, then stop. Resumable.
   stop <run-id>              Kill the run now. Final.
   node <op> <run-id> <phase> Steer one phase of a live run: context, redirect,

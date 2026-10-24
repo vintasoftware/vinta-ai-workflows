@@ -176,7 +176,7 @@ export class IntegrationVerifyError extends UnresolvedConflictError {
         `${gate.logPath === undefined ? '' : `; its output is at ${gate.logPath}`}. ` +
         (gate.staleSchema === true && gate.gateId !== undefined
           ? `But ${staleSchemaNote(gate.gateId)}. Otherwise, fix the merged code `
-          : `${nodes.join(' and ')} each pass alone and break together. Fix the merged code `) +
+          : `Fix the merged code `) +
         `in the integration worktree and conclude the merge with \`git commit\` — the ` +
         `next attempt keeps that branch — or serialize the phases with a dependency edge.`,
     )

@@ -206,10 +206,9 @@ export class BaseGateError extends Error {
   ) {
     super(
       `the base of ${nodeId} (${branch}) merged, but gate "${gateId}" failed on it (exit ${exitCode}) — ` +
-        (staleSchema
-          ? `${staleSchemaNote(gateId)}. `
-          : 'its dependencies each passed their own gates, so this is a regression between them, and ') +
-        `${nodeId} does not start on it. Log: ${logPath}`,
+        (staleSchema ? `${staleSchemaNote(gateId)}. ` : '') +
+        `${nodeId} does not start on it. Log: ${logPath} — \`vinta-ai-maestro logs --failures <log>\` ` +
+        'prints its first failure',
     )
     this.name = 'BaseGateError'
   }
@@ -225,10 +224,8 @@ export class WaveGateError extends Error {
   ) {
     super(
       `wave ${wave} merged, but gate "${gateId}" failed on the merged tree (exit ${exitCode}) — ` +
-        (staleSchema
-          ? `${staleSchemaNote(gateId)}. `
-          : 'the phases each passed their own gates, so this is a regression between them. ') +
-        `Log: ${logPath}`,
+        (staleSchema ? `${staleSchemaNote(gateId)}. ` : '') +
+        `Log: ${logPath} — \`vinta-ai-maestro logs --failures <log>\` prints its first failure`,
     )
     this.name = 'WaveGateError'
   }
