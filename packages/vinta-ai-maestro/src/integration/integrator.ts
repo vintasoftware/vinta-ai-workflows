@@ -520,6 +520,11 @@ export class Integrator {
     return wave === 0 ? this.#runBase() : `plan/${this.#plan.id}/wave-${wave}`
   }
 
+  /** The branch a dependency-free phase is cut from: the plan branch, or `base_branch`. */
+  runBase(): string {
+    return this.#runBase()
+  }
+
   /** The plan branch when the run has one, and `base_branch` when it does not. */
   #runBase(): string {
     return this.#options.runBase ?? this.#plan.base_branch

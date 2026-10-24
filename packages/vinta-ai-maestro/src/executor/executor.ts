@@ -71,6 +71,7 @@
  * this file puts any of them into a fact, an error, a tracking record or a
  * notification body.
  */
+import { createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import {
   type CodegenCache,
@@ -90,7 +91,7 @@ import { prNumberOf } from '../integration/pr.ts'
 import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
-import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
+import type { EffectExecutor, EffectInvocation, EffectOutcome, SetupInputs } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict, resolveBrief } from '../prompts/index.ts'
 import { looksStale, staleSchemaNote, type IntegrationFreshness } from '../integration/fresh.ts'
@@ -1779,6 +1780,39 @@ export class RunEffectExecutor implements EffectExecutor {
     this.#integrationBusy = true
     this.#integrationHolder = next.nodeId ?? next.label ?? '?'
     next.start()
+  }
+
+  /**
+   * What `nodeId`'s setup is built from (`EffectExecutor.setupInputs`): the run
+   * base's tip, each branch its base merges at its tip, and the definitions of
+   * the gates that run on that base. A setup that failed twice on the same
+   * inputs will fail a third time; one whose dependency moved may not.
+   */
+  async setupInputs(nodeId: string): Promise<SetupInputs | null> {
+    const node = this.#node(nodeId)
+    if (node === undefined) return null
+    const integrator = this.#options.integrator
+    const branches = [
+      integrator.runBase(),
+      ...node.depends_on.map((dep) => integrator.nodeBranch(dep.node)),
+    ]
+    const tips: string[] = []
+    for (const branch of branches) {
+      const [tip] = await gitLines(this.#options.integrationPath, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branch}^{commit}`,
+      ]).catch(() => [])
+      tips.push(`${branch}@${tip === undefined ? '-' : tip.slice(0, 10)}`)
+    }
+    const gateIds = [...new Set(node.depends_on.flatMap((dep) => this.#node(dep.node)?.gates ?? []))].sort()
+    const gates = createHash('sha256')
+      .update(JSON.stringify(gateIds.map((id) => [id, this.#workflow.gates[id] ?? null])))
+      .digest('hex')
+      .slice(0, 10)
+    const label = `${tips.join(', ')}; gates ${gates}`
+    return { key: createHash('sha256').update(label).digest('hex'), label }
   }
 
   /** Who holds the integration worktree now: a node, a label (`coordinator`), or null. */

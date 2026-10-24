@@ -297,6 +297,8 @@ function rig(
     readonly codex?: MockAdapterOptions
     /** `run --coordinator-authority`. */
     readonly coordinatorAuthority?: 'standard' | 'full'
+    /** `EffectExecutor.setupInputs`: what a node's setup is built from. */
+    readonly setupInputs?: (nodeId: string) => { readonly key: string; readonly label: string } | null
   readonly retryAfterMs?: number
     readonly agentAnswerAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
@@ -358,7 +360,11 @@ function rig(
     random: () => 1,
     baseBackoffMs: 1_000,
   })
-  const executor = recorder(options.outcomes ?? {}, options.tap)
+  const inputsOf = options.setupInputs
+  const executor = Object.assign(
+    recorder(options.outcomes ?? {}, options.tap),
+    inputsOf === undefined ? {} : { setupInputs: async (nodeId: string) => inputsOf(nodeId) },
+  )
   const takeovers = new PtyRegistry()
 
   const scheduler = createScheduler({
@@ -6201,6 +6207,70 @@ describe('a failure before any agent ran', () => {
     const report = await running
     expect(report.statuses).toEqual({ a: 'done' })
     expect(answersOf(r)).toEqual([{ effect_id: 'retry:a:1', answer: 'retry', unattended: true }])
+    expectDrained(r)
+  })
+
+  /**
+   * The observed run: three phases failed their base gate 37 to 40 times
+   * each, retried a minute apart, a full suite every time, on the same
+   * one-line break between two dependencies whose tips never moved.
+   */
+  it('stops retrying a red base unattended once it has failed twice on the same inputs, until they move', async () => {
+    class BaseGateError extends Error {
+      override name = 'BaseGateError'
+    }
+    let tip = 'p3@aaaaaaa'
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      setupInputs: () => ({ key: tip, label: tip }),
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        if (tip === 'p3@aaaaaaa') throw new BaseGateError('the base of a merged, but gate "unit" failed on it (exit 1)')
+      },
+    })
+
+    const running = r.scheduler.run()
+    // The automatic retry runs once — a flaky test gets its second chance.
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after two attempts')
+    expect(attempt).toBe(2)
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('2 times in a row on the same inputs (p3@aaaaaaa)')
+
+    // Windows pass and the inputs stay put: nothing retries.
+    await r.advance(60_000 * 30)
+    expect(attempt).toBe(2)
+    expect(answersOf(r)).toEqual([])
+
+    // A dependency moves: the watch retries it, unattended.
+    tip = 'p3@bbbbbbb'
+    await r.advance(60_000)
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(attempt).toBe(3)
+    expect(answersOf(r)).toEqual([{ effect_id: 'retry:a:1', answer: 'retry', unattended: true }])
+    expectDrained(r)
+  })
+
+  it('keeps retrying unattended while the inputs move between failures', async () => {
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      setupInputs: () => ({ key: `tip-${attempt}`, label: `p3@${attempt}` }),
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        if (attempt <= 2) throw new GitCommandError('checkout', 1, `error ${attempt}`)
+      },
+    })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+    expect(questionsOf(r, 'a')[0]?.question).not.toContain('same inputs')
+    await r.advance(60_000)
+    expect((await running).statuses).toEqual({ a: 'done' })
     expectDrained(r)
   })
 

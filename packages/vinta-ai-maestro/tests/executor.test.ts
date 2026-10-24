@@ -1887,6 +1887,23 @@ describe('the git verbs', () => {
       expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
     })
 
+    it('names a phase’s setup inputs by its dependencies’ tips, and moves the key when one moves', async () => {
+      const rig = setup(gatedDiamond('true'))
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      const before = await rig.executor.setupInputs('p3')
+      expect(before?.label).toMatch(/phase-p1@[0-9a-f]{10}/)
+      expect(before?.label).toMatch(/phase-p2@[0-9a-f]{10}/)
+      expect(await rig.executor.setupInputs('p3')).toEqual(before)
+
+      const lane = rig.lanes[0] as ExecutorLane
+      writeFileSync(join(lane.path, 'fix.txt'), 'the cross-phase fix\n')
+      execFileSync('git', ['add', 'fix.txt'], { cwd: lane.path })
+      execFileSync('git', ['commit', '-q', '-m', 'fix'], { cwd: lane.path })
+      const after = await rig.executor.setupInputs('p3')
+      expect(after?.key).not.toBe(before?.key)
+    })
+
     /**
      * Reported as "a regression between" the dependencies three times out of
      * three in one run; one was a worker database missing two columns.
