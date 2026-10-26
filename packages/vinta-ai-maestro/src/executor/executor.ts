@@ -22,6 +22,7 @@
  * | verb | facts | who reads it |
  * |---|---|---|
  * | `spawn_agent` (`verdict: true`) | `review.verdict` — `'pass'` \| `'fail'` | the scheduler's `run_chore`, which states it for `t-review-pass` / `t-review-fail` |
+ * | `spawn_agent` (`report: true`) | `node.report` — `'success'` \| `'failure'`, absent when the turn stated neither | the scheduler's `run_chore`, which journals a chore that reported FAILURE as `failed` |
  * | `spawn_agent` (otherwise) | none | — |
  * | `run_gate` | `gate.id`, `gate.exit_code`, `gate.status`, `gate.cached`, `gate.log_ref` | `t-gate-pass` / `t-gate-fail`, `t-verify-*` |
  * | `git_branch` | none | — |
@@ -84,6 +85,7 @@ import {
 import { gateConfigKey, laneTreeHash, type GateCache } from '../gates/cache.ts'
 import { changedFiles, choosePhaseGate } from '../gates/scope.ts'
 import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
+import { failedChores } from '../chores.ts'
 import { computeWaves, transitiveDependents } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
 import type { Integrator } from '../integration/integrator.ts'
@@ -93,7 +95,7 @@ import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome, SetupInputs } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
-import { readVerdict, resolveBrief } from '../prompts/index.ts'
+import { readReportStatus, readVerdict, resolveBrief } from '../prompts/index.ts'
 import { looksStale, staleSchemaNote, type IntegrationFreshness } from '../integration/fresh.ts'
 import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
 import type { IntegrationStepPayload, SystemOneJudge } from '../journal/events.ts'
@@ -376,14 +378,19 @@ export class RunEffectExecutor implements EffectExecutor {
 
     switch (invocation.effect.definitionId) {
       case 'spawn_agent':
-        return params['verdict'] === true ? { facts: { review: this.#verdict(nodeId) } } : {}
+        if (params['verdict'] === true) return { facts: { review: this.#verdict(nodeId) } }
+        if (params['report'] === true) {
+          const report = this.#reportStatus(nodeId)
+          return report === undefined ? {} : { facts: { node: { report } } }
+        }
+        return {}
       case 'run_gate':
         return await this.#runGate(nodeId, params)
       case 'run_chore':
         // The turns are already run: the scheduler owns spawning, exactly as it
         // does for `spawn_agent`, and reaches here on the way out. What a chore
-        // did is in the diff, the transcript and its `chore_result` row; the
-        // one fact a chore states, a review's verdict, came back from its turn.
+        // did is in the diff, the transcript and its `chore_result` row; what a
+        // chore states — a review's verdict, a report's status — came back from its turn.
         return {}
       case 'git_branch':
         return await this.#branch(nodeId, params)
@@ -433,6 +440,26 @@ export class RunEffectExecutor implements EffectExecutor {
       if (stated !== undefined) return { verdict: stated }
     }
     return fallback
+  }
+
+  /**
+   * What a chore turn reported on its `Status:` line. Observed: a review-canvas
+   * chore whose `pr-review prepare` failed twice reported `Status: FAILURE`, and
+   * was journalled `ran`, so nothing anywhere said its PR had no canvas.
+   *
+   * A turn that errored is a chore that did not finish, so `failure`. One that
+   * ended cleanly and stated neither is left unanswered rather than guessed:
+   * unlike a review, nothing merges on a chore's word, and a polish pass that
+   * forgot its report line is not a failed one.
+   */
+  #reportStatus(nodeId: string): 'success' | 'failure' | undefined {
+    const turn = this.#lastTurn(nodeId)
+    if (!turn.ok) return 'failure'
+    for (const text of turn.texts) {
+      const stated = readReportStatus(text)
+      if (stated !== undefined) return stated
+    }
+    return undefined
   }
 
   /**
@@ -1491,6 +1518,7 @@ export class RunEffectExecutor implements EffectExecutor {
       head: integrator.waveBranch(wave),
       steps,
       unattended: unattendedDecisions(events).map((entry) => describeUnattended(entry, { details, published: true })),
+      failedChores: failedChores(events),
     })
   }
 

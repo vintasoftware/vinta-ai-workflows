@@ -76,6 +76,27 @@ export function readVerdict(text: string): 'pass' | 'fail' | undefined {
   return stated.toLowerCase() === 'pass' ? 'pass' : 'fail'
 }
 
+/** The line a non-review chore reports its outcome on, and the one `executor.ts` reads. */
+export const REPORT_STATUS_MARKER = 'Status:'
+
+/**
+ * Matched against the chore turn's own last words, never stored. Tolerates the
+ * markdown agents wrap a report line in — `- **Status:** FAILURE` — because a
+ * report that said FAILURE in bold is still a report that said FAILURE.
+ */
+const REPORT_STATUS_PATTERN = /\bstatus\b\**\s*[:=]\s*\**\s*(success|failure)\b/i
+
+/**
+ * The outcome a chore turn reported, or `undefined` when it reported none. The
+ * one definition of the protocol, as `readVerdict` is for a review: the chore
+ * prompt asks for what this accepts.
+ */
+export function readReportStatus(text: string): 'success' | 'failure' | undefined {
+  const stated = REPORT_STATUS_PATTERN.exec(text)?.[1]
+  if (stated === undefined) return undefined
+  return stated.toLowerCase() === 'success' ? 'success' : 'failure'
+}
+
 /**
  * What a review session is sent when its turn ended without a `VERDICT:` line
  * (`Scheduler.#askForVerdict`). Into the same session, which holds the review
@@ -1900,7 +1921,8 @@ function choreOutput(chore: ChoreMaterials): string[] {
   return [
     '',
     '## Required output',
-    `- Status: SUCCESS or FAILURE, and why. "Nothing to do for ${chore.id}" is SUCCESS.`,
+    `- ${REPORT_STATUS_MARKER} SUCCESS or FAILURE, and why. "Nothing to do for ${chore.id}" is SUCCESS;`,
+    '  a chore that could not do its job is FAILURE, and the orchestrator records it as failed.',
     ...(chore.when === 'after_pr'
       ? ['- Any links the chore produced (a comment, a review URL).']
       : ['- Files modified, paths only.']),

@@ -3934,6 +3934,22 @@ describe('after_pr chores', () => {
     expectDrained(r)
   })
 
+  /** Observed: a canvas whose `pr-review prepare` failed twice was journalled `ran`. */
+  it('records a canvas whose report said FAILURE as failed', async () => {
+    const PR = { facts: { pr: { opened: true, url: 'https://github.com/acme/app/pull/7', number: 7 } } }
+    const r = rig(
+      standardWorkflow([node('a', [], { gates: ['unit'], chores: ['canvas'] })], {
+        canvas: { prompt: 'Post a review canvas.', skill: 'pr-review-canvas', when: 'after_pr' },
+      }),
+      { outcomes: { ...APPROVED, 'e-pr': PR, 'e-pr-chores:canvas': { facts: { node: { report: 'failure' } } } } },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(choresOf(r, 'a')).toEqual([{ chore: 'canvas', status: 'failed', duration_ms: expect.any(Number) }])
+    expectDrained(r)
+  })
+
   it('is skipped, and the phase still done, when no PR opened', async () => {
     const r = prChoreRig({ opened: false })
     const report = await r.scheduler.run()
@@ -4061,6 +4077,39 @@ describe('chores', () => {
       { chore: 'deslop', status: 'failed', duration_ms: expect.any(Number) },
       { chore: 'changelog', status: 'ran', duration_ms: expect.any(Number) },
     ])
+    expectDrained(r)
+  })
+
+  it('records a chore whose report said FAILURE as failed, and leaves the phase done', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop', 'changelog'] })], {
+        chores: CHORE_SET,
+      }),
+      { outcomes: { 'e-chores:deslop': { facts: { node: { report: 'failure' } } } } },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'failed', duration_ms: expect.any(Number) },
+      { chore: 'changelog', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+    // Every chore turn is asked for its report; nothing else is.
+    const asked = r.calls.filter((call) => call.verb === 'spawn_agent').map((call) => call.params['report'])
+    expect(asked).toEqual([undefined, true, true])
+    expectDrained(r)
+  })
+
+  it('fails the phase when a chore that said to reports FAILURE', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['required'] })], {
+        chores: { required: { prompt: 'Do the thing.', on_failure: 'fail' } },
+      }),
+      { outcomes: { 'e-chores:required': { facts: { node: { report: 'failure' } } } } },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
     expectDrained(r)
   })
 

@@ -4164,6 +4164,9 @@ export class Scheduler {
    * review chore passes.
    *
    * **Any other chore that fails does not fail the phase**, unless it says to.
+   * Failing is a turn that broke or one whose report said `Status: FAILURE`;
+   * either is journalled `failed`, and `status`, the plan PR and the
+   * post-mortem list it, so a PR left without its canvas is not a secret.
    * The default exists because of what the alternative costs: the phase is
    * written, reviewed and about to be gated, and throwing that away because a
    * comment pass timed out is a far worse trade than merging comments nobody
@@ -4234,7 +4237,7 @@ export class Scheduler {
             prompt_template: 'chore',
             session: entry.chore.session,
             ...(entry.chore.model === undefined ? {} : { model: entry.chore.model }),
-            ...(review ? { verdict: true } : {}),
+            ...(review ? { verdict: true } : { report: true }),
           },
         },
       }
@@ -4247,6 +4250,11 @@ export class Scheduler {
           stated = outcome.facts?.review?.['stated'] !== false
           await this.#countRejection(state)
           break
+        }
+        // Thrown so the catch below decides, exactly as for a turn that broke:
+        // `on_failure: fail` fails the phase, anything else records it failed.
+        if (!review && outcome.facts?.node?.['report'] === 'failure') {
+          throw new SpawnFatal(`chore ${entry.id} reported FAILURE`)
         }
         this.#choreResult(state, entry.id, 'ran', startedAt)
       } catch (error) {

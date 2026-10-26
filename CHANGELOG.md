@@ -954,6 +954,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: a chore that reports `Status: FAILURE` is recorded
+  as failed.** Before, every chore except a review was journalled `ran` as
+  soon as its turn returned. A review canvas whose `pr-review prepare` failed
+  twice read as `ran`, and nothing said its PR had no canvas. Now:
+  - Every non-review chore's `Status:` line is read the same way a review's
+    `VERDICT:` line is. A turn that errored also counts as a failure. A turn
+    that ends cleanly with no status line is still `ran`.
+  - A failure is journalled `chore_result` `failed`. The phase is still
+    `done` unless the chore declares `on_failure: fail`. In that case a
+    reported FAILURE now fails the phase, as a broken turn already did.
+  - Failed chores are listed in `status` (and its `--json` output as
+    `failedChores`), in the plan PR body under **Chores that failed**, and in
+    the post-mortem as `findings.failed_chores`. That last field is a new
+    optional field of `postmortem.v1`. The plan PR lists only the chores that
+    had failed when it opened. The last phase's own `after_pr` chores run
+    after it opens, so they appear only in `status` and the post-mortem.
 - **`vinta-ai-maestro`: the coordinator's wakes are more specific.**
   - The `gate_cost` wake lists uncached minutes per phase and flags any
     single run of 20 minutes or more as probably a cold lane. Runs of a

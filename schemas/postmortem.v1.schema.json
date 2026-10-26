@@ -1051,6 +1051,38 @@
           ],
           "additionalProperties": false,
           "description": "Every decision made with nobody watching. A plan whose run decided much on its own left those choices to chance: a design question answered unattended belonged in the plan."
+        },
+        "failed_chores": {
+          "description": "Chores that did not do their job, oldest first. Empty means every chore that ran succeeded.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "chore": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When its last turn on that phase failed."
+              }
+            },
+            "required": [
+              "node",
+              "chore",
+              "at_ms"
+            ],
+            "additionalProperties": false,
+            "description": "A chore whose last turn on a phase failed — the turn broke, or its report said `Status: FAILURE`. The phase is merged regardless (`on_failure: continue`), so whatever the chore was meant to leave, a review canvas or a PR comment, is missing from it."
+          }
         }
       },
       "required": [

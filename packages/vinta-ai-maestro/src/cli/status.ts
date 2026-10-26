@@ -20,6 +20,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { failedChores } from '../chores.ts'
 import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
 import { describeStep } from '../journal/integration-steps.ts'
@@ -193,6 +194,8 @@ function showRun(
   // questions and plan questions a timer or the coordinator answered.
   const decided = unattendedDecisions(journal.events(runId))
   const details = runAgentDetails(journal, runId)
+  // A failed chore leaves its phase `done`, so the table alone says nothing.
+  const choresFailed = failedChores(journal.events(runId))
   const crewNote = (nodeId: string): string => {
     const row = substituted.get(nodeId)
     if (row === undefined) return ''
@@ -239,6 +242,7 @@ function showRun(
           substitution: substituted.get(node.node_id) ?? null,
         })),
         unattended: decided.map((entry) => ({ ...entry, summary: describeUnattended(entry, { details }) })),
+        failedChores: choresFailed,
       }),
     )
     return OK
@@ -271,6 +275,11 @@ function showRun(
   )
   io.out('')
   if (worktree !== null && (worktree.holder !== null || worktree.queue.length > 0)) io.out(integrationLine(worktree))
+  if (choresFailed.length > 0) {
+    io.out(`Chores that failed (${choresFailed.length}):`)
+    for (const entry of choresFailed) io.out(`  ${new Date(entry.at).toLocaleString()}  ${entry.node}: ${entry.chore}`)
+    io.out('')
+  }
   if (decided.length > 0) {
     io.out(`Decided without you (${decided.length}):`)
     for (const entry of decided) io.out(`  ${new Date(entry.at).toLocaleString()}  ${describeUnattended(entry, { details })}`)
