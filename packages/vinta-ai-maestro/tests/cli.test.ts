@@ -2943,6 +2943,30 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
     ])
   })
 
+  it('lists the chores that failed, though their phases are done', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'chores')
+    const journal = openJournal(dir)
+    journal.append({
+      runId: 'chores',
+      nodeId: 'b',
+      type: 'chore_result',
+      payload: { chore: 'review-canvas', status: 'failed', duration_ms: 1000 },
+    })
+    journal.close()
+
+    const io = recorder()
+    expect(await statusCommand(['chores', '--repo', dir], io.io)).toBe(OK)
+    const out = io.out.join('\n')
+    expect(out).toContain('Chores that failed (1):')
+    expect(out).toMatch(/b: review-canvas/)
+    const json = recorder()
+    expect(await statusCommand(['chores', '--repo', dir, '--json'], json.io)).toBe(OK)
+    expect(JSON.parse(json.out.join('')).failedChores).toEqual([
+      { node: 'b', chore: 'review-canvas', at: expect.any(Number) },
+    ])
+  })
+
   it('shows a phase staffed above its plan, and on whom', async () => {
     // 73 substitutions in one run, 24 of them a tier or two dearer than
     // planned, and `status` showed every one of those phases as just `running`.

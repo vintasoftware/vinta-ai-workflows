@@ -664,6 +664,21 @@ describe('what was done to the run', () => {
       { wave: 2, gate: 'unit', members: ['p2', 'p3'], at_ms: T0 + 24 * MIN, exit_code: 1 },
     ])
   })
+
+  it('reports the chores whose last turn on a phase failed', () => {
+    // p2's canvas failed and stayed failed. p3's deslop failed, then the
+    // phase was retried and the next turn made it good: nothing to act on.
+    const chore = (ts: number, nodeId: string, name: string, status: 'ran' | 'failed') =>
+      tape.push(ts, { runId: RUN, nodeId, type: 'chore_result', payload: { chore: name, status, duration_ms: 1000 } })
+    const tape = cleanTape()
+    chore(T0 + 20 * MIN, 'p3', 'deslop', 'failed')
+    chore(T0 + 21 * MIN, 'p2', 'review-canvas', 'failed')
+    chore(T0 + 22 * MIN, 'p3', 'deslop', 'ran')
+    expect(report_(tape).findings.failed_chores).toEqual([
+      { node: 'p2', chore: 'review-canvas', at_ms: T0 + 21 * MIN },
+    ])
+    expect(report_(cleanTape()).findings.failed_chores).toEqual([])
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -190,6 +190,14 @@ describe('the plan PR', () => {
     expect(body).toContain('… and 2 more: `vinta-ai-maestro status run-7` lists them all.')
   })
 
+  it('lists the chores that failed, so a PR without its canvas is not a secret', () => {
+    const base = { runId: 'run-7', planId: 'x', baseBranch: 'main', head: 'plan/x/wave-2', steps: [] }
+    expect(composePlanPrBody(base).body).not.toContain('## Chores that failed')
+    const body = composePlanPrBody({ ...base, failedChores: [{ node: 'p8', chore: 'review-canvas' }] }).body
+    expect(body).toContain('## Chores that failed')
+    expect(body).toContain('- phase `p8`: `review-canvas`')
+  })
+
   it('is the one PR to merge, and lists the review units it carries', () => {
     const text = composePlanPrBody({
       runId: 'run-7',

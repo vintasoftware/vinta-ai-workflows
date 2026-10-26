@@ -17,6 +17,7 @@
  * A resolver that threw would turn an authoring mistake into a phase that dies
  * mid-run, long after the document could have been fixed.
  */
+import type { StoredEvent } from './journal/events.ts'
 import type { Chore, ChoreTiming, Node, Workflow } from './types.ts'
 
 /** The chore ids this node runs, in order, before any of them are resolved. */
@@ -51,4 +52,31 @@ export function choresFor(
     if (chore === undefined) return []
     return when === undefined || chore.when === when ? [{ id, chore }] : []
   })
+}
+
+/** A chore whose last turn on a phase failed, and when. */
+export interface FailedChore {
+  readonly node: string
+  readonly chore: string
+  readonly at: number
+}
+
+/**
+ * Every chore whose latest `chore_result` on its phase is `failed`, oldest
+ * first. Latest, because a phase that was retried runs its chores again, and a
+ * failure the next attempt's turn made good is not one anybody has to act on.
+ *
+ * `status`, the plan PR and the post-mortem all list these. A failed chore does
+ * not fail its phase (`on_failure: continue`), so this list is the only place
+ * a PR left without the canvas its plan asked for shows up at all.
+ */
+export function failedChores(events: readonly StoredEvent[]): readonly FailedChore[] {
+  const latest = new Map<string, FailedChore & { readonly failed: boolean }>()
+  for (const event of events) {
+    if (event.type !== 'chore_result') continue
+    const key = `${event.nodeId}\u0000${event.payload.chore}`
+    latest.delete(key)
+    latest.set(key, { node: event.nodeId, chore: event.payload.chore, at: event.ts, failed: event.payload.status === 'failed' })
+  }
+  return [...latest.values()].filter((entry) => entry.failed).map(({ node, chore, at }) => ({ node, chore, at }))
 }

@@ -81,6 +81,8 @@ import {
   CrossPhaseFailureSchema,
   crewSubstitutions,
   crossPhaseFailures,
+  FailedChoreSchema,
+  failedChores,
   FailureCauseSchema,
   failureCauses,
   journalConflicts,
@@ -431,6 +433,10 @@ export const PostMortemSchema = z
       operations: OperationsSchema.optional(),
       cross_phase_failures: z.array(CrossPhaseFailureSchema).optional(),
       unattended_decisions: UnattendedDecisionsSchema.optional(),
+      failed_chores: z
+        .array(FailedChoreSchema)
+        .optional()
+        .describe('Chores that did not do their job, oldest first. Empty means every chore that ran succeeded.'),
     }),
     gaps: z.array(PostMortemGapSchema),
   })
@@ -701,6 +707,7 @@ export function postMortem(
         workflow.nodes.filter((node) => waves.get(node.id) === wave).map((node) => node.id),
       ),
       unattended_decisions: unattendedDecisions(events),
+      failed_chores: failedChores(events),
     },
     gaps: gaps(workflow, traces, selfChanges),
   } satisfies PostMortem)

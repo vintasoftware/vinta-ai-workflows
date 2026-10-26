@@ -20,6 +20,7 @@
  */
 import { z } from 'zod'
 
+import { failedChores as foldFailedChores } from '../chores.ts'
 import { unattendedDecisions as foldUnattended } from '../decisions/unattended.ts'
 import type { StoredEvent } from '../journal/events.ts'
 
@@ -213,10 +214,23 @@ export const CrossPhaseFailureSchema = z
       'dependency or a missing contract test that `missing_dependencies`’ ordering cannot see.',
   )
 
+export const FailedChoreSchema = z
+  .strictObject({
+    node: Id,
+    chore: Id,
+    at_ms: z.number().int().describe('When its last turn on that phase failed.'),
+  })
+  .describe(
+    'A chore whose last turn on a phase failed — the turn broke, or its report said ' +
+      '`Status: FAILURE`. The phase is merged regardless (`on_failure: continue`), so whatever ' +
+      'the chore was meant to leave, a review canvas or a PR comment, is missing from it.',
+  )
+
 export type FailureCause = z.infer<typeof FailureCauseSchema>
 export type CrewSubstitution = z.infer<typeof CrewSubstitutionSchema>
 export type Operations = z.infer<typeof OperationsSchema>
 export type CrossPhaseFailure = z.infer<typeof CrossPhaseFailureSchema>
+export type FailedChoreFinding = z.infer<typeof FailedChoreSchema>
 export type UnattendedDecisions = z.infer<typeof UnattendedDecisionsSchema>
 
 export interface JournalConflict {
@@ -450,6 +464,11 @@ export function crossPhaseFailures(
     found.push({ wave, gate: String(payload['gate']), members: [...members], at_ms: event.ts, exit_code: exitCode })
   }
   return found
+}
+
+/** Chores whose last turn on their phase failed, oldest first. */
+export function failedChores(events: readonly StoredEvent[]): FailedChoreFinding[] {
+  return foldFailedChores(events).map(({ node, chore, at }) => ({ node, chore, at_ms: at }))
 }
 
 function bounded(text: string): string {

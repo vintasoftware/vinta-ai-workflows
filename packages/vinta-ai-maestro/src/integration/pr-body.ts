@@ -311,6 +311,8 @@ export interface PlanFacts {
    * (`describeUnattended` with `published`).
    */
   readonly unattended?: readonly string[]
+  /** Chores whose latest turn failed, as `failedChores` folds them. */
+  readonly failedChores?: readonly { readonly node: string; readonly chore: string }[]
 }
 
 /** The most unattended decisions a plan PR lists before pointing at `status`. */
@@ -360,6 +362,19 @@ export function composePlanPrBody(facts: PlanFacts): PrText {
       const link = step.url === undefined ? '(no PR opened)' : step.url
       lines.push(`- ${what}: ${link} — \`${step.head}\` into \`${step.base}\``)
     }
+  }
+
+  const failed = facts.failedChores ?? []
+  if (failed.length > 0) {
+    lines.push(
+      '',
+      '## Chores that failed',
+      '',
+      'These phases are merged, but a chore the plan asked of them did not do its job. Whatever it was ' +
+        'meant to leave — a review canvas, a PR comment, a tidy-up — is missing.',
+      '',
+    )
+    for (const entry of failed) lines.push(`- phase \`${entry.node}\`: \`${entry.chore}\``)
   }
 
   const decided = facts.unattended ?? []

@@ -47,7 +47,7 @@ import type {
 } from '../src/harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
-import { VERDICT_MARKER } from '../src/prompts/index.ts'
+import { REPORT_STATUS_MARKER, VERDICT_MARKER } from '../src/prompts/index.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import { Integrator } from '../src/integration/integrator.ts'
@@ -765,6 +765,31 @@ describe('the review verdict', () => {
 
     expect((await spawn(rig, { role: 'chore' })).facts).toBeUndefined()
     expect((await spawn(rig, { role: 'fixer' })).facts).toBeUndefined()
+  })
+
+  /**
+   * Observed: a review-canvas chore whose `pr-review prepare` failed twice
+   * reported `Status: FAILURE`, and was journalled `ran`.
+   */
+  it('reads the status a chore turn reported, markdown and all', async () => {
+    const rig = setup(onePhase)
+    turn(rig, `${REPORT_STATUS_MARKER} FAILURE — pr-review prepare failed twice.`)
+    expect((await spawn(rig, { role: 'chore', report: true })).facts).toEqual({ node: { report: 'failure' } })
+
+    turn(rig, '- **Status:** SUCCESS — canvas posted.')
+    expect((await spawn(rig, { role: 'chore', report: true })).facts).toEqual({ node: { report: 'success' } })
+
+    turn(rig, '- Status: **FAILURE**: no PR number.')
+    expect((await spawn(rig, { role: 'chore', report: true })).facts).toEqual({ node: { report: 'failure' } })
+  })
+
+  it('reports a chore turn that errored as a failure, and one that stated nothing as nothing', async () => {
+    const rig = setup(onePhase)
+    turn(rig, `${REPORT_STATUS_MARKER} SUCCESS`, 'error')
+    expect((await spawn(rig, { role: 'chore', report: true })).facts).toEqual({ node: { report: 'failure' } })
+
+    turn(rig, 'Comments tidied.')
+    expect((await spawn(rig, { role: 'chore', report: true })).facts).toBeUndefined()
   })
 }, REAL_RUN_TIMEOUT_MS)
 
