@@ -954,6 +954,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`plan-feature`: plans have fewer, longer phases.** Re-derive the skill to
+  pick this up. A plan drawn before the change is still valid as written.
+  - The phase size ceiling rises from 1500 to 4000 LoC, tests included. The
+    sub-phase trigger moves from 300 LoC to that same ceiling.
+  - The Step 0 **Phase granularity** default flips to bundling
+    closely-related use-cases into one phase, such as CRUD on one entity or
+    two use-cases on one endpoint. One use-case per phase is still available
+    as the opt-in answer, for teams that review best in small PRs.
+  - A phase of a few hundred lines has to justify standing alone, by a
+    different repo, wave or concern. Otherwise it folds into a neighbour.
+    Independent seams become parallel phases only when each side is
+    substantial.
 - **`vinta-ai-maestro`: a chore that reports `Status: FAILURE` is recorded
   as failed.** Before, every chore except a review was journalled `ran` as
   soon as its turn returned. A review canvas whose `pr-review prepare` failed

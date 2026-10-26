@@ -61,7 +61,7 @@ Never flatten ten questions into one prose paragraph just because tool unavailab
 ### B. Scope & non-goals
 1. **Explicitly out of scope** for v1? Force non-goals list — where most plans drift.
 2. v1.x / v2 already implied? Name it so we don't bake assumptions into v1's data model.
-3. **Phase granularity:** one phase per spec use-case (more, smaller PRs) or allow bundling closely-related use-cases (fewer, larger phases)? **Default: one use-case per phase** — confirm or override. Drives the "One use-case per phase" rule under **Phase structure**.
+3. **Phase granularity:** bundle closely-related use-cases into one phase (fewer, larger phases) or one phase per spec use-case (more, smaller PRs)? **Default: bundle related use-cases** — confirm or override. Say one-per-use-case when the team reviews best in small PRs or wants per-use-case rollback. Drives the "Phase granularity" rule under **Phase structure**.
 4. **Hard sequencing constraints:** anything that *must* land before something else for a reason the code doesn't show — a deploy window, a data backfill that has to finish first, an external team's review, a contract another repo is already coding against? Name them. Everything else gets its dependency edge from the code itself (see **Phase dependencies and parallel execution**), and the executor runs whatever is independent at the same time.
 5. **Parallelism appetite:** is the team fine with several phases being implemented concurrently — several open PRs at once, several branches in flight, reviewers seeing a fan of PRs instead of a chain? **Default: yes.** Say no when review capacity is the bottleneck rather than implementation, or when the repo has a merge queue that serializes anyway.
 
@@ -186,7 +186,7 @@ Don't invent new top-level sections. Skip non-applicable (e.g. omit "API Design"
 ### Naming: numbers + letters, consistently
 
 - **Top-level**: `Phase 1`, `Phase 2`, …
-- **Sub-phases (concern too big for one MR)**: `Phase 2a`, `Phase 2b`, `Phase 2c`. Use when one logical phase produces >300 LoC PR.
+- **Sub-phases (concern too big for one MR)**: `Phase 2a`, `Phase 2b`, `Phase 2c`. Use when one logical phase would produce a >4000 LoC PR.
 - **Parallel-track (different repo, different team, runs alongside)**: `Phase 1b`. Letter signals "different lane, same time", not "comes after".
 - **Foundation phase**: `Phase 0` for pure scaffolding (new app skeleton, no behavior change). Optional.
 - Consistent inside one plan: don't mix `Phase 2.1` with `Phase 3a`.
@@ -264,7 +264,7 @@ Two habits pay for themselves:
 - **Front-load shared scaffolding into a wave-1 foundation phase.** Types, the migration, the empty module, the fixture. Every use-case phase then depends only on that one phase, and they all run at once, instead of forming a chain.
 - **Pin every interface two parallel phases share with a contract test in that foundation phase.** A signal payload one phase sends and another receives, a protocol or ABC one implements and another calls, a DI provider one registers and another injects, an event schema, a serializer shape. Write the test that states the contract (the keyword arguments a receiver requires, the methods an implementation must have) into the foundation phase, so each parallel phase's own gates run it on its own branch. Without it, two phases can each be green alone and disagree with each other: one observed run had a sender omit an `organization_id` its sibling's receiver required, and the merged wave failed 22 tests that no phase's gate could have seen. The executor also runs the plan's gates once on the merged tree before the plan PR (`defaults.wave_gates`), but that catches the disagreement at the end, when it costs a rework of both phases.
 - **A rename of a shared symbol is an interface change too.** A phase that renames a function, class, module or field that a same-wave sibling also touches either does the rename in the foundation phase, or keeps the old name as an alias (a re-export, a thin wrapper, a deprecated property) until the whole wave has landed, and a later phase removes the alias. Otherwise the sibling adds a new call to the old name on its own branch: one observed run had a phase add a call to a private helper while its sibling renamed it, each passed every gate alone, and the merged wave failed the typecheck. Say which of the two the plan does in the renaming phase's body, and put the alias's removal in a phase that depends on every phase of that wave.
-- **Split by seam, not by layer, when the seams are independent.** Four use-cases on the same entity are four independent phases if they only share the model. Four layers of one use-case (repository → service → serializer → view) are a chain no matter how you number them.
+- **Split by seam, not by layer, when the seams are independent and each side is substantial.** Four use-cases on the same entity *can* be four parallel phases if they only share the model, and that pays when each is hundreds of lines. When they are small, one phase carrying all four is cheaper: one review, one gate run, one integration. Four layers of one use-case (repository → service → serializer → view) are a chain no matter how you number them, so they belong in one phase.
 
 Don't contort the plan for concurrency, though. A genuinely sequential feature is a chain of waves of one, and that is a correct plan.
 
@@ -301,24 +301,22 @@ Rules for using them:
 
 ### Each phase MR-sized
 
-Reviewer should read ≤1500 LoC + understand in isolation. Guidelines:
+Reviewer should read ≤4000 LoC + understand in isolation. Guidelines:
 
-- **Target**: Up to 1500 LoC (tests included).
-- **One concern per phase.** "Add field + write migration + wire into 4 use cases + update 3 SQL views" = four phases.
+- **Target**: Up to 4000 LoC (tests included). That is a ceiling, not a quota, but plan towards it: prefer fewer, longer phases over many short ones. Every phase costs a PR, a review loop, a gate run and an integration step, so a phase under a few hundred lines needs a reason to stand alone (a different repo, a different wave, a risky change that wants its own rollback). Otherwise fold it into its neighbour.
+- **One coherent concern per phase.** "Add field + write migration + wire into the 4 use cases that read it" is one concern, so one phase. "…+ rewrite 3 unrelated SQL views" adds a second concern a reviewer has to load separately, so that part is its own phase.
 - **Independently mergeable.** Phase N merged + Phase N+1 stalled → system still working. No half-finished features behind flag with no flag-on path.
 - **Own tests.** Every phase ships unit/integration tests. No "tests come in Phase 8."
 - **Acceptance criterion.** Each phase ends with one-line "Acceptance:" — literally testable.
 
-### One use-case per phase (default — confirm in Step 0)
+### Phase granularity (confirm in Step 0)
 
-**Default ON.** Skip only when the Step 0 **Phase granularity** answer opted into bundling. When on: every spec use-case (entries under **Decisions → Use-cases** in the SPEC) gets **its own phase**. Never bundle two use-cases in one phase even when the diff is tiny. Bundling = larger PR + reviewer needs context for both flows + rollback drags both. Cost of an extra phase = one PR header. Cost of a bundled regression = hotfix + split-after-the-fact.
+**Default: bundle closely-related use-cases.** Group the spec use-cases (entries under **Decisions → Use-cases** in the SPEC) that touch the same entity, endpoint or flow into one phase: CRUD on one entity, two use-cases sharing an endpoint, a use-case and the edge-case branch it grows. Each grouped phase still stays MR-sized (≤4000 LoC), one coherent concern, independently mergeable, with its own tests + acceptance, and its **Spec use-case** line names every use-case it implements. Bundling is a granularity dial, not a license for kitchen-sink phases: use-cases that share nothing but the feature name stay in separate phases, and so do use-cases on independent seams that are each large enough to be worth running in parallel (see "Design *for* parallelism").
 
-When on, apply even when:
+**If the user chose one use-case per phase** (Step 0): every spec use-case gets **its own phase**. Never bundle two use-cases in one phase even when the diff is tiny. Bundling = larger PR + reviewer needs context for both flows + rollback drags both. Cost of an extra phase = one PR header. Cost of a bundled regression = hotfix + split-after-the-fact. Apply even when:
 - Two use-cases share the same endpoint — split anyway, the second phase is "wire use-case 2 into the existing endpoint." Reviewer reads ≤50 LoC.
 - Use-cases are CRUD on same entity — Create / Read / Update / Delete are four phases, not one.
 - "It's just one extra branch" — that branch hides edge cases. Separate phase forces explicit acceptance + tests for that branch.
-
-**If the user opted into bundling** (Step 0): group closely-related use-cases into one phase where it reduces churn, but each phase still stays MR-sized (≤1500 LoC), one concern, independently mergeable, with its own tests + acceptance. Bundling is a granularity dial, not a license for kitchen-sink phases.
 
 Cross-cutting infra (shared types, migration, scaffolding) lands in a foundation phase before the use-case phases. Each subsequent use-case phase consumes that scaffolding.
 
@@ -354,7 +352,7 @@ Changes:
 2. {Next thing}.
 3. ...
 
-Spec use-case: {SPEC **Decisions → Use-cases** id/name this phase implements, or "shared scaffolding — no use-case yet"}.
+Spec use-case: {SPEC **Decisions → Use-cases** id/name(s) this phase implements, or "shared scaffolding — no use-case yet"}.
 
 Tests:
 - **Unit**: {file path} — {what it covers}.
@@ -1198,7 +1196,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - wire a cross-repo producer (`Phase 1b` parallel to in-repo phases) with an "API contract first, persist later" rollout;
 - split a large mutation phase into `4a/4b/4c/4d` sub-phases;
 - stay small + sharply scoped by following an existing precedent on the same entity;
-- use a feature-flagged staged rollout across many small phases.
+- use a feature-flagged staged rollout across a few substantial phases.
 
 ## Checklist
 
@@ -1206,9 +1204,9 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Filename: `ai-plans/{TODAY}-{FEATURE_NAME}_IMPLEMENTATION_PLAN.md`.
 - [ ] **Goals + Non-goals** section present.
 - [ ] **Guiding Decisions** table — each row has *why*.
-- [ ] Phases MR-sized (≤1500 LoC) + independently mergeable.
+- [ ] Phases MR-sized (≤4000 LoC) + independently mergeable, and no phase of a few hundred lines that could fold into a neighbour without crossing a repo, a wave or a concern.
 - [ ] Phase numbering uses numbers + letters consistently.
-- [ ] **Phase granularity matches the Step 0 answer.** Default (one-use-case-per-phase): at least one phase per spec use-case, no phase implements two use-cases. If bundling was chosen: grouped phases stay MR-sized, one concern, independently mergeable. Cross-cutting scaffolding is its own foundation phase either way.
+- [ ] **Phase granularity matches the Step 0 answer.** Default (bundling): closely-related use-cases share a phase, grouped phases stay MR-sized, one concern, independently mergeable, and each names every use-case it implements. If one-use-case-per-phase was chosen: at least one phase per spec use-case, no phase implements two use-cases. Cross-cutting scaffolding is its own foundation phase either way.
 - [ ] Each phase has Goal / **Depends on** / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / **Assigned to** / Reusable skills / Acceptance.
 - [ ] Every `**Depends on**:` entry names the artifact it needs (model, symbol, migration, endpoint) — no bare phase ids, no "comes first" edges.
 - [ ] **Execution graph** table is the first thing under **Phased Rollout**, and its waves match what the `**Depends on**:` lines imply.
