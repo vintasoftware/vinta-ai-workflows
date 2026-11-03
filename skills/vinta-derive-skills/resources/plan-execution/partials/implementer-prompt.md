@@ -27,6 +27,11 @@ Branch base for this phase: `<phase.base_branch>` — derived from this phase's
 **Depends on** set, not from plan order. The orchestrator already created your phase
 branch there; commit straight to it.
 
+Before you write anything, run `git -C <WORKROOT> status` and
+`git -C <WORKROOT> log --oneline <phase.base_branch>..HEAD`. A phase that was
+interrupted and handed back leaves commits or changes here. Work already committed is
+not redone: read it, say in your report that you found it, and carry on from it.
+
 ## Read first
 1. AGENTS.md — repo conventions.
 2. {{PLAN_DIR}}/{plan-filename}, the **Goals + Non-goals**, **Guiding Decisions**, **Data Model Changes** sections and YOUR phase body inside **Phased Rollout**.
@@ -48,6 +53,17 @@ your base branch and you must not code against it.}
 ## Your tasks (Phase {id} only)
 {phase.body verbatim, including Goal / Spec use-case / Feature flag / Changes / Tests / Acceptance lines}
 
+{If `phase-{id}.md` records any decision for this phase:}
+## Decisions already made in this phase
+These were settled by the human or by evidence earlier in this phase. They are
+binding: build on them and don't ask about them again. If evidence you find says
+one cannot hold, say so in your report with that evidence; don't quietly work
+around it.
+{The phase's settled decisions, newest first, at most 12: each relayed question's
+header, the question in one line, and the answer. Then its rejected review findings,
+at most 8: the finding in one line and the counter-evidence that rejected it. Then
+any `## Guidance from the human` text from a retry, verbatim.}
+
 ## Reusable skills you SHOULD invoke
 {phase.reusable_skills — for each, instruct the agent to first read ai-tools/skills/{name}/SKILL.md, then follow that pattern.}
 
@@ -61,13 +77,16 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 {{PER_PHASE_COMMIT_BLOCK}}
 
 ## Required output (single final report)
-- Status: SUCCESS, FAILURE (and why), or NEEDS_INPUT (with the `questions:` block above).
+- Status: SUCCESS, FAILURE (and why), or NEEDS_INPUT (with the `questions:` block above). SUCCESS means every outer gate is green.
+- Gates: every outer-gate command you ran, in order, and what it returned (green, or red with the failing lines). Name any you did not run, and why.
 - Files created/modified (paths only).
 - 5–15 line summary of what you implemented and key decisions.
 {{E2E_REPORT_FIELD}}
 - Deviations from the plan body and reasoning.
 - Anything you couldn't do (with explanation).
 ```
+
+**The decisions block goes on every spawn of this phase's work**, not just the first: a cold re-spawn after a failure, a fresh agent resuming after a relayed question, a retry with guidance, a cold review fix. A decision recorded in tracking but not sent is a decision the next agent asks about again.
 
 **Don't** dump the full plan into every prompt. Dependency-closure tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
 <!-- block-end: FULL -->
@@ -81,8 +100,10 @@ question. Examples: an ambiguous or contradictory requirement, a dependency the
 license policy blocks, a change outside this phase's scope, a destructive or
 irreversible step.
 
-Stop at a clean point. Finished, verified work may stay committed; leave
-unfinished work uncommitted. Then return this as your whole final report:
+Stop at a clean point and commit what you have, finished or not, staging each
+path by name. Say in `done_so_far` which parts are unfinished. Work left on disk
+is not part of the phase: the next agent in this worktree may start from a clean
+tree. Then return this as your whole final report:
 
     status: NEEDS_INPUT
     blocked_on: <one line: the decision you need>
@@ -111,13 +132,18 @@ spawns a new agent) with the answers.
    b. {{NEW_TEST_CMD_PATTERN}} for new tests individually.
    c. Scoped suite: {{SCOPED_TEST_PATTERN}}.
 4. Iterate 2–3 until **new tests pass individually** and the scoped suite is green. Do **not** advance to step 5 with red scoped tests.
-5. **Outer gate — local verification, only after step 4 is green.** All MUST pass before staging:
+5. **Outer gate — local verification, only after step 4 is green.** Run every one of these yourself and read what it returns; the inner loop does not speak for them. Run each command exactly as written here, in this order, and stop at the first one that is red:
    a. **Type / build:** `{{BUILD_CMD}}` — repo-wide, always.
    b. **Tests:** by default run only the **scoped suite** `{{SCOPED_TEST_PATTERN}}` for the apps/files you touched — the new tests already passed individually in step 4b, so this re-confirms the touched surface without paying for the whole repo. When that line contains `{changed_files}` or `{touches}`, it is a template: replace `{changed_files}` with the files this phase changed against its base (`git diff --name-only --diff-filter=d <base>...HEAD` plus uncommitted and untracked work) and `{touches}` with the phase's Touch List, each path shell-quoted and space-separated. If a placeholder would be empty, run `{{TEST_CMD}}` instead.
       {If run_options.full_test_suite = true:} run the **full test suite** `{{TEST_CMD}}` instead of the scoped suite — this phase guards against regressions in untouched code too.
    {{E2E_OUTER_GATE_LINE}}
-6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.
-7. **Shared test resources.** Run one test command at a time in `<WORKROOT>` — parallel tool calls included: every run there shares the worktree's test databases, and two at once block each other. Before starting one, check `docker ps` for a leftover `<compose project>-*-run-*` container from an earlier run. A single test file that runs longer than about two minutes means a lock or a hang: find what holds it, don't rerun it.
+6. Outer gate red → return to step 2 and fix it, re-run the inner loop, then the outer gate from 5a, for as long as you know how to turn it green. When you cannot, commit what you have anyway and report FAILURE, naming the gate and quoting the lines of its output that show why. A red gate changes your report, never whether you commit: before you report, `git -C <WORKROOT> status --porcelain` shows none of your own work. Fix the cause of a failure, never its symptom: don't weaken, skip or delete a test, and don't loosen a type, lint or test setting to get a gate green. A failure in code this phase did not touch is reported, not worked around. **Never** push while any gate is red.
+
+**Generated files are never hand-edited.** A file the project generates — a schema dump, an API client, a route tree, a lockfile, anything AGENTS.md names a generator for or that opens with a "generated, do not edit" header — changes only by running its generator. Run it and stage what it writes.
+
+**Run everything in the foreground.** No `run_in_background`, no trailing `&`, no "I'll check back on it". Your session ends with your turn and nothing will wake it again, so a command still running when you stop has no reader, and a message that ends your turn to wait for one is not your report. A command that is too slow to wait for is a problem to report, not one to background.
+
+**Shared test resources.** Run one test command at a time in `<WORKROOT>` — parallel tool calls included: every run there shares the worktree's test databases, and two at once block each other. Before starting one, check `docker ps` for a leftover `<compose project>-*-run-*` container from an earlier run. A single test file that runs longer than about two minutes means a lock or a hang: find what holds it, don't rerun it.
 
 <!-- include: partials/dispatched-agent.md#NO_NESTED_DISPATCH -->
 <!-- block-end: INNER_OUTER_LOOP -->
