@@ -7,3863 +7,487 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] — YYYY-MM-DD
 
-<!-- pre-release: 0.7.0-alpha39 on 2026-10-24 -->
-<!-- pre-release: 0.7.0-alpha38 on 2026-10-22 -->
-<!-- pre-release: 0.7.0-alpha37 on 2026-10-20 -->
-<!-- pre-release: 0.7.0-alpha36 on 2026-10-18 -->
-<!-- pre-release: 0.7.0-alpha35 on 2026-10-16 -->
-<!-- pre-release: 0.7.0-alpha34 on 2026-10-16 -->
-<!-- pre-release: 0.7.0-alpha33 on 2026-10-16 -->
-<!-- pre-release: 0.7.0-alpha31 on 2026-10-09 -->
-<!-- pre-release: 0.7.0-alpha30 on 2026-10-09 -->
-<!-- pre-release: 0.7.0-alpha20 on 2026-09-24 -->
-<!-- pre-release: 0.7.0-alpha19 on 2026-09-19 -->
-<!-- pre-release: 0.7.0-alpha18 on 2026-09-17 -->
-<!-- pre-release: 0.7.0-alpha17 on 2026-09-17 -->
-<!-- pre-release: 0.7.0-alpha16 on 2026-09-16 -->
-<!-- pre-release: 0.7.0-alpha15 on 2026-09-16 -->
-<!-- pre-release: 0.7.0-alpha14 on 2026-09-16 -->
-<!-- pre-release: 0.7.0-alpha13 on 2026-09-16 -->
-<!-- pre-release: 0.7.0-alpha12 on 2026-09-15 -->
-<!-- pre-release: 0.7.0-alpha11 on 2026-09-15 -->
-<!-- pre-release: 0.7.0-alpha10 on 2026-09-15 -->
-<!-- pre-release: 0.7.0-alpha9 on 2026-09-14 -->
-<!-- pre-release: 0.7.0-alpha8 on 2026-09-14 -->
-<!-- pre-release: 0.7.0-alpha7 on 2026-09-14 -->
-<!-- pre-release: 0.7.0-alpha6 on 2026-09-13 -->
-<!-- pre-release: 0.7.0-alpha5 on 2026-09-13 -->
-<!-- pre-release: 0.7.0-alpha4 on 2026-09-13 -->
-<!-- pre-release: 0.7.0-alpha3 on 2026-09-12 -->
-<!-- pre-release: 0.7.0-alpha2 on 2026-09-12 -->
-<!-- pre-release: 0.7.0-alpha1 on 2026-09-11 -->
+<!-- Graduates the 0.7.0-alpha1 … 0.7.0-alpha39 series (2026-09-11 to
+     2026-10-24). This section is the net change since 0.6.1. The
+     alpha-by-alpha record is in the GitHub pre-releases and in this file's
+     git history before the release commit. -->
 
 ### Added
 
-- **`vinta-ai-maestro interview` — the browser interview, served by maestro.**
-  `interview start|wait|status|stop --dir <interview-dir>` serves the
-  interview page that `create-spec`'s Step 0 uses through the `interview-ui`
-  foundation skill: one decision per screen, the rail of groups and
-  decisions, Markdown and Mermaid explainers, option cards with their
-  consequences and the recommended default marked, the question panel for
-  the agent — rendered with `vinta-design-system`, in the same bundle as the
-  run monitor (`dist/ui/interview.html`), so an interview looks like the rest
-  of the toolchain. The protocol is unchanged: the agent writes
-  `rounds/round-NN.json` (`interview-round.v1`), the page writes
-  `answers/round-NN.json` (`interview-answers.v1`) through the server. The
-  server binds loopback, gates its API behind a token in the printed URL,
-  serves documents only from the interview's `docs/`, accepts a round's
-  answers once, and streams state so the page switches to the next round as
-  the agent writes it. `wait` watches the directory rather than the server,
-  so it exits `0` with the answers path, `124` on timeout, `1` when nothing
-  is running. [packages/vinta-ai-maestro/SPEC.md § 20](packages/vinta-ai-maestro/SPEC.md).
-- **Mermaid fences render in the maestro UI.** Plan documents, transcripts
-  and interview rounds draw their `mermaid` fences (loaded on first use,
-  `securityLevel: strict`); a diagram that cannot be drawn shows its source.
+- **`vinta-ai-maestro`: a `plan-feature` plan runs itself, phases in parallel,
+  with you steering from a terminal or a browser.** A new workspace package,
+  `packages/vinta-ai-maestro/`, published as its own npm package under the same
+  version number as `vinta-ai-workflows` and run with `npx vinta-ai-maestro`
+  (Node ≥ 22). It is not part of the `vinta-ai-workflows` tarball: what reaches
+  the skills package is the generated schemas below and the skill changes that
+  produce and consume them. [SPEC.md](packages/vinta-ai-maestro/SPEC.md) is the
+  authority and the package README is the operator's manual.
+  - **A run.** `run <workflow.json>` starts the plan's `.workflow.json` as a
+    background job and returns; closing the terminal changes nothing
+    (`--foreground` keeps it in the process, for CI). The run works on a plan
+    branch, `plan/<workflow-id>/base`, cut from `base_branch`. Each phase gets a
+    crew member, a lane — a git worktree with its own copy of the dependency
+    dirs, forked `dev` / `test` databases, an isolated compose project, a
+    namespace in each shared service, the declared `env_files` and a
+    `setup_cmd` — and the `standard-phase` pipeline: implement, gates, review,
+    polish chores, verify, integrate (merge, gates on the merged tree, push,
+    PR), `after_pr` chores. A phase with one dependency branches from it, one
+    with several from an `integ-<id>` merge; each wave merges into
+    `plan/<id>/wave-<N>`, and the last wave opens the plan PR, the one PR that
+    lands the plan. `run --resume <run-id>` picks a paused, interrupted or
+    failed run back up with the policy it was started with. Policy flags:
+    `--on-failure retry|ask|stop` (default `retry`: one cold attempt, then a
+    question), `--retries`, `--retry-after <15m>` (an unanswered failure
+    question answers itself, backing off when attempts fail fast),
+    `--agent-answer-after` (how long an agent's own question waits before the
+    recommended options are taken), `--permission ask|auto|full|judged`
+    (default `auto`), `--harness-profile <name>` (a named binary and
+    environment — a second account, say — from
+    `~/.config/vinta-ai-maestro/profiles.yaml`), `--system-one <config.json>`,
+    `--no-coordinator` and `--coordinator-authority full`.
+  - **Harnesses.** claude-code, codex (`codex app-server`, codex-cli ≥ 0.147.0)
+    and opencode, behind one adapter contract: spawn, resume, inject a message
+    into a running turn, wait for background work, compact. A quota, rate-limit
+    or concurrency refusal parks the harness, not the phase, until the reset
+    time the vendor stated; `defaults.model_fallbacks` and
+    `defaults.harness_fallbacks` move the refused spawn to a fallback instead;
+    a provider outage re-runs the phase when the harness answers, charging
+    nothing to its attempts; a logged-out CLI asks you to log in. Sessions
+    start one at a time per harness, and the ceiling a run discovers is kept
+    for the next one.
+  - **The crew.** A plan staffs a team, the Crew table `plan-feature` writes:
+    one member per agent with a tier, a model and a harness, and every phase
+    assigned to one of them. A member keeps its worktree and its session across
+    the phases it takes, so what it learned in phase 1 is still there in
+    phase 4. A busy member is covered by the cheapest qualified free peer or by
+    a spare in its image (`defaults.max_spare_crew`, default 2); a phase is
+    never handed below its tier (`defaults.substitution`, default
+    `up_one_tier`); a phase its review keeps rejecting moves up a tier
+    (`defaults.escalate_after_rejections`, default 3); a merge conflict goes to
+    the most senior member who wrote one of its sides.
+  - **Gates.** A gate is a shell command, by type (`test`, `lint`, `typecheck`,
+    `e2e`, taking the project's `commands.*`) or by a project-wide id
+    (`maestro.gates.<id>`), or a judge question put to a System One classifier.
+    Phase gates run a `scoped_cmd` (`{changed_files}` / `{touches}`) until the
+    review approves; `verify` then runs the full `cmd` on the phase branch, and
+    the full suite runs on every merged base and wave (`verify_gates`,
+    `base_gates`, `wave_gates`, all full by default). Results are cached per
+    gate, command and tree. `fresh_cmd` and `fresh_when` run a gate from a
+    fresh test database when the tree moved under it; `cold_cmd` and
+    `scope_cache` cover a lane with no test cache; `timeout_s`,
+    `queue_timeout_s` and `tuning.allowed_flags` bound and retune a gate.
+    Resource pools (`resources`, `scope: run | host`) serialise the heavy ones
+    across lanes, and across every maestro run on the machine. Agents run a
+    gate with `vinta-ai-maestro gate <id>` and take a pool with
+    `vinta-ai-maestro with <resource> -- <cmd>`; on claude-code a `PreToolUse`
+    gate guard refuses the bare command, and `--permission judged` asks a
+    classifier about each shell call. `codegen` steps regenerate generated
+    files rather than merging them, `append_only` files merge as a union,
+    `post_merge` runs a formatter over what git merged, and `ci_only` records
+    the CI checks deliberately left to CI.
+  - **Review and chores.** Once a phase's gates are green, the implementer's
+    own session runs the `review` chore, `thermo-nuclear-review-loop`: one
+    reviewer sub-agent, each finding verified and fixed or rejected with
+    counter-evidence, until the reviewer explicitly approves. A phase's
+    decisions — answered questions, operator context, rejected findings — are
+    kept and carried into every later prompt, so nothing is asked twice.
+    `deslop` and the project's other `after_review` chores run before verify;
+    `after_pr` chores (a review canvas, say) run once the PR is open. A chore
+    reporting `Status: FAILURE` is recorded as failed. `max_fix_rounds` is
+    unset by default, which means no limit; set it to be asked.
+  - **Integration.** A conflict goes to a conflict fixer in the integration
+    worktree, with a time limit per round and its resolution gated by the union
+    of both phases' gates; what a round left is kept under
+    `refs/vinta-ai-maestro/` across attempts. A resolution that undoes a
+    phase's deletion is flagged. A merge git or a hook refuses goes to you.
+    Every phase and integration PR carries a **Landing** section pointing at
+    the plan PR; `land <run>` says how a finished run lands and closes the PRs
+    whose work is already in the base; `propagate <run> <phase>` carries a late
+    fix into every `integ-` and `wave-` branch; `sync-base <run>` brings a moved
+    `base_branch` into a live plan.
+  - **Steering.** `status`, `logs [-f]`, `logs --failures <gate-log>`, `pause`,
+    `stop`, `node context|redirect|pause|resume|abort|retry|fresh|answer`,
+    `node interrupt|reassign|step` (take a phase over at its step without
+    failing it), `switch-harness`, `fixer interrupt|reassign`, `workflow`,
+    `amend` (a live run takes an edited workflow, rebasing the done phases the
+    change reaches), `exec <run> <lane|integration> -- <cmd>` (a command with
+    the lane's environment, holding the integration worktree while it runs),
+    `gate-cache invalidate`, `purge [--lanes --branches]` (never the only copy
+    of work), `doctor` (every check a run depends on, from disk and servers to
+    env files, compose `-T`, gate scope and the CI jobs no gate covers),
+    `validate`, `simulate` and `judge calibrate`. Every acting request takes a
+    reason, journalled with what it explains.
+  - **The run coordinator.** One agent per run, woken when a phase fails, an
+    attempt errors, a phase waits on the integration worktree or a gate crosses
+    its cost threshold, at most 24 times a run. It reads the journal and the
+    repository and acts through the same API as you: steer, pause, retry,
+    answer the questions a timer could answer, amend the live run, run a
+    command. It may change how the run executes, never what it builds, and
+    never weakens a check. Everything decided without you — by it or by a
+    timer — is listed in `status`, the run view, the plan PR and the
+    post-mortem.
+  - **The browser UI.** `ui` serves every run in the project and hosts none,
+    so closing it interrupts nothing. A run view with the plan graph, the
+    roster, the integration worktree's record, resource pools, sessions and
+    cost, what was decided without you, a notifications inbox and the
+    coordinator as a sidebar; a phase view with the transcript rendered the way
+    the harnesses render it, the phase's running processes and gates, its
+    changes as a diff, its integration timeline, its PR, and steering as a chat
+    input; an analytics page while the run goes and the post-mortem as a report
+    after; a Logs view over the daemon's own log; a workflow editor that saves
+    only what you changed; Pause, Stop, Retry and Resume. Every page fits a
+    phone, in light and dark.
+  - **The record.** Everything lands under `.vinta-ai-maestro/` (gitignored):
+    the run's journal, each phase's transcript with the role that wrote each
+    line, gate logs, the daemon's own log (`logs/daemon.ndjson`, identifiers
+    only, enforced), and once the run ends a post-mortem (`postmortem.v1`):
+    dependencies declared but unused or discovered at gate time, conflicts,
+    the critical path, idle capacity, gate costs, failure causes, crew
+    substitutions, failed chores and unattended decisions. `plan-feature` reads
+    it before planning the next feature in the same repository.
+  - **Security.** The daemon binds loopback and every API request carries a
+    token. Agents hold a token of their own that reaches only their leases,
+    gates and hooks; the coordinator has one of its own; a run's job keeps its
+    token in a `0600` file that `ui` never prints. Nothing in the journal or
+    the log holds repository contents, and every token is redacted from both.
+    The only API key the package ever uses is the one a `--system-one`
+    classifier config names; the harnesses run on your logged-in CLIs.
+  - **Platforms.** macOS, Linux and Windows, each in CI.
 
-- **`vinta-ai-maestro` UI: what a phase is running, and a way to stop it.**
-  The node view's gates panel is now a **Processes** panel. It lists the
-  phase's running processes: the agent's shell commands, marked as waiting
-  on it or in the background, and its gates. Two are shown, and the rest
-  open in a dialog. A two-click **Stop** ends a process and everything under
-  it (`POST /api/runs/<run>/nodes/<node>/processes/<pid>/stop`, journalled
-  `process_stopped`). The gates section below is unchanged. A phase waiting
-  on a background command no longer reads as stuck. It needs a live run and
-  a harness with one CLI process per session (claude-code, codex).
-- **`vinta-ai-maestro`: resource pools shared by every run on the machine.**
-  A pool declared `scope: host` also counts every other maestro run holding
-  a pool of the same name, through lock files under
-  `~/.vinta-ai-maestro/host-leases/` (pid and run id only). Two runs on one
-  laptop then take turns at the full suite instead of running two at once.
-  The bootstrap now emits `scope: host` on the `test-suite` pool, and
-  `maestro.resources.<id>.scope` is in the config schema. `run` stays the
-  default.
-- **`vinta-ai-maestro`: test databases as a gate input.** A gate may declare
-  `fresh_when`, globs of the files its state is built from (its
-  migrations). When one that matched at its last run in the integration
-  worktree is gone or different, the gate runs `fresh_cmd` even though the
-  tree moved forward. It is in the workflow schema, in
-  `maestro.gates.<type>` of the config schema, and in the bootstrap's
-  fresh-database question. `gate-cache invalidate <run> <gate> --databases`
-  asks for fresh state once.
-- **`vinta-ai-maestro`: `exec --priority`.** In the integration worktree,
-  waits only for the current holder, ahead of every phase queued.
-- **`vinta-ai-maestro`: `logs --failures <gate-log>`.** Prints the first
-  failing test in a gate log and the first line saying what went wrong, in
-  the operator's own terminal.
-- **`vinta-ai-maestro`: chore `background: false`.** Tells a chore's turns
-  to run everything in the foreground.
-- **`vinta-ai-maestro` UI: run analytics and the end-of-run report.** A new
-  `#/runs/<run>/analytics` page shows where the run's time is going while
-  it runs — working time by pipeline step (implementation, gates, review,
-  polish, integration), filtered by phase, wave, harness, crew member or
-  model, a breakdown grouped by any of those, what each gate and each chore
-  cost, and the critical path — with open activities timed live. Once the
-  run has ended the same page leads with the post-mortem drawn as a report
-  with a short diagnosis. The run view carries a "Where the time goes"
-  summary and a header button that reads Analytics while the run goes and
-  Report after. Two new reads back them: `GET /api/runs/:id/analytics` and
-  `GET /api/runs/:id/postmortem`.
-- **`vinta-ai-maestro` UI: the integration worktree's record.** The run
-  view's worktree panel lists every step every phase took there, newest
-  first, each linked to its phase (`GET /api/runs/:id/integration`).
-- **`vinta-ai-maestro` UI: the coordinator is a sidebar.** The run
-  coordinator's conversation moved out of the run view's grid into a
-  full-height sidebar on the right — from under the top bar to the bottom of
-  the window on a wide screen, a non-modal sheet otherwise, and on the phase
-  page too — opened from a header button and remembered across visits. The
-  conversation fills it and the question box sits at the bottom.
-- **`vinta-ai-maestro` UI: every page fits a phone.** The top bar keeps to
-  one row (the mark alone stands for the brand below the `sm` breakpoint),
-  every two-column layout stacks, and every table scrolls inside its card
-  instead of widening the page.
-- **`vinta-ai-maestro` UI: the run view's panels are a tiled grid.** Every
-  panel is one or two row units tall, fills its cell and scrolls inside it,
-  and short panels pack into the holes tall ones leave — no more band of
-  empty page under a short card beside a long one. The roster, "Decided
-  without you", the integration record and the phase page's integration
-  timeline show their newest five rows (newest first) with the whole record
-  in a paged dialog; the resource pools show the two in use (fullest first)
-  with the rest in a dialog. Selecting a node on the canvas scrolls its
-  roster row into view.
-- **`vinta-dag-editor`: phase ids on the cards.** Each node card carries its
-  id (`p1`, `p2`, …) above its name, so the canvas names phases the way the
-  roster, the transcript and the plan do.
-- **`vinta-dag-editor`: tooltips stay inside the canvas.** A tooltip is kept
-  whole within the viewport — pushed in from the edges and flipped above its
-  source when there is no room below — so the toolbar's and the edge cards'
-  tooltips no longer open into the clipped strip outside the graph.
-- **`vinta-ai-maestro` UI: the graph goes full screen.** A button on the
-  canvas (run view, replay and plan review) takes it over the whole window
-  and frames the graph again for the larger box; Escape or the same button
-  brings it back.
-- **`vinta-ai-maestro`: integration gate logs are live.** The integrator
-  records one `verify` step per gate, with the log's path, when the gate
-  starts rather than when the whole suite ends — so the phase page tails a
-  merged-tree gate's output while it runs. The step's wording is now
-  "gate `<id>` on the merged tree", with the outcome mark saying whether it
-  went red.
-- **`vinta-ai-maestro`: `post_merge`.** A workflow (or `maestro.post_merge`)
-  may declare a command that runs in the integration worktree after git
-  merges a branch by itself, with `{files}` set to the files both sides
-  changed (for example `py_compile` plus `ruff check --fix` and
-  `ruff format`). Its changes are committed on top of the merge. If it fails,
-  the merge stays as git made it and the merged tree's gates judge it. Each
-  run is journalled as `post_merge_result`.
-- **`vinta-ai-maestro`: `ci_only` records CI checks deliberately left to
-  CI.** It lives in a plan or in `maestro.ci_only` in
-  `.vinta-ai-workflows.yaml`. Each entry is a CI command with the reason no
-  gate runs it. `doctor`'s CI-coverage check stops warning about those
-  commands and counts them as decisions.
-- **`vinta-ai-maestro`: `queue_timeout_s`, and the pool queue in `status`.**
-  A gate's `timeout_s` counts only its command's runtime, and a regression
-  test now pins that down. The optional `queue_timeout_s` bounds the wait
-  for the gate's pools: a gate that waits too long fails with how long it
-  waited and who held the pool. `status` shows each pool's queue in order,
-  for example `test-suite: p3b (holds 4m) → p5b (waits 22m) → p5c (waits 3m)`.
-- **`vinta-ai-maestro`: a gate can run differently in a lane with no scope
-  cache.** A command gate may declare `scope_cache` (for example
-  `apps/api/.testmondata`) and `cold_cmd`. When a cache file is missing, the
-  phase gate runs `cold_cmd` (default `cmd`) instead of a scoped form that
-  would run every test serially. `gate_started` now records which form ran
-  and why. The new `project.lane_seed` option copies such ignored caches into
-  a lane from its dependency's lane, the integration worktree or the main
-  checkout, journalled as `lane_seeded`. Both fields are also accepted in
-  `maestro.gates.<type>`.
-- **`amend-plan` amends a live `vinta-ai-maestro` run instead of rewriting
-  its branches.** When a run of the plan is running, paused, interrupted or
-  failed, the skill asks whether to amend it, then edits the plan and the
-  run's own workflow copy (`vinta-ai-maestro workflow`, so earlier operator and
-  coordinator amendments survive), commits both on `plan/<workflow-id>/base`
-  and applies them with `vinta-ai-maestro amend`, which rebases the done
-  phases the change reaches. Before, the plan file changed and the run went on
-  building its snapshot. The skill also carries operator recipes for a live
-  run: switching harness or model, switching the account a harness runs as,
-  resuming with the same policy flags, and moving the base forward. New
-  partial `plan-execution/partials/maestro-live-run.md`; re-run
-  `vinta-derive-skills` to pick it up.
-- **`vinta-ai-maestro`: a phase the review keeps rejecting moves up a crew
-  tier.** One run left a Tier 1 phase on its desk through 16 review rejections
-  over six hours until the coordinator moved it by hand. New
-  `defaults.escalate_after_rejections` (default `3`, `0` turns it off): when a
-  phase's review has failed to approve that many times on one desk, counted
-  across attempts, the scheduler amends the run. The phase moves to the
-  cheapest member of the next tier up and takes the new desk from its next
-  attempt. The amendment is journalled as `workflow_amended` with the new
-  author `scheduler`, a one-line `reason` and a new `rule` field
-  (`review_rejections`, the members, the tiers and the count). A phase already at the top tier stays
-  where it is. Amendments may now leave a member the run already had with no
-  phase, so moving a member's last phase is no longer refused.
-- **`vinta-ai-maestro`: `purge` drops lane rescues whose work landed.** The
-  `refs/vinta-ai-maestro/wip/*` commits a recycled lane keeps of a phase's
-  uncommitted files piled up (~80 in one project). A purge now drops those of
-  the runs it purges whose phase is done and merged into a branch outside
-  `plan/` and `wt/`, and those of already-purged runs whose rescued files read
-  the same at `HEAD`. Every other rescue is kept, and `--dry-run` lists them.
-- **`vinta-ai-maestro`: a `ui` left up across an upgrade says so.** It warns
-  once when the installed package's version no longer matches the one it
-  loaded, and `run` and `status` warn about a live `ui` serving another
-  release. A `ui` started days earlier used to keep serving pre-upgrade code
-  without a word.
-- **`vinta-ai-maestro`: a resume remembers how the run was started.** Every
-  job records its `--permission`, `--system-one`, `--on-failure`, `--retries`,
-  `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile` in
-  `runs/<id>/policy.json`, and `run --resume` (and the UI's Resume) reuses
-  them, saying which; a flag given on the command line still wins. Each resume
-  used to need all of them restated.
-- **`vinta-ai-maestro`: harness profiles.** `--harness-profile <name>` on `run`
-  and `ui` picks a named binary and environment for one harness — a second
-  Claude account's `CLAUDE_CONFIG_DIR`, say — from the operator's
-  `~/.config/vinta-ai-maestro/profiles.yaml` (or `$VINTA_AI_MAESTRO_PROFILES`).
-  The run keeps the name, so a resume picks the same account.
-- **`vinta-ai-maestro`: `propagate` works on a live run.** It refused one, so
-  a fix on a phase could not reach older `integ-*` branches until the run
-  ended, and their PRs stayed red. On a live run the run's job now makes the
-  merges, holding the integration worktree's queue, so none of the run's own
-  merges interleave with them.
-- **`vinta-ai-maestro`: `sync-base <run>` brings a moved `base_branch` into a
-  running plan.** It merges the base (the remote's, when ahead) into
-  `plan/<id>/base`, then the plan branch into the lowest wave and each wave
-  into the one above. On a live run a wave's conflict goes to the run's
-  conflict fixer, gated as a phase merge is; the plan branch's own conflict,
-  and any conflict on a run that is not live, stops it with the branch as it
-  was. Both commands journal `branches_moved` on a live run.
-- **`vinta-ai-maestro`: a list of what the run decided without you.** One
-  run answered 79 of its 125 questions unattended — review loops stopped,
-  agents' design questions given their first option, one of which added a
-  migration — and none of it was anywhere a person would look. Every question
-  a `--retry-after` timer or the run coordinator answered, and everything the
-  coordinator did on its own (steering, pauses, aborts, amendments, `exec`),
-  is now listed in:
-  - `status <run>` (*Decided without you*; `unattended` in `--json`), with an
-    agent question's header and the option it got;
-  - the run view's **Decided without you** panel (`GET /api/runs/:runId/unattended`);
-  - the plan PR's *Decided without a person* section;
-  - the post-mortem's new optional `unattended_decisions` finding
-    (`schemas/postmortem.v1.schema.json`, additive), which `plan-feature`
-    now reads: an agent question answered unattended is a decision the plan
-    left open.
-- **`vinta-ai-maestro`: merge resolutions that undo a phase's deletion are
-  flagged.** One run's phase deleted an unused notification kind; the
-  conflict fixer kept "both sides" and every gate passed, so the deletion
-  never landed. After every merge in the integration worktree — a fixer's
-  resolution, or the `append_only` union driver, which re-adds lines one side
-  removed — the integrator counts lines one side deleted that the result
-  kept (codegen outputs excluded). Each is recorded as path, phase and line
-  count, never the lines: on the `node_conflict` journal row
-  (`reverted_deletions`), in the post-mortem's `wave_conflicts` and new
-  optional `unattended_decisions.reverted_deletions`
-  (`schemas/postmortem.v1.schema.json`, additive), and in the list of what
-  was decided without you (`status`, the run view, the plan PR body). It
-  flags; it does not block the merge. The conflict-fixer prompt now says a
-  phase's intent includes what it deleted.
-- **`vinta-ai-maestro`: `--agent-answer-after` on `run` and `ui`.** How long an
-  agent's own question waits before it takes the recommended options. It
-  used to be `--retry-after`, so a one-minute retry interval answered design
-  questions in a minute. Unset, it is twice `--retry-after` and never under 30
-  minutes; set alone, agents' questions are answered while failures still
-  wait for a person.
-- **`vinta-ai-maestro`: `doctor` checks the gates against CI.** It reads
-  `.github/workflows/*.yml` and warns about each `run:` command no gate runs,
-  or runs without a flag CI passes (`manage.py check` for CI's `check
-  --deploy`) — the reason every gate passed while CI failed on twenty review
-  PRs of one run. Matching is heuristic (tool and subcommand after `uv run`,
-  `npx`, `docker compose run`, …; `uses:` steps are not read) and it is always
-  a warning.
-- **`vinta-ai-maestro`: project-wide custom gates.** `maestro.gates` in
-  `.vinta-ai-workflows.yaml` now takes ids of your own beside the four types —
-  `django-check: { cmd: uv run python manage.py check --fail-level WARNING }`,
-  `api-client-fresh: { cmd: make api_client && git diff --exit-code … }` —
-  with the fields a type takes (`cmd`, `scoped_cmd`, `requires`, `timeout_s`,
-  `tuning`). Every plan has each one under its id without declaring it, and
-  `maestro.defaults.gates` names it like a type, so a check CI runs is
-  declared once and keeps its own verdict instead of being chained onto
-  `typecheck` or repeated in every plan. A plan's gate of the same id replaces
-  it whole. `validate` refuses an id that is not lowercase kebab-case, the
-  reserved `codegen`, and a custom gate with no `cmd`. Previously any key but
-  a type failed with "Unrecognized keys". Additive in the config schema.
-  `plan-feature` and the Django stack notes now point CI-mirroring checks at
-  `maestro.gates.<id>`.
-- **`vinta-ai-maestro`: codegen steps — generated files are regenerated, not
-  merged.** A workflow (or `maestro.codegen` in `.vinta-ai-workflows.yaml`)
-  declares `codegen.<id>`: a deterministic command, the files it writes
-  (`outputs`), the files they are a function of (`inputs`), and `after` for the
-  chain (schema, then client). The steps run in every lane before the gates
-  and their outputs are committed there; in the integration worktree a
-  conflict confined to their outputs is settled by taking either side and
-  running them, with no conflict fixer, and every merge is regenerated before
-  it is committed. A failing step is a red gate. `inputs` skip a step whose
-  inputs and outputs match a recorded run, a step that writes different
-  outputs from the same inputs is journalled `nondeterministic`, and a
-  `format: true` step formats only the files the phase changed. Agents are told
-  which files are generated and regenerate them mid-turn with
-  `vinta-ai-maestro codegen [<step>]`; `doctor --codegen` runs each step twice
-  to flag non-deterministic or stale output. Generated files caused most of one
-  run's 37 wave conflicts. `workflow.v1` and the config schema gain the
-  additive `codegen` field.
+- **`vinta-design-system` and `vinta-dag-editor`**, two more workspace
+  packages maestro's UI is built on: oklch tokens in three layers, six
+  run-status tones (waiting is amber and failure is red, never the same hue),
+  shadcn/ui components on Tailwind CSS v4 and a light/dark/system theme; and
+  the framework-agnostic Web Component that draws and edits plan DAGs —
+  arrowed edges, dependencies drawn by dragging, phase ids on the cards, a
+  details strip, keyboard zoom, full screen. They publish on their own cadence
+  as dependencies of `vinta-ai-maestro`; nothing in either reaches
+  `npx vinta-ai-workflows install`.
 
-- **`vinta-ai-maestro`: append-only files merge as a union.** `append_only` (or
-  `maestro.append_only`) lists files phases only add entries to — DI
-  containers, URL routes, notification kinds, beat schedules — and merges in
-  the integration worktree use git's `union` driver for them, so two phases
-  each adding an entry no longer needs a fixer round. The merged tree is gated
-  as before. Additive in `workflow.v1` and the config schema.
-
-- **`plan-feature`: emits codegen steps and append-only files** detected from the
-  project — the OpenAPI schema, generated API clients, route trees and
-  file-modifying pre-commit hooks as `codegen`; DI containers, URL routes and
-  beat schedules as `append_only` — preferring `maestro.codegen` /
-  `maestro.append_only` in the project file. `vinta-bootstrap-ai-tools` offers
-  to record them there once.
-- **`vinta-ai-maestro`: take a phase over without failing it.** Moving a phase
-  to another agent took abort, amend and retry, and the retry restarted its
-  pipeline from the top — one phase went from review back to implementing.
-  `node interrupt <run> <phase>` stops the turn now and **holds** the phase,
-  lane, branch, commits and uncommitted work kept, until `resume`, `reassign`
-  or `step` releases it; the cut step runs again then. `node reassign <run>
-  <phase> --crew <member> | --harness <h> --model <m>` is interrupt, amend and
-  resume in one (`--after-turn` lets the turn finish): the phase carries on at
-  the same step, keeps its session when only the model changes, and otherwise
-  starts fresh with a handoff — the last report, the work in the lane, the red
-  gate. `node step <run> <phase> <state>` moves the pipeline by hand, never
-  into a final state. Journalled as `node_reassigned` and `node_operation`.
-- **`vinta-ai-maestro`: `amend` accepts a held phase, or one waiting on a
-  question.** Its harness, model or crew member (`crew_changed`, a new
-  amendment kind) may change while it is parked, and it carries on at its
-  step. A brief, a gate list or a base still waits for the phase to stop.
-- **`vinta-ai-maestro`: `switch-harness <run> --from --to --model` and
-  `defaults.harness_fallbacks`.** A live run moves off a harness — an account
-  out of credits — without a pause and resume: phases in flight are
-  reassigned at their step, later phases run on the new harness, and the
-  conflict fixer moves too. With `harness_fallbacks` the run does it by
-  itself when a harness parks on a quota refusal, the refused turn going
-  again at once on the fallback. Journalled `harness_switched`.
-- **`vinta-ai-maestro`: `fixer interrupt|reassign <run>`.** End the conflict
-  fixer's running round as a round spent (what it left stays), or hand later
-  rounds to another harness and model. Journalled `fixer_operation`.
-- **`vinta-ai-maestro`: one API for the operator and the coordinator, and every
-  act says why.** Every acting request takes a reason (`--reason` on every
-  verb, the `X-Maestro-Reason` header on the API), journalled with what it
-  explains; the coordinator is refused without one (`reason_required`). The
-  coordinator gains `interrupt`, `reassign`, `switch-harness`, `fixer`,
-  `resume` of its own holds, and `pause` of the run (`run_halt_requested`).
-  `run --coordinator-authority full` also lets it change the plan's shape —
-  phases, dependency edges, briefs, touch lists, deferrals — answer any
-  question you are not holding, `node step`, and stop the run. A check is
-  never weakened under either authority.
-
-- **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
-  `integrate` — a merge, a suite on the merged tree, a push, none with an
-  agent — showed `running` over a silent transcript, and one queued behind it
-  looked the same. Now:
-  - The phase view has an **Integration** timeline: each merge, conflict fix
-    round, `verify`, wave gate, push and PR of this attempt, a live clock on
-    the one in progress, and the log of every step that has one.
-  - The run view has an **Integration worktree** panel: who holds it, the step
-    it is on and for how long, and who is queued behind it. The roster and
-    the phase header show each running phase's pipeline step.
-  - `status` prints the step beside each running phase and an `integration`
-    line (`a · wave 1 gate unit · 6m 13s · 1 queued (b)`); `status --json`
-    carries `nodes[].step` and `integration`.
-  - A conflict fixer's turn is also written to the transcript of the phase
-    being based or building the wave, not only to the incoming phase's.
-
-  Two additive journal events back it: `node_step` (the pipeline state an
-  attempt entered) and `integration_step` (a step started or finished in the
-  worktree, identifiers and a log path only). Older runs have neither and
-  show no timeline.
-- **`vinta-ai-maestro`: `accept` on an unapproved review.** The review-budget
-  question offered `continue` or `stop`, and operators answered `stop` meaning
-  "take it as it is" — which fails the attempt and, under `--on-failure
-  retry`, starts the phase over. It now offers `continue`, `accept` and `stop`
-  and says what each does. `accept` ends the review loop and keeps the work:
-  the polish chores, the gates and integration still run, and the answer is
-  journalled. The unattended answer is unchanged (`continue` once, then
-  `stop`); the coordinator cannot answer `accept`.
-- **`vinta-ai-maestro validate` warns about parallel phases adding migrations
-  to one app**, and `plan-feature` treats them as real overlap. Two phases
-  that neither depends on the other, each adding a migration under the same
-  directory (Django `<app>/migrations/`, Alembic `…/versions/`, Rails
-  `db/migrate/`, Prisma `prisma/migrations/`), start from the same latest
-  migration; merged, the graph has two leaves and every gate on the merged
-  tree fails. Their Touch Lists name different files, so nothing flagged it.
-  `validate --json` gains a `warnings` list, printed as `warning:` lines in
-  text mode, and the review page shows them in their own panel; neither
-  changes the exit code or `valid`. `plan-feature` now says to add the edge,
-  or to name the phase whose integration writes the merge migration.
-- **`vinta-ai-maestro node resume <run> <phase>`**, the undo of `node pause`:
-  it withdraws a pause not yet taken, releases a phase parked on the pause, or
-  gives a held phase its `--retry-after` timer back. It used to take
-  answering an undocumented "The operator paused this node. Resume it?"
-  question, or answering a held phase's question by hand.
-- **`vinta-ai-maestro status` shows the question each phase is asking**, with
-  its choices, and `status --json` carries it per node as `question`
-  (`effectId`, `question`, `kind`, `choices`, `askedAt`). `asking: true` alone
-  sent operators into `flow.db` to read it.
-- **`vinta-ai-maestro`: ways past a stale gate verdict.** `gate <id>
-  --no-cache` runs a gate past its cached result and keeps the new one in its
-  place; a cached red now says so. `gate-cache invalidate <run-id> <gate-id>
-  [--tree <hash>]` forgets a gate's results for the operator and the run
-  coordinator (`POST /api/runs/:id/gates/:gate/invalidate`, journalled as
-  `gate_cache_invalidated`; an agent's token cannot reach it). Both are for a
-  verdict whose cause git does not track — an ignored file, a tool's cache, an
-  installed dependency — which the tree-keyed cache would otherwise replay.
-
-- **`vinta-ai-maestro`: a phase's decisions outlive the session they were
-  made in.** Each node now keeps a list of what was settled for it: agents'
-  questions with their answers (marked as the operator's, the coordinator's,
-  or unattended), the operator's `node context` and `redirect` text, and the
-  findings the review rejected with their counter-evidence. Every later
-  prompt carries the list — implementer, fixer, chores, and the review, which
-  hands it to its reviewer — so a fresh reviewer, a replaced session or a
-  retry no longer re-asks or re-raises what was already decided. Before
-  this, an unattended run answered one question four times and a phase ran
-  some thirty rounds without converging, and operator context sent with
-  `node context` had to be re-sent after a session change. The review now
-  rejects a finding that re-opens a decision, citing it, and asks the
-  operator about it at most once, and only with new evidence. It ends its
-  report with a `REJECTED:` line per rejected finding, which the run keeps.
-  The list is bounded (the newest 12 answers and notes and the newest 8
-  rejected findings), kept across retries, written to
-  `runs/<id>/nodes/<node>/decisions.jsonl` and read back when a run resumes.
-
-- **`vinta-ai-maestro judge calibrate`: measure a permission-judge question
-  before a run relies on it.** It replays a past run's `Bash` calls
-  (`--run <run-id>`), or a file of commands each optionally labelled `safe` or
-  `unsafe` (`--commands <file>`), against a candidate question
-  (`--question` / `--question-file`) and threshold (`--threshold`) through the
-  classifier in `--system-one`. Nothing is executed. It reports how many would
-  be allowed and refused, the score distribution, every labelled command
-  judged the wrong way, and the highest-scoring must-deny command, and exits 1
-  on a misjudged one so a case file can guard a project's question in CI.
-  Commands are printed as recorded, never their output.
-
-- **`vinta-ai-maestro`: `project.reset_cmd` and `project.recycle_keep`.**
-  `reset_cmd` is a project hook run inside a lane when it is recycled for the
-  next phase, and only then, after maestro's own resets and before
-  `setup_cmd`. `recycle_keep` lists gitignore patterns a recycled lane keeps
-  (`.venv`, say) now that the recycle cleans ignored files. Both optional, in
-  `workflow.v1`.
-
-- **`vinta-ai-maestro`: `node fresh <run> <phase>` drops a phase's agent
-  session without failing the attempt.** The phase's next turn starts cold with
-  the whole brief, journalled `node_session` `reason: operator_fresh`; the turn
-  in flight is not stopped (pair it with `redirect` for that). It is the way out
-  of a session gone wrong — an agent replaying killed work or carrying on with
-  the previous phase — that used to cost an `abort`. Also `POST
-  /api/runs/:run/nodes/:node/fresh`, and the run coordinator can use it. The
-  post-mortem's `operations.node_operations[].op` gains `fresh` (additive, in
-  `postmortem.v1.schema.json`).
-
-
-- **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
-  (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
-  for — or the one an operator picked with `retry with <member>` — is busy, or
-  is planned for a phase still to come, the run takes on a spare in that
-  member's image (same tier, model and harness) with a worktree provisioned for
-  it there and then, instead of borrowing a member another pending phase is
-  waiting for, or waiting. A member nobody is planned for is still borrowed, an
-  idle spare is reused first, and a member busy only with a finished phase's PR
-  chores is waited for. Journalled as `node_crew` `reason: spare_crew` and shown
-  in the post-mortem's `crew_substitutions`. Set `0` in the plan or under
-  `maestro.defaults` to keep the roster to the plan's. One observed run left a
-  phase on its critical path idle for 17 minutes while a retry held the member
-  it was planned for.
-- **`vinta-ai-maestro`: `defaults.pull_requests: plan` opens one PR for the
-  run.** The default, `phase`, is unchanged: a PR per phase, per integration
-  branch, and the plan PR. `plan` opens the plan PR alone, from the last wave
-  branch, and skips the phases' `after_pr` chores (there is no phase PR for
-  them). Also accepted under `maestro.defaults` in `.vinta-ai-workflows.yaml`.
-- **`vinta-ai-maestro doctor` warns when a phase gate will run its full command
-  every time** (`gate-scope:<gate>`), and every run prints it at start: a
-  `test` or `lint` gate a phase uses has no `scoped_cmd` under
-  `gate_scope: scoped`. It says whether `commands.test_unit_scoped` /
-  `lint_scoped` was passed over for having no `{changed_files}` / `{touches}`
-  placeholder — a skill-era line such as `pytest <app>/tests/` is not inherited
-  — or nothing is configured, and names the key to set (e.g.
-  `pytest --testmon {changed_files}`), or `maestro.defaults.gate_scope: full`
-  to accept it. One observed run spent two of its five hours running a
-  6,500-test suite on every phase gate and fix round.
-
-- **`vinta-ai-maestro`: `run` now shows what a slow start is doing.** Until
-  now `run` printed "starting in the background…" and nothing else until the
-  run was up, which can take minutes (`prepare_cmd`, preflight, database
-  templates, lane provisioning). The job now prints a timestamped line per
-  step — plan branch, `prepare_cmd`, environment checks, each database
-  template, each lane ready (`3/5`) — and the launching `run` streams the
-  job's log to the terminal as it is written, with a "still starting…" line
-  after 15 s of quiet. Lines carry names and counts only, never command
-  output. A refused start is no longer printed twice.
-
-- **`vinta-ai-maestro`: `createdb_cmd` / `dropdb_cmd` on a Postgres
-  `external` database** (`workflow.v1.schema.json`, optional, defaults
-  `createdb` / `dropdb`). They replace only the binary name — in the template
-  setup, the per-lane clone and the reset — so a project whose Postgres is a
-  container with a password the host cannot supply can set
-  `docker compose exec -T db createdb`. `-h/-p/-U` from `server_url` still
-  follow. Existing workflows are unchanged.
-
-- **`vinta-ai-maestro`: a database password prompt no longer hangs `run`.**
-  Template, clone and reset commands now run with stdin closed, no controlling
-  terminal and a two-minute timeout that ends the whole process tree; a prompt
-  becomes a failed run carrying the command's stderr instead of a job stuck at
-  `starting`. `doctor` now runs the effective `dropdb_cmd --if-exists` against
-  a name that cannot exist and `FAIL`s, naming the missing password, when it
-  cannot authenticate — a server that merely answers used to pass.
-
-- **New optional foundation skill: `interview-ui`** — run decision-heavy
-  interviews as a full-screen browser form instead of a chat exchange. One
-  decision per screen with the context the agent already knows, Markdown +
-  Mermaid (or HTML) explainers, option cards that state each option's
-  consequences, the recommended default marked, and an in-page question panel
-  for asking the agent (questions, not decisions — the agent replies in the
-  next round). Round-based and file-based, so it works the same under Claude
-  Code, Codex, Cursor, and Copilot: the agent writes
-  `.vinta-ai-workflows/interviews/<slug>/rounds/round-NN.json`, blocks on
-  `interview-ui.mjs wait`, and resumes when the browser submits
-  `answers/round-NN.json`. Source:
-  [skills/vinta-derive-skills/resources/foundation-skills/interview-ui/](skills/vinta-derive-skills/resources/foundation-skills/interview-ui/)
-  — `SKILL.md`, the zero-dependency Node ≥ 18 localhost server + CLI
-  [scripts/interview-ui.mjs](skills/vinta-derive-skills/resources/foundation-skills/interview-ui/scripts/interview-ui.mjs)
-  (`start` / `wait` / `stop` / `status` / `serve`; binds `127.0.0.1` only,
-  serves files only from the interview's `docs/`), the shell
-  [resources/index.html](skills/vinta-derive-skills/resources/foundation-skills/interview-ui/resources/index.html),
-  and a sample round under `resources/examples/`. Copied verbatim as a whole
-  directory (bucket A), opt-in via the bootstrap's **Optional foundation
-  skills** question 7.
-- **Two new JSON Schemas**:
-  [`schemas/interview-round.v1.schema.json`](schemas/interview-round.v1.schema.json)
-  (agent → browser: groups, decisions, options with `consequences` /
-  `recommended` / `tags`, inline or file explainers, `replies[]`, `readback`
-  rounds) and
-  [`schemas/interview-answers.v1.schema.json`](schemas/interview-answers.v1.schema.json)
-  (browser → agent: per-decision `answered` / `waived` / `skipped` with
-  values, free text and notes, plus `questions[]` for the agent). Inventory
-  rows added to `schemas/README.md`.
-- **Config schema field `foundation_skills.interview-ui`** (`enabled` /
-  `disabled`). Additive — no schema major bump. Emitted by the bootstrap
-  Step 0.5 YAML; existing projects can add it by hand or on the next sync.
 - **Plan review: a page for a plan before it runs, and a chat with the agent
-  that wrote it.** Maestro's UI gains a **Plans** section. `vinta-ai-maestro
-  review open <workflow.json>` serves it and prints a link straight to the
-  plan. The page shows:
-  - **Graph.** The phase DAG, coloured by review state. Below it, the selected
-    phase's brief, its staffing and pipeline, the implementer and fixer
-    prompts, and its chores' prompts (the review loop's among them). These are
-    the real cold prompts a run would send, composed by the scheduler's own
-    function.
-  - **Plan.** The markdown, section by section, with an outline.
-  - **Gates.** A phase × gate matrix of the commands a run would execute.
-  - **Schedule.** A projected timeline with the critical path marked.
-  - **Issues.** What `validate` reports.
+  that wrote it.** `vinta-ai-maestro review open <workflow.json>` serves the
+  plan's graph with every phase's real prompts, the plan's markdown, a phase ×
+  gate matrix, the projected schedule and what `validate` reports. You comment
+  on the plan, a phase, a prompt or a gate and send the batch; the agent answers
+  through `review wait` and `review reply`, edits the plan, and **Approve plan**
+  ends the loop. The review is committed beside the plan as
+  `ai-plans/<id>.review.json` (`plan-review.v1`, see
+  [packages/vinta-ai-maestro/SPEC.md § 19](packages/vinta-ai-maestro/SPEC.md)).
+  When maestro is installed, `plan-feature` runs `validate --json` on every
+  workflow it writes and asks whether to review on the page, in chat, or later.
 
-  The reviewer can comment on the plan, a section, a phase, a prompt or a
-  gate, or select text and comment on the quote. Comments stay drafts until
-  sent to the agent as one batch. The sidebar chat shows whether the agent is
-  listening, working or away. The agent answers from its own session through
-  two new commands:
-  - `review wait` blocks, then prints what the person sent as JSON.
-  - `review reply` answers in the chat or on a thread, with `--resolve`.
+- **The browser interview.** A decision-heavy interview — `create-spec`'s
+  Step 0 first — can run as a full-screen browser form instead of a chat
+  exchange: one decision per screen with the context the agent already knows,
+  Markdown, Mermaid or HTML explainers, option cards that state each option's
+  consequences with the recommended default marked, and a question panel for
+  asking the agent. Round-based and file-based, so it works the same under
+  every harness: the agent writes
+  `.vinta-ai-workflows/interviews/<slug>/rounds/round-NN.json`
+  (`interview-round.v1`), blocks on `vinta-ai-maestro interview wait`, and
+  resumes when the page submits `answers/round-NN.json`
+  (`interview-answers.v1`). The page is maestro's
+  (`interview start|wait|status|stop --dir <dir>`,
+  [SPEC.md § 20](packages/vinta-ai-maestro/SPEC.md)), rendered with the design
+  system; the server binds loopback, carries a token in the printed URL,
+  serves documents only from the interview's `docs/` and accepts a round's
+  answers once. Opt in with the new `interview-ui` foundation skill (bootstrap
+  **Optional foundation skills** question 7, `foundation_skills.interview-ui`
+  in the config schema); it ships `SKILL.md` and an example round, and needs
+  `vinta-ai-maestro` runnable from the project (`npx --no-install
+  vinta-ai-maestro` when it is a devDependency, `npx vinta-ai-maestro`
+  otherwise). `create-spec` asks once per interview whether to decide in the
+  browser or in chat; projects without the skill see no change.
 
-  Edits the agent makes to the plan show on the page within seconds.
-  **Approve plan** ends the loop. The review is committed beside the plan as
-  `ai-plans/<id>.review.json`. A new generated schema,
-  `schemas/plan-review.v1.schema.json`, validates it. Maestro's SPEC gains
-  §19 to describe it.
-- **`vinta-ai-maestro validate <workflow.json> [--json]`.** It checks a
-  workflow the way a run loads it, layered over `.vinta-ai-workflows.yaml`.
-  It also checks two things only a run used to find: the filename matches
-  the id, and every `plan_ref`, `prompt_ref` and `plan_context_refs` anchor
-  names a heading the plan has. Exit `0` means valid and `1` means not.
-  `--json` gives an agent one object with each issue's source, path and
-  message.
-- **`plan-feature` validates its workflow and runs the review.** When
-  `vinta-ai-maestro` is installed (on `PATH`, in `node_modules/.bin`, or
-  already cached for `npx --no-install`), the skill runs `validate --json` on
-  every workflow it writes. It fixes each issue and runs the check again, and
-  runs it again after every edit made during review. It never installs maestro
-  itself.
-
-  Once the files are written, the skill asks how to review: on the review
-  page, in chat, or later. On the page it serves the review, posts an
-  opening message, and loops on `review wait`. It edits the plan and then the
-  workflow for each comment, and answers every thread. The loop ends when the
-  plan is approved.
-
-- **Model fallbacks for models that run out of quota.** A frontier model sold
-  as a small credit allowance used to stall a whole run when its credits ran
-  out: the `quota` refusal parked the harness, and every model on it waited
-  for a reset that might never come. Now a model can name a fallback, and the
-  run switches to it instead of waiting.
-  - **`ai-models.yaml` entries take `fallback:`.** The shipped table sets
-    `claude-fable-5-1 → claude-opus-5-5` and `gpt-6-astra → gpt-5.6-sol`
-    (tier 4). `ai-models.v1.schema.json` gains the optional field, and the
-    nightly `check-ai-models` job checks fallback ids for staleness too.
-  - **Maestro: `defaults.model_fallbacks`** (model id → fallback id), in a
-    plan's workflow or in `.vinta-ai-workflows.yaml` under
-    `maestro.defaults`. A `quota` refusal on a listed model retries the
-    spawn on its fallback right away and leaves the harness unparked. Later
-    spawns of that model on the same harness go straight to the fallback,
-    until the reset time the vendor gave, or for the rest of the run if it
-    gave none. This also covers a turn cut off mid-way and the monitor and
-    conflict-fixer spawns. Chains are followed. If the fallback is refused
-    for quota too, the whole account is out: the harness parks as it did
-    before. Each substituted spawn is journaled as `node_model_fallback`.
-  - **`plan-feature` writes the map** into each plan's workflow from the
-    crew's `fallback:` entries. The plan-execution skills (`implement-phase`,
-    `review-phase`) follow the same rule when maestro isn't running them.
 - **`thermo-nuclear-review-loop` foundation skill.** A review-and-fix loop
   over a change: the agent running it spawns one reviewer sub-agent, checks
-  each finding against the code, fixes the justified ones and answers the
-  rest, until the reviewer explicitly approves under a strict code-quality
-  standard. Questions only the human can settle (unreachable scenarios,
-  requirement ambiguity, destructive operations) go to them instead of being
-  assumed. Always shipped and copied verbatim (new
-  `foundation_skills.thermo-nuclear-review-loop`), because `review-phase`
-  runs it and every maestro workflow `plan-feature` writes names it in its
-  `review` chore. Also
-  invokable on its own. **Consumers**: re-sync to pick it up.
-- **Project defaults for maestro in `.vinta-ai-workflows.yaml`.** A new
-  `maestro:` section holds what every plan's `.workflow.json` used to repeat:
-  per-type gate defaults, resource pools, chores, run defaults and the
-  `project` block. Maestro layers each plan over it. The project's
-  `commands.*` come first, then `maestro.*`, then the plan, then the run's own
-  amendments. A plan now states only what is different, and editing the
-  project file reaches every plan that did not override it.
-  - **Gate types.** A gate with `"type": "test" | "lint" | "typecheck" |
-    "e2e"` takes its command from `maestro.gates.<type>`, else from
-    `commands.test_unit` / `lint` / `build` / `e2e`. A `maestro.gates.<type>.cmd`
-    gives maestro its own line, and `implement-plan` keeps running
-    `commands.*`. Every type the project has a command for is available under
-    the type's name, so a node can list `["typecheck", "test"]` with no gate
-    table.
-  - **`defaults.gates`**, the gates every phase runs unless it names its own.
-    `defaults.harness` and `defaults.pipeline` now default to `claude-code`
-    and `standard-phase`, and `base_branch` defaults to
-    `project.default_branch`.
-  - **The bootstrap asks for these** (interview item C.11) and writes the
-    section. `plan-feature` reads it and emits only plan-specific values.
-- **Scoped and full gates.** A gate can carry a `scoped_cmd` with
-  `{changed_files}` / `{touches}`. Phase gates run it, and the full `cmd` runs
-  once on each wave's merged tree. A failure there is a regression between
-  phases, and it fails the merge (`defaults.gate_scope: scoped`, the default;
-  `full` runs `cmd` everywhere). `commands.test_unit_scoped` and the new
-  `commands.lint_scoped` are inherited as scoped commands when they contain a
-  placeholder. `implement-plan`'s scoped suite fills the same placeholders.
-- **Every maestro run works on a plan branch, `plan/<workflow-id>/base`.**
-  It is cut from `base_branch` at start, and phases and waves build on it.
-  Pull requests still target `base_branch`. Commit a change to
-  `.vinta-ai-workflows.yaml` or the plan's `.workflow.json` on that branch,
-  and the running plan picks it up as a `config` amendment that names the
-  commit. A config change never undoes a change an operator or the monitor
-  made in the run, never rewrites a phase that has started, and ships with
-  the plan's PR. `run` warns when the checkout's config file differs from
-  what is committed on the plan branch.
-- **The gate guard.** On claude-code, every maestro agent gets a
-  `PreToolUse` hook, in every permission mode, through the per-lane settings
-  file only. It refuses two things: a gate's full command typed by hand
-  (answer: `vinta-ai-maestro gate <id>`), and a command matching a pool's new
-  `match` patterns when run without the lease (answer:
-  `vinta-ai-maestro with <pool> --`). Refusals are journalled as
-  `bare_gate_blocked`. The hook fails open and never auto-approves anything.
-  On codex and opencode a matching command is recorded after the fact as
-  `bare_gate_detected`. `doctor` reports which you get as
-  `gate-guard:<harness>`.
+  each finding against the code, fixes the justified ones and answers the rest,
+  until the reviewer explicitly approves under a strict code-quality standard.
+  Questions only a person can settle — unreachable scenarios, requirement
+  ambiguity, destructive operations — go to them instead of being assumed.
+  Always shipped (`foundation_skills.thermo-nuclear-review-loop`), because
+  `review-phase` runs it and every maestro workflow names it in its `review`
+  chore; also invokable on its own.
+
+- **`plan-feature` emits an executable workflow and staffs a crew.**
+  `ai-plans/YYYY-MM-DD-<feature-kebab>.workflow.json` lands beside every plan,
+  unconditionally — a project with no orchestrator carries a file nothing
+  reads, and one that adopts maestro later finds its plans already executable.
+  It is the same phase graph in the form a run loads: one node per phase,
+  `depends_on` from each phase's `**Depends on**:` line, its Touch List, gates,
+  pools and crew member, validated by `workflow.v1`. The plan opens **Phased
+  Rollout** with a **Crew** table and an **Execution graph** table, and every
+  phase carries `**Assigned to**:` and `**Depends on**:` lines; they replace
+  `**Suggested AI model**:`, which old plans may keep. The skill asks what a
+  phase lane needs its own copy of and writes the workflow's `project` block,
+  emits the codegen steps and append-only files it detects in the project,
+  writes the crew's model fallbacks, puts a contract test for any interface two
+  parallel phases share into the foundation phase, and reads the post-mortems
+  of earlier runs before drawing the next graph.
+
+- **`implement-plan` runs independent phases in parallel** on the skills path
+  too, with no maestro. The plan carries a dependency graph and the conductor
+  schedules against it: a phase starts as soon as every phase it depends on is
+  green and a worktree lane is free. A chain-shaped plan behaves exactly as
+  before. Lanes are a pool of worktrees, branches base on their dependencies
+  (`integ-<id>` for several, `plan/<id>/wave-<N>` per wave), tracking is a
+  directory with one file per phase so wave merges never conflict on it, a
+  sibling-lane write guard covers the pool, and `modular-commits` keeps its
+  atomic units on lane branches. Two new config fields:
+  `run_options.implement-plan.parallel_phases` (default `true`) and
+  `max_parallel_lanes` (default `3`). The skill refuses rather than degrading
+  when parallel execution is asked for and worktrees are unavailable.
 
 - **Provision worktrees with your own script instead of the `prepare-worktree`
-  skill.** Set `commands.worktree_prepare` in `.vinta-ai-workflows.yaml` (and
-  optionally `commands.worktree_teardown`), and `implement-plan` runs that
-  command for the shared worktree, every lane and the integration worktree.
-  No LLM step and no `agent_models.worktree_prep` delegate are involved.
-  Worktrees, and therefore parallel phases, are now available when the skill
-  is enabled **or** the command is set. When both are set the command wins,
-  and the skill is offered as a fallback if the command fails.
-  - **The contract.** The command runs from the repo root with
-    `VINTA_WORKTREE_NAME`, `_PATH`, `_BRANCH`, `_BASE_REF`, `_KIND`
-    (`single` | `lane` | `integration`), `VINTA_MAIN_CHECKOUT`,
-    `VINTA_PLAN_PATH` and `VINTA_WORKTREE_SUMMARY` set. It must create a
-    runnable worktree at that path, on that new branch, and exit non-zero on
-    failure. The conductor then checks the result with git rather than
-    trusting the exit code: the right branch, the worktree registered, and
-    the main checkout's status unchanged. Writing the summary YAML is
-    optional. A summary carrying `reset_cmd`s lets a lane be reused across a
-    migration boundary. Without one the lane is re-provisioned (teardown,
-    then prepare again) instead. Lanes are provisioned one at a time, because
-    the command runs `git worktree add` itself.
-  - **Sandbox tier.** The conductor probes the tier itself. With the skill
-    disabled, its `sandbox-run.sh` is not installed, so the tier is `none` and
-    the review-phase stray-write check is the guard.
-  - **Bootstrap.** The `prepare-worktree` question gains a
-    `Yes — we provision with our own script/command` option.
-    `vinta-analyze-codebase` now records existing worktree scripts in
-    `commands.worktree_candidates`, and the interview offers them as the
-    command. Existing configs need no change.
-  - **The bootstrap can write the script for you.** A fourth answer,
-    `Yes — generate a provisioning script for this project`, adds an optional
-    step after `vinta-derive-skills`. It writes `prepare.sh`, `teardown.sh`
-    and a shared `lib.sh` (default `scripts/worktree/`) from bundled
-    templates, and points `commands.worktree_prepare` / `_teardown` at them.
-    The templates carry the contract: `--dry-run`, sanity checks, rollback of
-    a half-made worktree, generic compose isolation, the full summary YAML,
-    and a teardown that refuses a dirty worktree, drops only `*_wt_<name>`
-    databases and never runs `down -v`. They also refuse to fork or drop a
-    database on a non-local host. The bootstrap fills only the project's
-    dependency, env, database and service steps from the inventory, then
-    verifies with `bash -n`, a dry run, and an optional real smoke test. The
-    scripts are the project's to commit and edit; humans can run
-    `prepare.sh <name>` / `teardown.sh <name>` directly too.
-- **Agents stop for input with clickable questions instead of prose.** When a
-  skill or a sub-agent needs a decision from you, it now asks through your
-  harness's structured question tool, so you get the options as buttons plus
-  a free-text field, rather than a question buried at the end of a long
-  report. The tools are Claude Code's `AskUserQuestion`, OpenCode's
-  `question`, Codex's `request_user_input`, Cursor's `AskQuestion`, VS Code
-  Copilot's `askQuestions` and Gemini CLI's `ask_user`.
-  - **`AGENTS.md` gains an "Asking the human" section.** Its canonical text is
-    in [`vinta-write-agents-md/resources/asking-the-human.md`](skills/vinta-write-agents-md/resources/asking-the-human.md),
-    which `vinta-write-agents-md` copies verbatim between
-    `asking-the-human:start/end` markers. The section maps the tool name per
-    harness and sets the question shape. Every question has 2–4 concrete
-    options with descriptions, the recommended one first and marked
-    ` (Recommended)`, and no "Other" option. Questions are batched up to 4 per
-    call (3 on Codex). Open-ended questions still offer the candidates the
-    agent found. Confirmation gates are questions, never "reply go". It also
-    gives the fallback when no tool is available.
-  - **Sub-agents return `status: NEEDS_INPUT`.** Claude Code and Codex do not
-    let a sub-agent call the question tool. A phase agent that hits a decision
-    it should not make alone now stops at a clean point and returns a
-    `questions:` block in the tool's own shape. The new
-    `plan-execution/partials/relay-questions.md` is included by
-    `implement-phase`, `review-phase` and `amend-plan`. It turns that block
-    into an `AskUserQuestion` call, records the answer in tracking, and
-    continues the same agent. `implementer-prompt.md#NEEDS_INPUT` carries the
-    contract into every composed implementer prompt, and
-    `vinta-derive-subagents` puts it in every read-write agent body. The
-    dependency-license block, which used to tell a sub-agent to "ask via
-    `AskUserQuestion`", now returns `NEEDS_INPUT`.
-  - **Prose stop points became option questions** across the plan-execution
-    unit, the foundation skills and the bootstrap skills. Examples:
-    - choosing the plan file;
-    - the start-run gate, which replaces "wait for go";
-    - the Tier-4 failure: amend the plan, retry with guidance, skip the
-      phase, or stop;
-    - resuming a run;
-    - a missing worktree;
-    - graph and crew validation;
-    - wave-merge conflicts;
-    - rebase failures, co-authored branches and merged phases in `amend-plan`;
-    - review findings that need a human decision;
-    - migration failures in `prepare-worktree`;
-    - mismatches when `handoff` resumes;
-    - the three-failed-attempts stop and MCP preflight failures in
-      `systematic-debugging`;
-    - the unclear-file, date and sidecar questions in
-      `vinta-migrate-plans-specs`.
-  - **Consumers:** `vinta-sync-ai-tools` adds a one-time migration. It
-    appends the section to an existing `AGENTS.md`, adds the needs-input
-    contract to read-write agent YAMLs, and re-renders the affected skills
-    together.
-- **`vinta-ai-maestro` shows an agent's questions as a card you click.**
-  - **Detection.** The scheduler reads every agent turn as it drains
-    (`src/questions`). It takes a `NEEDS_INPUT` block in the agent's last
-    message, or a question tool call (`AskUserQuestion` / `question` /
-    `request_user_input`) that was its last act. Either one parks the node on
-    a new `kind: 'agent'` question.
-  - **The card.** It shows each option as a button with its description, and
-    marks the recommended one. The last choice is always **Other**, which
-    holds a free-text field. On a single-choice question it is exclusive:
-    typing in it deselects the picked option, and picking an option deselects
-    it. The daemon applies the same rule to an API answer. A single single-choice question
-    answers on the click. Several questions run as a wizard: one step per
-    question, with picking an option moving on and number keys to pick, then
-    a review step and Send.
-  - **The answer resumes the agent's own session.** The turn's effect returns
-    only once the agent stops asking. Under `--retry-after`, an unanswered
-    question takes the recommended options and is journalled as `unattended`.
-  - **§11 still holds.** The questions are written to the transcript as an
-    `agent_question` entry. The journal row carries a fixed sentence and the
-    effect id, and the answer is journalled as option indices plus the
-    operator's words.
-  - **API.** `POST …/answer` accepts `answers` (one
-    `{ selected, text? }` per question) as well as the scalar `answer`.
-    `NodeDetail.question` gains `ask`. The implementer prompt now teaches the
-    `NEEDS_INPUT` block. `MockAdapter` takes `scripts`, one per session.
+  skill.** Set `commands.worktree_prepare` (and optionally
+  `commands.worktree_teardown`) in `.vinta-ai-workflows.yaml`; `implement-plan`
+  and maestro run that command for every lane and the integration worktree,
+  with `VINTA_WORKTREE_NAME`, `_PATH`, `_BRANCH`, `_BASE_REF`, `_KIND`,
+  `VINTA_MAIN_CHECKOUT`, `VINTA_PLAN_PATH` and `VINTA_WORKTREE_SUMMARY` set,
+  and check the result with git rather than trusting the exit code. The
+  bootstrap offers existing worktree scripts `vinta-analyze-codebase` found,
+  and can write the scripts for you — `prepare.sh`, `teardown.sh` and `lib.sh`
+  under `scripts/worktree/`, from templates that carry the contract, dry runs,
+  rollback, compose isolation and a teardown that refuses a dirty worktree.
 
+- **Agents stop for input with clickable questions instead of prose.** Every
+  skill and sub-agent asks through the harness's structured question tool
+  (Claude Code's `AskUserQuestion`, OpenCode's `question`, Codex's
+  `request_user_input`, Cursor's `AskQuestion`, Copilot's `askQuestions`,
+  Gemini CLI's `ask_user`): 2–4 options with descriptions, the recommended one
+  first. `AGENTS.md` gains an **Asking the human** section, copied verbatim
+  from
+  [`vinta-write-agents-md/resources/asking-the-human.md`](skills/vinta-write-agents-md/resources/asking-the-human.md).
+  Sub-agents, which cannot ask, return `status: NEEDS_INPUT` with the question
+  in the tool's shape, and the new `plan-execution/partials/relay-questions.md`
+  turns it into a question, records the answer and continues the same agent.
+  Every prose stop point across the plan-execution unit, the foundation skills
+  and the bootstrap skills became such a question. `vinta-sync-ai-tools` adds
+  a one-time migration for existing projects.
 
-- **The run view's token, cost and cache figures explain themselves.** Each
-  row in *Sessions and cost* now has an info icon. Hover over it for a quick
-  look, or click to keep it open. It says where the figure comes from and
-  shows the exact counts it was summed from. Token totals are summed from what
-  each harness reports when a session ends. Fresh input is shown apart from
-  cached input. Cost is the harness's own estimate at API list prices, not
-  your bill on a subscription plan. Codex sessions report no cost. Sessions
-  still running are not counted yet. `vinta-design-system` gains a `popover`
-  component.
 - **PR Review Canvas integration (`integrations.pr-review-canvas`).** The
-  bootstrap now offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
-  as its first *integration*: an external tool that installs its own skill.
-  Nothing from it is bundled here. A new optional top-level `integrations`
-  object in `vinta-ai-workflows-config.v1.schema.json` records the opt-in
-  (`enabled` / `disabled`). It is additive, so no schema major bump. The
-  question is interview group D.2. It is asked only when `code_host` is
-  GitHub or GitLab and `pr_creation` is `agents-create`.
-  When it is enabled:
-  - `vinta-install-ai-tools-setup` step 7b runs
-    `pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills`.
-    It writes one tool-owned copy that every vendor symlink reaches, then
-    runs `pr-review doctor`. The CLI is never auto-installed; the step prints
-    `npm install -g @vintasoftware/pr-review-canvas` instead.
-  - The `integrate-phase` PR step runs `/pr-review-canvas <n>` after
-    `open-pr.sh` publishes. This is a runtime gate in `partials/pr-context.md`,
-    so enabling the integration later needs no re-derive.
-  - `plan-feature` adds an `after_pr` `review-canvas` chore to the maestro
-    workflow it writes.
+  bootstrap offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
+  as its first *integration*: an external tool that installs its own skill,
+  nothing of which is bundled here. A new optional top-level `integrations`
+  object in the config schema records the opt-in (interview group D.2, asked
+  when `code_host` is GitHub or GitLab and `pr_creation` is `agents-create`).
+  When enabled, `vinta-install-ai-tools-setup` runs `pr-review install-skill`
+  (the CLI is never auto-installed; the install command is printed), the
+  `integrate-phase` PR step runs `/pr-review-canvas <n>` after `open-pr.sh`
+  publishes, and `plan-feature` adds an `after_pr` `review-canvas` chore to the
+  workflow it writes. The analysis, derive and update skills treat an
+  integration-owned skill as the tool's and never edit it.
 
-  `vinta-analyze-codebase`, `vinta-derive-skills` and
-  `vinta-update-project-skills` treat an integration-owned skill (marker
-  `.pr-review-install`) as the tool's and never diff or edit it. Refresh it
-  with `pr-review upgrade`. `vinta-sync-ai-tools` offers the integration to
-  existing projects as an `opt-in-offer`.
-- **Maestro: System One classifiers (SPEC §17).** A run can now consult a
-  fast classifier: one that answers yes/no or scores a fixed set of labels.
-  Three things use it.
-  - **Configuration.** `run`, `serve` and `doctor` take
-    `--system-one <config.json>`. The file lives on the operator's machine and
-    is never part of the plan. It names the classifier adapter: `http` (POST,
-    bearer key read from the env var you name) or `command` (a local process,
-    JSON on stdin and stdout). Out-of-tree adapters register through
-    `registerSystemOneAdapter`. The file also turns on the built-in judges.
-    This is the only API key the package uses; LLM harnesses still run on your
-    logged-in CLIs. Before a run starts, the preflight asks the classifier one
-    synthetic question, so a missing or rejected key, or an unreachable URL,
-    fails at minute zero rather than at the first gate. `"probe": false`
-    skips it. `doctor` warns about an `http` adapter with no `api_key_env`.
-  - **Judge gates.** A workflow gate can be
-    `{ "judge": { "question" | "question_ref", "labels", "fail_on",
-    "threshold", "on_unavailable" } }` instead of `{ "cmd": … }`. It asks the
-    plan's question about the lane's diff and reports exit 0 or 1, so
-    pipelines, the fix loop and the fixer prompt are unchanged. A judge gate
-    can only fail a phase, never pass one that a command gate failed. Agents
-    are not told to run judge gates. Without `--system-one`, a judge gate
-    falls back to its `on_unavailable` setting (`pass` by default).
-    `schemas/workflow.v1.schema.json` is regenerated (`gates` values are now
-    `anyOf` command | judge). The change is additive: existing gates are
-    unchanged.
-  - **Gate triage** (`judges.gate_triage`). When a command gate fails, the
-    classifier reads the end of its log. If it calls the failure flaky or
-    environmental, the gate is rerun once before a fixer is spent. The result
-    is exposed as `gate.triage`.
-  - **`--permission judged`** (claude-code only). Agents run without vendor
-    prompts. A `PreToolUse` hook asks the classifier about each judged tool
-    call (default `Bash`) through a new `POST /api/runs/:runId/permission`
-    endpoint. It fails closed at every step. It needs `judges.permission` in
-    the config. `doctor` refuses it for codex or opencode phases. This is a
-    speed trade-off, not a sandbox.
+- **Model fallbacks for models that run out of quota.** `ai-models.yaml`
+  entries take `fallback:` (the shipped table sets
+  `claude-fable-5-1 → claude-opus-5-5` and `gpt-6-astra → gpt-5.6-sol`),
+  `ai-models.v1.schema.json` gains the optional field, the nightly
+  `check-ai-models` job checks fallback ids for staleness, `plan-feature`
+  writes the map into each workflow's `defaults.model_fallbacks`, and the
+  plan-execution skills follow the same rule when maestro is not running them.
 
-  Every judgement is journalled as `system_one_judged`, with labels and
-  scores only, never the diff, log or command. With a hosted classifier,
-  diffs, gate logs and shell commands leave the machine. Use the `command`
-  adapter with a local model where that is not acceptable.
-- **Maestro: chores that run after the PR opens (`when: "after_pr"`).** A
-  chore can now declare `when`. The default, `before_gate`, keeps today's
-  `polish` timing. `after_pr` runs the chore at the end of `standard-phase`'s
-  `integrate` state, after `open_pr`, for work about the PR rather than the
-  diff, such as a review canvas. `open_pr` now states `pr.opened` / `pr.url` /
-  `pr.number` as facts, so a guard can read them, and the `pr` root joins the
-  guard context. An `after_pr` chore's prompt names the PR and forbids
-  editing, committing or pushing. It is skipped when no PR opened. The
-  validator refuses `after_pr` with `on_failure: "fail"`, because the phase is
-  already merged. `run_chore` takes a `when` param. Custom pipelines that
-  call it without one keep running the `before_gate` chores.
-  `schemas/workflow.v1.schema.json` is regenerated, and the change is
-  additive.
-- **Maestro: the node view links the phase's PR.** `GET
-  /api/runs/:runId/nodes/:nodeId` now carries `pullRequest` (`opened`, `url`,
-  `number`, `reason`), read from the latest `node_pr` event. The **Changes**
-  card shows `#<n>` as a link, or says why no PR opened (`gh` missing or
-  failed). Only an `https://` URL becomes a link. The link carries
-  `rel="noreferrer noopener"` because the page URL holds the daemon token.
-- **The node view shows what a phase changed, and the whole diff on request.**
-  The *Diff* panel used to print `git diff base...branch` for the operator to
-  paste into a terminal. It is now a *Changes* card: how many files changed
-  and how many lines were added and removed, then each file — up to ten, the
-  rest as a count — with its status mark (`A`, `M`, `D`, `R`, `?` for a file
-  not yet added to git), its own `+N −M`, and a five-block bar that compares
-  the files to each other at a glance. *View full diff* opens a new route,
-  `#/runs/<run>/nodes/<node>/changes`, that renders the unified diff with
-  syntax highlighting (shiki, GitHub light and dark following the theme),
-  old and new line numbers, hunk headers with their function context, a
-  sticky file list that scrolls to each file, and a fold on any file past 400
-  changed lines. Within a removed line and the added line it pairs with, the
-  words that differ are marked, so a flipped operator or a renamed variable
-  reads at a glance; a line rewritten rather than edited keeps the row colour
-  alone. *Unified* or *Split* — the old file beside the new — is a toggle in
-  the header, remembered per browser. The daemon serves it from a new endpoint,
-  `GET /api/runs/:runId/nodes/:nodeId/changes`, answered by the git unit: from
-  the lane's **working tree** while the lane still holds the phase's branch —
-  so an agent's uncommitted edits and untracked files are visible while it is
-  working — and from the branch itself once the lane has moved on. The card
-  polls the counts on the node view's cadence and never the patch; the diff
-  view reads the patch once, and again on a button or when the run moves. A
-  patch over 2 MiB is cut at a file boundary and says so; the per-file counts
-  are complete whatever its size. A daemon older than this browser gets the
-  reference — branch, base, lane — as before. (`vinta-ai-maestro`)
+- **Five generated JSON Schemas, and the schemas are checked.**
+  [`workflow.v1`](schemas/workflow.v1.schema.json) (the executable plan),
+  [`postmortem.v1`](schemas/postmortem.v1.schema.json),
+  [`plan-review.v1`](schemas/plan-review.v1.schema.json),
+  [`interview-round.v1`](schemas/interview-round.v1.schema.json) and
+  [`interview-answers.v1`](schemas/interview-answers.v1.schema.json) are
+  generated from zod sources in `vinta-ai-maestro` and byte-compared in its
+  tests; see [`schemas/README.md`](schemas/README.md). `npm run
+  validate-schemas` (part of `npm test`) compiles every schema under `schemas/`
+  with Ajv in strict Draft 2020-12 mode and checks the fixtures in
+  `tests/schema-fixtures/`: `valid/` must pass, `invalid/` must fail.
 
-- **The transcript reads like the harnesses do.** An agent's prose is
-  rendered as the markdown it is — headings, lists, inline code and fenced
-  blocks, the blocks highlighted like the diff — instead of as its asterisks;
-  raw HTML in it stays text. Tool calls are a verb and a target on one line —
-  `Read` and a path, `Shell` and a command, `Edit` and a path with `+N −M`
-  beside it — whatever the harness named the tool (`Bash`, `bash`,
-  `command_execution` and an MCP server's `read_file` all read as what they
-  are), with the result's verdict as a dot at the end of the row because the
-  result now sits under the call it answers. Open, an edit is a diff of its
-  two sides, a write is the file, a shell call is the command and what it
-  printed, a failed one with a red edge. A stretch of consecutive reads,
-  searches and listings is one row — *Explored · 3 reads, 2 searches* — that
-  opens into the calls. The operator's own message is set apart in a tinted
-  block. The transcript panel also takes the height the window leaves it
-  rather than a fixed 480px. (`vinta-ai-maestro`)
-
-- **A plan's PRs now reach `main`.** Phase PRs alone did not: a phase with
-  several dependencies targets its `integ-<id>` branch, and nothing ever
-  targeted that branch, so every PR stacked above it was stuck. Conflict
-  resolutions from wave merges were on no phase branch at all. maestro and the
-  stacked-branches `implement-plan` now open two more kinds of PR:
-  - an **integration PR** per `integ-<id>` branch, into `base_branch`, opened
-    by that phase just before its own PR;
-  - a **plan PR** from the final wave branch into `base_branch`, opened once
-    the last wave merges. Its body lists every phase and integration PR in an
-    order that merges, and the two ways to land the plan: merge it alone, or
-    merge the listed PRs in order and this one last.
-
-  maestro also pushes every wave branch, journals the new PRs (`node_pr` gains
-  `kind`, and a new `run_pr` event), and treats `gh`'s "a pull request already
-  exists" as opened, with that PR's URL, so a retry no longer reports a failure.
-  `prs-context-frontmatter.v1` gains an optional `kind`
-  (`phase` | `integration` | `plan`); `phase_id` and `phase_title` are no
-  longer required for `kind: plan`.
-- **The schemas are checked.** `npm run validate-schemas` (and `npm test`)
-  compiles every schema under `schemas/` with Ajv in strict Draft 2020-12 mode
-  and checks the fixtures in `tests/schema-fixtures/`: `valid/` must pass,
-  `invalid/` must fail. Source-side only — `ajv` and `ajv-formats` are root
-  devDependencies, and nothing new ships.
-- **The plan graph is readable, and says where you are in it.** The canvas
-  `vinta-ai-maestro`'s run view and workflow editor share (`vinta-dag-editor`)
-  was a strip of six-pixel cards: a five-wave plan was framed into a 380px box
-  at half scale, every dependency label was a bordered box truncated to "the
-  BookmarkFolder…" piled on the line it labelled, edges had no direction, and
-  nothing changed when a node was picked. Redrawn: edges carry arrowheads and
-  the ones touching the selected or hovered node are pulled forward while the
-  rest recede; cards show a status dot and label (running pulses; failed and
-  awaiting-human tint the whole card) and clamp a long name to two lines;
-  labels are quiet pills in the gap between waves and spread apart when two
-  share one; the zoom and fit controls are icons with tooltips; an empty canvas
-  says so. **Long text is reachable three ways:** an instant tooltip on hover
-  or keyboard focus for a clamped name or truncated artifact, a label that
-  grows to its full text when hovered or selected, and a details strip under
-  the canvas — in the run view too — printing the selected node's name and
-  status or the selected dependency as a sentence. Keyboard: `+`/`−`/`0` zoom
-  and fit, Enter on the selected node opens it. Double-clicking a node in the
-  run view opens its node view (`vinta-dag-node-activate`).
-- **Dependencies are drawn by dragging.** Drag from a node's handle onto
-  another node; a dashed preview follows the pointer, the source is ringed, and
-  every card says whether it would take the drop — a cycle, a duplicate, or the
-  source itself is dimmed and refused before the gesture is spent. Click-then-
-  pick and the `e` key still work. A refused dependency now says which rule it
-  broke (`vinta-dag-refuse`), and the editor shows that where the gesture
-  happened instead of nothing.
+- **Config schema (`vinta-ai-workflows-config.v1`), all additive.** A `maestro`
+  section holding what every plan used to repeat — gates by type and by id,
+  resources (with `scope`), chores, `defaults` (gates, harness, pipeline,
+  `gate_scope`, `verify_gates`, `base_gates`, `wave_gates`,
+  `pull_requests: phase | plan`, `max_spare_crew`, `substitution`,
+  `escalate_after_rejections`, `model_fallbacks`, `harness_fallbacks`), the
+  `project` block (databases, services, `env_files`, `setup_cmd`,
+  `prepare_cmd`, `reset_cmd`, `recycle_keep`, `hooks`, `lane_seed`), `codegen`,
+  `append_only`, `ci_only` and `post_merge` — which maestro layers each plan
+  over (`commands.*`, then `maestro.*`, then the plan, then the run's own
+  amendments). Also `integrations`, `foundation_skills.interview-ui`,
+  `foundation_skills.thermo-nuclear-review-loop`, `commands.worktree_prepare`
+  / `worktree_teardown`, `commands.worktree_candidates`, `commands.lint_scoped`
+  and `run_options.implement-plan.parallel_phases` / `max_parallel_lanes`. The
+  bootstrap interview asks for each (maestro defaults are group C.11, with
+  follow-ups on `env_files`, the test gate in lanes, a fresh-database form,
+  when the full suite runs, CI checks with no gate, and test-tool caches
+  missing from `.gitignore`), and `vinta-sync-ai-tools` offers them to
+  existing projects. `prs-context-frontmatter.v1` gains an optional `kind`
+  (`phase | integration | plan`).
 
 ### Changed
 
-- **The `interview-ui` foundation skill no longer bundles a server or a
-  shell.** `scripts/interview-ui.mjs` and `resources/index.html` are gone;
-  the skill's commands are `vinta-ai-maestro interview …` (`npx --no-install
-  vinta-ai-maestro` when it is a devDependency, `npx vinta-ai-maestro@alpha`
-  otherwise), and the directory ships `SKILL.md` and `resources/examples/`.
-  The round and answers files are the same, so an interview started on the
-  old shell reads the same under the new page. The requirement moves from
-  Node ≥ 18 to maestro's Node ≥ 22. Projects that bootstrapped the skill
-  before this release keep the old copy until `vinta-sync-ai-tools`
-  refreshes it. `create-spec`, the bootstrap interview's question 7 and the
-  config schema's `foundation_skills.interview-ui` description say so.
-- **`interview-round.v1` and `interview-answers.v1` are generated now**, from
-  `packages/vinta-ai-maestro/src/interview/document.ts` (zod), like
-  `workflow.v1`, `postmortem.v1` and `plan-review.v1` —
-  `pnpm --filter vinta-ai-maestro interview:schema:gen`, checked by
-  `tests/interview.test.ts` — and have fixtures under `tests/schema-fixtures/`.
-  Same shapes and descriptions; `$defs` are named (`explainer`, `option`,
-  `decision`, …) rather than inlined.
-- **`implement-plan` and its sub-skills follow what `vinta-ai-maestro` learned
-  from real runs.** Re-derive the skills to pick this up. Plans and tracking
-  directories written before the change still work as they are.
-  - **Implementers commit when a gate stays red.** They report `FAILURE`,
-    naming the gate, instead of leaving the work on disk. A `NEEDS_INPUT`
-    report also commits what it has. Implementers run every command in the
-    foreground, and never hand-edit a generated file. Each report lists every
-    outer-gate command it ran and its result. The conductor reviews only a
-    `SUCCESS` report whose gates are all green.
-  - **Every spawn of a phase carries its decisions.** A cold re-spawn, a
-    relay re-spawn, a retry and a cold review fix all get a **Decisions
-    already made in this phase** block. A resumed implementer checks the
-    branch for work already committed before it starts.
-  - **Every merged tree runs the full gate**, whatever the `full_test_suite`
-    answer is. That covers each `integ-` base before its phase is dispatched,
-    each wave merge (clean ones included) and the final wave before the plan
-    PR. The integration worktree's test database is recreated when the tree
-    moved under it. Generated files are regenerated, not merged.
-  - **The Quick test scope** now means scoped tests until the review
-    approves, then the full suite once before the phase is integrated.
-  - **The merge fixer gets more rules.** What a side deleted stays deleted.
-    It stages by name only, and verifies narrowly. It also checks for a
-    clean merge that still broke, such as two migrations on one parent.
-    Kept lines a side had deleted are flagged in the wave record and the
-    plan PR.
-  - **Merge handling.** A merge refused by a hook or by git goes to the
-    human, not to a fixer. Existing `integ-` and `wave-` branches are kept
-    rather than recut. A failed wave build is the wave's failure, and its
-    phases stay done.
-  - **The review loop.** A reviewer pass with no verdict is continued once,
-    and never counts as approval. The human can now **Accept as is**, which
-    returns `ACCEPTED`: the phase is integrated with its open blockers
-    recorded. A finding re-raised without new evidence is rejected on the
-    spot. After 3 rejecting passes, a fresh implementer one tier up takes
-    over the phase. A fix round that leaves the tree unchanged while a gate
-    is still red asks the human instead of spending another round. After
-    approval the implementer runs `deslop-comments` over the comments the
-    phase added.
-  - **Re-orientation.** A member moved to its next phase is told first that
-    its objective changed. A continuation that fails or comes back empty is
-    retried cold, with the full brief. An outage, a network error or an
-    expired login no longer escalates the model tier. It asks
-    `Wait and retry` / `Switch model` / `Stop the run`.
-  - **Lanes are recycled fully between phases**, in this order: leftovers are
-    saved to a `refs/wip/` ref, then the tree is reset and cleaned, the branch
-    cut, the database reset and dependencies installed. A lane that will not
-    recycle is replaced by `<lane>-r<N>`. Containers a killed gate left
-    behind are removed. Lane worktrees are provisioned one at a time. A
-    resume rebuilds every wave branch that is missing or short, and redoes
-    an interrupted merge.
-  - **Scheduling.** Two parallel phases adding migrations to the same app now
-    count as file overlap. A covering crew member is capped at one tier
-    above the planned one, and a member planned for a pending phase is not
-    borrowed. The start-run summary lists CI commands that no gate runs.
-  - **The plan PR is the one PR that lands the plan.** The second landing
-    route, merging the phase PRs in order, is gone. Every phase and
-    integration PR opens with a **Landing** section that points at the plan
-    PR. The plan PR marks PRs whose changes are already in the base. The
-    final report says how to carry a late fix into the `integ-` and `wave-`
-    branches, and how to merge a moved base.
-  - **`amend-plan`'s maestro operator recipes** use `switch-harness`,
-    `node reassign`, `node interrupt`, `--harness-profile`, `propagate` and
-    `sync-base`. They no longer tell you to pass a resumed run's flags again,
-    because `run --resume` reuses the run's own policy.
-- **`plan-feature`: plans have fewer, longer phases.** Re-derive the skill to
-  pick this up. A plan drawn before the change is still valid as written.
-  - The phase size ceiling rises from 1500 to 4000 LoC, tests included. The
-    sub-phase trigger moves from 300 LoC to that same ceiling.
-  - The Step 0 **Phase granularity** default flips to bundling
-    closely-related use-cases into one phase, such as CRUD on one entity or
-    two use-cases on one endpoint. One use-case per phase is still available
-    as the opt-in answer, for teams that review best in small PRs.
-  - A phase of a few hundred lines has to justify standing alone, by a
-    different repo, wave or concern. Otherwise it folds into a neighbour.
-    Independent seams become parallel phases only when each side is
-    substantial.
-- **`vinta-ai-maestro`: a chore that reports `Status: FAILURE` is recorded
-  as failed.** Before, every chore except a review was journalled `ran` as
-  soon as its turn returned. A review canvas whose `pr-review prepare` failed
-  twice read as `ran`, and nothing said its PR had no canvas. Now:
-  - Every non-review chore's `Status:` line is read the same way a review's
-    `VERDICT:` line is. A turn that errored also counts as a failure. A turn
-    that ends cleanly with no status line is still `ran`.
-  - A failure is journalled `chore_result` `failed`. The phase is still
-    `done` unless the chore declares `on_failure: fail`. In that case a
-    reported FAILURE now fails the phase, as a broken turn already did.
-  - Failed chores are listed in `status` (and its `--json` output as
-    `failedChores`), in the plan PR body under **Chores that failed**, and in
-    the post-mortem as `findings.failed_chores`. That last field is a new
-    optional field of `postmortem.v1`. The plan PR lists only the chores that
-    had failed when it opened. The last phase's own `after_pr` chores run
-    after it opens, so they appear only in `status` and the post-mortem.
-- **`vinta-ai-maestro`: `better-sqlite3` 13 and `zod` 4.6.7.** `better-sqlite3`
-  moves from `^12.4.1` to `^13.0.3`, a major release that needs Node 22 or
-  newer, as maestro already does. It no longer pulls in its prebuilt-binary
-  download chain, so an install fetches about 35 fewer packages. `zod` moves
-  from `^4.6.1` to `^4.6.7`. Neither changes maestro's behaviour.
-- **`vinta-ai-maestro`: the coordinator's wakes are more specific.**
-  - The `gate_cost` wake lists uncached minutes per phase and flags any
-    single run of 20 minutes or more as probably a cold lane. Runs of a
-    gate's `cold_cmd` no longer count toward the total.
-  - A failed attempt does not wake the coordinator when it already acted on
-    that phase during the attempt.
-  - A session that ends with shell calls that never returned is journalled
-    as `tool_calls_unfinished` and wakes the coordinator.
-  - `amend` lists the affected phases that are running or waiting, which pick
-    up the change only once they stop.
-- **Bootstrap asks about maestro's test gate in lanes.** In the maestro
-  defaults (C.11), bootstrap now asks:
-  - whether a cache-based scoped run (`pytest --testmon`) should fall back to
-    the full parallel suite in a lane with no cache. This emits
-    `scope_cache`, `cold_cmd` and `project.lane_seed`, and proposes a
-    `test_changed` target that falls back when `.testmondata` is missing.
-    It also explains that `--testmon` with `-n` trades correctness for speed.
-  - whether a suite that reuses its database should get a fresh-database form
-    for the integration worktree. This emits `fresh_cmd` and
-    `tuning.allowed_flags: ['--create-db']`.
-  - for each CI check with no gate, whether to add a gate or record it under
-    `maestro.ci_only` with a reason.
-- **Django stack notes** cover database reuse and testmon in lanes, keeping
-  the virtual environment out of a bind-mounted worktree
-  (`UV_PROJECT_ENVIRONMENT=/opt/venv`, `user: "${UID}:${GID}"`), registries
-  every phase appends to, and drf-spectacular `ENUM_NAME_OVERRIDES` for new
-  choice fields.
-- **`plan-feature`** names the enum for same-named choice fields that two
-  phases expose, lists the usual append-only registries, and records CI
-  checks that cannot run locally under `ci_only`.
-- **`plan-feature`: a rename of a shared symbol is an interface change.** A
-  phase that renames something a same-wave sibling also uses does it in the
-  foundation phase or keeps the old name as an alias until the wave lands.
-  One run had a phase call a helper its sibling renamed; each passed alone and
-  the merged wave failed the typecheck.
-- **`plan-feature`: gates cover what CI runs.** The workflow rules now tell the
-  author to read the CI config and give every locally runnable CI job a gate,
-  naming the checks plans miss: a deploy check at warning level, a
-  migrations-complete check, a "generated client is up to date" check. The
-  Django stack notes suggest `manage.py check --deploy --fail-level WARNING`,
-  `makemigrations --check` and a regenerate-and-diff gate for the schema or
-  client. One run's regex-style routes passed every gate and failed CI.
+- **`plan-feature`: plans have fewer, longer phases.** The phase size ceiling
+  rises from 1500 to 4000 LoC, tests included, and the sub-phase trigger moves
+  to that same ceiling; the Step 0 **Phase granularity** default flips to
+  bundling closely-related use-cases into one phase, with one use-case per
+  phase as the opt-in answer. A phase of a few hundred lines has to justify
+  standing alone. A plan drawn before the change is still valid as written.
+  The skill also tells the author to read the CI config and give every locally
+  runnable CI job a gate (and to record the rest under `ci_only`), treats two
+  parallel phases adding migrations to the same app as file overlap, treats a
+  rename of a shared symbol as an interface change, names the enum for
+  same-named choice fields two phases expose, lists the usual append-only
+  registries, tells authors to declare the gitignored files a lane needs under
+  `project.env_files`, and states that `gates: []` means *none*. Its AI model
+  tiers cite the latest OpenAI, Anthropic and Google releases
+  (`claude-sonnet-5-5`, `gpt-6.1-sol`, `gemini-3.1-pro-preview`); tier
+  placement is unchanged. Re-derive the skill to pick these up.
+
+- **`implement-plan` and its sub-skills follow what maestro learned from real
+  runs.** Implementers commit when a gate stays red and report `FAILURE`
+  naming the gate; an uncommitted file does not exist as far as the run is
+  concerned. They run every command in the foreground, never hand-edit a
+  generated file, and list every gate they ran and its result; the conductor
+  reviews only a `SUCCESS` report whose gates are all green. Every spawn of a
+  phase carries the decisions already made in it, and a resumed implementer
+  checks the branch for committed work first. Every merged tree runs the full
+  gate, whatever the `full_test_suite` answer is, and the Quick test scope
+  means scoped tests until the review approves and the full suite once before
+  integration. The merge fixer keeps what a side deleted, stages by name,
+  verifies narrowly, and confirms a resolution by scanning the files for
+  markers, never by asking git; a merge refused by a hook or by git goes to
+  the human. A member moved to its next phase is told first that its objective
+  changed; a continuation that fails is retried cold with the full brief; an
+  outage or an expired login asks `Wait and retry` / `Switch model` / `Stop
+  the run` rather than escalating the tier. Lanes are recycled fully between
+  phases, leftovers saved to a `refs/wip/` ref first. A dispatched phase agent
+  does the work itself: every composed implementer prompt and a guard at the
+  top of each conductor refuse to hand a phase to a sub-agent. The plan PR is
+  the one PR that lands the plan, and every phase and integration PR says so.
+  Re-derive the skills to pick this up; plans and tracking directories written
+  before the change still work.
+
+- **`review-phase` runs the thermo-nuclear review loop.** Each phase is
+  reviewed by `thermo-nuclear-review-loop`, hosted by the conductor because a
+  sub-agent cannot spawn sub-agents of its own: one reviewer one tier above the
+  phase's implementer (a Tier 4 phase is reviewed at Tier 4), each round of
+  findings handed to the phase's own implementer, which verifies, fixes or
+  rejects with counter-evidence and commits the round. A reviewer pass with no
+  verdict is continued once and never counts as approval; a finding re-raised
+  without new evidence is rejected on the spot; after 3 rejecting passes a
+  fresh implementer one tier up takes over; after 20 passes that still return
+  blockers the conductor asks whether to continue, stop the phase unapproved,
+  **Accept as is** (integrated with its open blockers recorded) or amend the
+  plan. After approval the implementer runs `deslop-comments` over the
+  comments the phase added.
+
+- **`amend-plan` cascades along the dependency graph, and amends a live
+  maestro run.** A rewrite touches the amended phase's dependent closure
+  instead of "every phase with a higher number", rebases in topological order,
+  rebuilds `integ-` bases first, refuses to run while a phase is in flight, and
+  gains a `dependency-change` amendment kind. When a maestro run of the plan is
+  running, paused, interrupted or failed, the skill asks whether to amend it,
+  edits the plan and the run's own workflow copy, commits both on the plan
+  branch and applies them with `vinta-ai-maestro amend`; it also carries the
+  operator recipes for a live run (`switch-harness`, `node reassign`, `node
+  interrupt`, `--harness-profile`, `propagate`, `sync-base`).
+
+- **`prepare-worktree`: worktrees get their own copy of the dependency dirs,
+  never a symlink.** A symlinked `node_modules` / `vendor/` / `venv/` sent
+  writes back into the main checkout and made parallel worktrees race on one
+  tree. The skill copies every dependency dir with a copy-on-write clone
+  (`cp -ac` on macOS, `cp -a --reflink=auto` on Linux) and reinstalls
+  virtualenvs and yarn PnP; `skills.prepare-worktree.deps_strategy` now
+  defaults to `copy`. The skill also documents provisioning a pool of lanes for
+  one plan with a `reset_cmd` per forked database, and its summary's `|`
+  alternatives are closed sets read by machine. **Consumers:** re-sync to pick
+  up the new body; worktrees that already exist keep their links until they
+  are re-provisioned.
+
+- **`create-spec` offers a browser surface for its Step 0 interview** when
+  `ai-tools/skills/interview-ui/` exists (see **The browser interview** above).
+  The question bank, clarity loop, read-back and exit conditions are
+  unchanged.
+
 - **`write-unit-test`: time-independent tests and deterministic generated
-  output.** Rule 8 now requires a frozen clock and an explicit timezone on any
-  test touching dates, and host-independent schema or client generation
-  (values from a locked package such as `tzdata`, sorted). The Django pack and
-  stack notes spell out `freezegun` / `time-machine` with
+  output.** Rule 8 requires a frozen clock and an explicit timezone on any test
+  touching dates, and host-independent schema or client generation. The Django
+  pack and stack notes spell out `freezegun` / `time-machine` with
   `override_settings(TIME_ZONE=...)` and `tzdata`-sourced timezone choices.
-  One run had a date test fail only near midnight UTC, and a timezone enum
-  differ by machine.
-- **`vinta-bootstrap-ai-tools`: test-tool caches are ignored before lanes run.**
-  The maestro defaults step reads `.gitignore` for the selected runners'
-  caches and reports (`.testmondata*`, `junit/`, coverage outputs, …),
-  checks for the `check-added-large-files` pre-commit hook, which a committed
-  testmon database trips on every lane and merge commit, and offers to append
-  the missing entries.
-- **`vinta-ai-maestro`: a review that stated no verdict is no longer reported
-  as a rejection.** One run recorded 22 attempts as `review verdict "fail"; 0
-  fix rounds spent`. None had rejected anything: each was a review turn that
-  ended before its reviewer answered (fixed in alpha33 and alpha34). The
-  pipeline still treats silence as `fail`, but the failure reason now says
-  `the review turn stated no verdict`, and the `review` fact carries
-  `stated: false`. The budget clause is renamed to `gate fix rounds spent`,
-  since a review's findings are fixed inside its own turn and never in a
-  separate fix round.
 
-- **`vinta-ai-maestro`: two empty turns in a row park the phase instead of
-  burning its retries.** Right after one run moved its desks to codex, "codex
-  ended the turn without the agent doing anything" failed 20 attempts across 4
-  phases in about two minutes. When one harness ends two turns in a row
-  without the agent doing anything, across attempts, the phase now skips its
-  automatic retries and asks: the question says the harness is failing and
-  suggests `retry with` a member on another harness. `--retry-after` still
-  answers it, and backs off from the first question.
+- **Django stack notes** cover database reuse and testmon in lanes, keeping
+  the virtual environment out of a bind-mounted worktree, registries every
+  phase appends to, drf-spectacular `ENUM_NAME_OVERRIDES` for new choice
+  fields, and the CI-mirroring checks a plan's gates should carry
+  (`manage.py check --deploy --fail-level WARNING`, `makemigrations --check`,
+  a regenerate-and-diff gate for a schema or client).
 
-- **`vinta-ai-maestro`: a red gate on a merged base is re-run on retry.** One
-  run's base test gate failed once on a test that broke only near midnight.
-  Seven retries replayed the cached verdict, each reported as "failed during
-  setup, before any agent ran", and the unattended retry was withheld until an
-  operator ran `gate-cache invalidate`. The base gates now replay only a green
-  verdict and re-run a red one, and a red base gate no longer counts as a
-  setup failure, so `--retry-after` keeps retrying it with its usual backoff.
+- **The bootstrap and sync skills.** `vinta-bootstrap-ai-tools` asks the new
+  questions listed under **Config schema** above, no longer offers `symlink`
+  for dependency dirs, and no longer asks for a reviewer tier; the **Optional
+  foundation skills** group grows to eight questions (`interview-ui` is 7,
+  `handoff-to-client` moves to 8). `vinta-analyze-codebase` records existing
+  worktree scripts and integration-owned skills. `vinta-sync-ai-tools` carries
+  the asking-the-human migration, offers the PR Review Canvas integration to
+  existing projects as an `opt-in-offer`, and re-renders the plan-execution
+  skills together. Every generated skill now carries
+  `disable-model-invocation: true`.
 
-- **`vinta-ai-maestro`: a lane that will not recycle says why.** One run
-  failed 20 attempts with only "could not be recycled (worktree)" or
-  "(database)" in the journal and the daemon log. The failure now carries the
-  failing step's exit code and the tail of its stderr, the way a failed
-  `setup_cmd` already did, and a `reset_cmd`, `setup_cmd` or `prepare_cmd`
-  failing during a recycle reports that command's own error instead of
-  `LaneSetupError`. Command lines are still left out.
-
-- **`vinta-ai-maestro`: the full suite runs before a PR, and on every merged
-  tree.** Under `gate_scope: scoped`, a phase's gates ran their scoped form
-  everywhere, so a PR could carry a suite only a scoped run had seen, and most
-  phases were `done` before any full suite touched their code.
-  - A phase's gates run scoped until its review approves; `verify`, after the
-    review, runs every gate's full `cmd` on the phase branch. A red full run
-    goes back to a fixer and through the review again — more review rounds,
-    no failing suite in a PR. The fixer is told the gate failed in full, and
-    `vinta-ai-maestro gate <id> --full` runs the whole command for an agent.
-  - `defaults.wave_gates` now defaults to `every`: each wave's gates run in
-    full on the merged tree, so the next wave builds on a passing one. Set
-    `final` for the previous behaviour.
-  - A multi-dependency phase's `integ-<id>` base runs its dependencies' gates
-    in full before the phase starts, cached on the merged tree; red fails the
-    phase's setup with `BaseGateError`. A clean base merge used to run nothing.
-  - Wave and base gate failures now reach the journal with their gate and log,
-    not just their error name.
-  - Each full run can be skipped in a plan's `defaults` or the project's
-    `maestro.defaults` (`.vinta-ai-workflows.yaml`): `verify_gates: scoped`
-    keeps `verify` on the scoped form, `base_gates: off` leaves merged bases
-    unchecked, and `wave_gates: final` / `off` as before. Both new fields are
-    in `vinta-ai-workflows-config.v1.schema.json`, and the bootstrap asks when
-    the full suite should run. The run coordinator may tighten them, never
-    loosen them.
-- **`vinta-ai-maestro`: a recycled lane no longer keeps the last phase's
-  ignored files.** A lane handed to the next phase kept everything gitignored,
-  and one kept `apps/api/.mypy_cache` and a deleted package's `__pycache__`,
-  so mypy reported 18 errors on clean code. The recycle now cleans ignored
-  files too, keeping only the copied `node_modules`, the `env_files` and the
-  new `project.recycle_keep` patterns. **Migration:** anything expensive your
-  lanes build and should keep across phases, such as a `.venv`, goes in
-  `recycle_keep`; otherwise `setup_cmd`, which already runs on every
-  recycle, rebuilds it.
-- **`vinta-ai-maestro`: agents wait for background work the way a normal
-  Claude Code session does.** A headless session no longer ends at the first
-  turn that leaves background work running. It stays open, the agent is woken
-  in the same session when that work reports, and the session ends on the
-  first turn that leaves nothing running. A held session ends after 30 minutes
-  with no output, and any work still running is cleaned up. Harnesses declare
-  this as a new `backgroundWork` capability:
-  - **claude-code:** the CLI wakes the agent itself. A resumed session also no
-    longer ends on the empty turn the CLI replays first.
-  - **codex:** the adapter wakes the agent itself (see below).
-  - **opencode:** on servers the adapter starts, background `task` sub-agents
-    are enabled through `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`. A
-    configured `baseUrl` reports `false`.
-
-  This fixes the slow review loop. The reviewer, resumed with a message, was
-  killed with the turn. Every round after the first ended "waiting on the
-  reviewer" with no verdict, went to the operator as `unapproved`, and
-  restarted with a cold reviewer. Every turn's prompt now says how to wait on
-  its harness (end the turn, never sleep or poll), naming that harness's own
-  tools. The review starts each round's gates alongside the reviewer's next
-  pass; on opencode, which has no background shell, the reviewer runs in the
-  background and the gates run beside it.
-
-- **`vinta-ai-maestro`: codex runs on `codex app-server` instead of
-  `codex exec`, and needs codex-cli 0.147.0 or later.** `exec` killed
-  background work when the turn ended. App-server keeps it, and the adapter
-  starts the next turn naming, by id, what finished. Codex now also supports
-  `inject`, so steering a running codex node is a message, no longer an
-  interrupt and resume. Each thread is started and resumed with an explicit
-  sandbox, approval policy and reviewer, so `~/.codex/config.toml` can no
-  longer widen `--permission`. Under `--permission ask`, a request for approval
-  is now recorded as a `permission_request` and declined; before, the model
-  could not ask at all. A logged-out codex is refused at spawn instead of
-  failing mid-turn.
-
-- **`vinta-ai-maestro`: an opencode review can no longer pass on its own
-  prompt.** The adapter echoed the user's prompt back as the agent's text. The
-  review prompt contains the line `VERDICT: pass`, so a review that stated no
-  verdict could read as approved. opencode 1.19's `permission.asked` event is
-  now mapped too.
-- **`vinta-ai-maestro`: an unattended run answers `exhausted` and `unapproved`
-  with `continue` once, then `stop`.** It answered `stop` straight away, which
-  failed the phase; the unattended retry then re-drove it from `implement` on
-  a cold session, gates and review from scratch, to reach the same question —
-  twelve failed attempts in one observed run. A plan question's
-  `unattended_answer` may now be a list, one answer per unattended answer
-  within an attempt, the last repeating.
-- **`vinta-ai-maestro`: a phase's dependents start once it has merged, pushed
-  and opened its PR**, when only `after_pr` chores that cannot fail it are left
-  (a review canvas, a PR comment). They used to wait for those too — up to four
-  minutes a phase on the critical path.
-- **`vinta-ai-maestro`: an agent's `gate <id>` is refused while an earlier gate
-  of the phase is red on the same tree**, naming that gate, and runs once the
-  tree moves. A `for g in lint typecheck test` loop no longer runs the suite
-  against a tree its typecheck already failed.
-- **`vinta-ai-maestro`: a crew member woken on a new phase is told the
-  objective changed** before anything else — the previous phase is finished
-  and nothing in flight for it is owed — ahead of the brief and the note about
-  what moved in its worktree.
-- **`vinta-ai-maestro`: the coordinator's gate-cost wake scales with the run**:
-  more than 15 minutes of uncached gate time per phase that ran it, never less
-  than 30 minutes, instead of every 30 minutes; it says how many phases the
-  time is spread over and whether the gate lacks a scoped form.
-
-- **`vinta-ai-maestro`: lane database names stay within Postgres's 63-character
-  identifier limit, with room for test-runner affixes.** A forked lane database
-  or template whose `<name>_wt_<lane>` form was too long was silently truncated
-  by Postgres, so lanes could collide — and Django's `test_` prefix plus
-  pytest-xdist's `_gw<N>` suffix push a name that is itself under 63 over it.
-  Names longer than 40 characters are now cut and end in a short hash of the
-  full name (stable and unique per lane); shorter names are unchanged.
-
-- **`create-spec` offers a browser surface for its Step 0 interview.** When
-  `ai-tools/skills/interview-ui/` exists, the skill asks once whether to make
-  decisions in the browser or in chat. In browser mode the question bank,
-  clarity loop, read-back, and exit conditions are unchanged; each question
-  becomes a decision with `why`, quoted-back `context`, options with
-  consequences, and explainer docs, written one round at a time (A–C first,
-  later groups once the journeys are known). Projects without `interview-ui`
-  see no change.
-- **Bootstrap `Optional foundation skills` group grows to eight questions**
-  (`interview-ui` is question 7; `handoff-to-client` moves to 8).
-- **`review-phase` runs the thermo-nuclear review loop.** On the skills path
-  (`implement-plan`, `amend-plan`, `systematic-debugging`), each phase is now
-  reviewed by `thermo-nuclear-review-loop`, the loop maestro's `review` chore
-  runs. The conductor hosts it, because a sub-agent cannot spawn sub-agents of
-  its own. It spawns one reviewer sub-agent one tier above the tier the
-  phase's implementer ran at (a Tier 4 phase is reviewed at Tier 4), and hands
-  each round of findings to the phase's own implementer. The implementer
-  verifies each finding, fixes the justified ones, rejects the rest with
-  counter-evidence, and commits the round. Questions only a person can settle
-  come to you as structured questions. The phase passes only when the
-  reviewer explicitly approves. After 20 passes that still return blockers,
-  the conductor asks whether to continue for 20 more, stop the phase
-  unapproved, or amend the plan. **Consumers**: re-sync to re-render the
-  plan-execution skills.
-- **Maestro: a phase's review is now the `review` chore.** Once the phase's
-  gates are green, the implementer's own session runs
-  `thermo-nuclear-review-loop`: it spawns one reviewer sub-agent and fixes or
-  answers its findings until the reviewer approves. Then `deslop` runs, and
-  the gates run once more on the final tree. A red gate still goes to the
-  fixer. A review turn that ends unapproved asks the operator to continue or
-  stop. `plan-feature` now emits the `review`
-  chore and `defaults.chores: ["review", "deslop"]`, and transcribes the
-  Crew table's implementers into `crew`.
-- **Maestro: chore `when` is now `review`, `after_review` (the default) or
-  `after_pr`.** `review` chores must end with `VERDICT: pass` or
-  `VERDICT: fail`, and the phase continues only on pass. `after_review`
-  replaces `before_gate`.
-- **Maestro: `max_fix_rounds` has no default, and unset means no limit.** The
-  fixer works on a red gate until it is green, and the review loop runs until
-  the reviewer approves, without asking. Set `max_fix_rounds` on a node to get
-  the old behaviour back: after that many fix rounds or unsuccessful review
-  passes, the phase asks whether to continue or stop. **Migration:** a plan
-  that relied on the default of 4 now runs unbounded; add
-  `"max_fix_rounds": 4` to keep it.
-- **Maestro: every `workflow_amended` row carries `targets`.** Operator and
-  config amendments get them too, computed from the snapshot and the
-  proposal. Before, only monitor amendments had them.
-- **Maestro: a gate command can be amended after a phase that uses it is
-  done.** Changing a gate table no longer counts as rewriting a finished
-  phase. Before, such an amendment was refused as `body_changed_after_done`.
-- **Maestro: the editor saves only what you changed.** It shows the workflow
-  resolved over the project config, and on save it writes back only the
-  edited values. A first save no longer copies every default, or the
-  project's values, into the plan file.
-
-- **Maestro: the node view's right-hand column stays short.** Gate logs open
-  in a dialog instead of an inline accordion. The dialog opens at the end of
-  the log, keeps up with a running gate's output, numbers the lines, and has
-  ← / → to switch gates and a copy button. The question card's gate reference
-  opens the same dialog. Agent sessions are now a timeline with the newest
-  turn first, showing the latest five. The turn that is currently running
-  pulses and counts up. The full history opens in a dialog. The Changes card
-  lists five files instead of ten.
-
-- **`vinta-ai-maestro` node view: steering is a chat input, and every control
-  says what it does.** The separate Steering card is gone. Its message box now
-  sits at the bottom of the Transcript panel and follows it to full page. Add
-  context and Redirect are a toggle over one Send button, which also sends on
-  Ctrl/⌘+Enter. The sentence under the box says what will happen for this
-  node's status and harness before you press it. Pause, Take over, Abort and
-  Retry phase moved to the page header beside the node's status, and only the
-  ones that apply are shown. Abort now asks for confirmation. A new **How
-  steering works** panel documents each control: when it is available, what
-  happens in practice, how to undo it, and what the node's harness supports.
-
-- **Worktrees now get their own copy of the dependency dirs, never a
-  symlink.** A symlinked `node_modules` / `vendor/` / `venv/` sent writes
-  back into the main checkout, because tools resolve real paths: bundler and
-  test-runner caches, `postinstall` output and installs all landed there.
-  Parallel worktrees then raced on that one tree, and the filesystem sandbox
-  blocked those writes in the middle of a run.
-  - **`prepare-worktree`** copies every dep dir with a copy-on-write clone
-    (`cp -ac` on macOS, `cp -a --reflink=auto` on Linux). On APFS, btrfs and
-    XFS that is close to free on disk. It reinstalls virtualenvs and yarn PnP
-    instead, because their trees store absolute paths into the main checkout.
-    When the plan adds deps, it runs an install on top of the copy. In a
-    workspace it copies every member's `node_modules/`, not only the root's.
-    The summary's `state.deps.strategy` is now `copy | reinstall`.
-  - **Config:** `skills.prepare-worktree.deps_strategy` now defaults to
-    `copy`, where it used to default to `symlink`. `symlink` stays in the
-    schema enum so existing configs still validate, but it is deprecated and
-    read as `copy`. The bootstrap interview no longer offers it.
-  - **Maestro:** `LanePool` copies (clones) the main checkout's
-    `node_modules` into each lane instead of linking it. The lane summary
-    records `deps.strategy: copy`. A lane keeps its own tree across recycles,
-    so a project whose phases change deps should run its install in
-    `setup_cmd`. If the main checkout's `node_modules` is itself a link, the
-    lane gets the same link (a junction on Windows). When a resumed lane still
-    holds a link from an older version, that link is replaced with a copy.
-  - **Consumers:** re-sync to pick up the new `prepare-worktree` body. To
-    stop the interview default from being re-emitted, change
-    `deps_strategy: symlink` to `copy` (or `reinstall`) in
-    `.vinta-ai-workflows.yaml`. Worktrees that already exist keep their links
-    until they are re-provisioned.
-- **`plan-feature` AI model tiers pick up the late-September releases.**
-  `plan-feature/resources/ai-models.yaml` now cites `claude-sonnet-5-5`
-  (tier 2, was `claude-sonnet-5`) and `gpt-6.1-sol` (tier 3, was
-  `gpt-6-sol`). The retired `gemini-3-pro` (tiers 3–4) is replaced by
-  `gemini-3.1-pro-preview`, the only Gemini Pro id currently listed. Tier
-  *placement* is unchanged. **Consumers**: re-sync to pick up the refreshed
-  model suggestions.
-
-- **`vinta-ai-maestro run` starts the run as a background job and returns.**
-  The run no longer needs the terminal that started it, or any terminal: close
-  it and the run carries on. `run` prints the run id and the commands that
-  reach it, and if the preflight refuses it prints the report and says the run
-  did not start. **Migration:** a script or CI job that relied on `run`
-  blocking until the run ended, and on its exit code, adds `--foreground`,
-  which keeps the old behaviour exactly. The run's job serves no UI and prints
-  no URL any more — see `ui` below. (`vinta-ai-maestro`)
-- **New commands to reach a background run:** `status [run-id]` (every run, or
-  one run phase by phase; `--json` for scripts), `logs <run-id> [-f]` (the
-  run's job log — what `run` used to print — followed until the job exits),
-  `pause <run-id>` (nothing new starts, running phases finish their current
-  step, then the job exits with the run `paused`; `run --resume` continues it)
-  and `stop <run-id>` (live agent turns and gates are killed and the run ends
-  `cancelled`, which `--resume` refuses). Both also accept `--wait`. Two new
-  run statuses come with them, `paused` and `cancelled`; the post-mortem still
-  reports `done` or `failed`, and a paused run writes none until it ends.
-  (`vinta-ai-maestro`)
-- **`vinta-ai-maestro ui` serves the browser UI, and hosts no runs.** `serve`
-  is the same command under its old name. It reads every run from the journal
-  and forwards a live run's requests and socket to the job hosting it, so
-  watching, steering, answering and taking over work as before — and closing
-  it no longer interrupts anything. A run started or resumed from the UI is
-  launched as a background job with `ui`'s run settings. The job's own token is
-  kept in `.vinta-ai-maestro/runs/<run-id>/job.json` (mode `0600`, removed when
-  the job ends) and is never printed; treat that file like the URL.
-  (`vinta-ai-maestro`)
-- **`purge` keeps a run whose job is still running**, and says so.
-  (`vinta-ai-maestro`)
-- **The run view has Pause and Stop buttons**, beside Replay, while the run is
-  running. Stop asks for confirmation first, because it cannot be undone; both
-  say what is happening until the run's job has ended it. (`vinta-ai-maestro`)
-
-- **The canvas no longer swallows the page's scroll.** A bare wheel over the
-  graph used to zoom it and block the page from scrolling; it now scrolls the
-  page, and zoom is ⌘ or Ctrl + scroll (which is also how a trackpad pinch
-  arrives), the buttons, or the keys. Dragging the canvas shows a grab cursor
-  and never selects text. The host box follows the window's height instead of
-  being fixed at 380px.
+- **`agent_models.fixer` now sets only the merge-conflict fixer's tier.** The
+  phase's own implementer fixes review findings at its own tier, so a project
+  that set `fixer` cheap to save money is saving it on fewer rounds.
 
 ### Deprecated
 
 - **`agent_models.reviewer` is ignored.** The review runs one tier above the
   phase's implementer, so no configured tier is read. The key stays in the v1
-  config schema so existing configs still validate; drop it at your next
-  edit. Bootstrap no longer asks for it. `agent_models.fixer` now sets only
-  the merge-conflict fixer's tier, since the phase's implementer fixes review
-  findings at its own tier.
+  config schema so existing configs still validate; drop it at your next edit.
+
+- **`skills.prepare-worktree.deps_strategy: symlink`** stays in the schema
+  enum so existing configs validate, but is deprecated and read as `copy`.
+  Change it to `copy` (or `reinstall`) in `.vinta-ai-workflows.yaml` to stop
+  the interview default from being re-emitted.
 
 ### Removed
 
-- **Maestro: the monitor's intervention documents.** The watchdog no longer
-  asks the monitor for a JSON proposal of four verbs; the coordinator acts
-  through the run's API under the same "how, never what" rule, enforced on
-  every amendment it makes. `schemas/intervention.v1.schema.json`, the
-  `intervention:schema:*` scripts and `runs/<id>/interventions.jsonl` are
-  gone; the post-mortem's `interventions` now point at the coordinator's
-  conversation.
 - **The three-layer phase review.** `review-phase` no longer runs the
   mechanical checks (including the review-time secret scan, dependency-license
   check and co-author trailer check), the plan-compliance walkthrough
   (including the comment-hygiene check), the crew reviewer, or a separate
-  fixer per finding. The implementer's own install-time license check and
-  co-author rules are unchanged.
-- **Reviewers on the plan.** `plan-feature`'s Crew table loses its `Role`
-  column and its reviewer rows, and phases lose the optional
-  `**Review models**:` line. **Migration:** plans written with reviewer rows,
-  a `Role` column or `**Review models**:` lines still run; `implement-plan`
-  ignores them.
-- **Maestro: the reviewer role and its review loop.** Crew members are
-  implementers only, and the crew `role` field is gone. Also gone:
-  `defaults.reviewer_model` (in the workflow file and in the
-  `.vinta-ai-workflows.yaml` `maestro.defaults`), the consult step and the
-  review ledger. **Migration:** a `.workflow.json` with a crew `role`, a
-  reviewer crew member, a `before_gate` chore or `reviewer_model` no longer
-  parses. Re-emit it with `plan-feature`, or edit it by hand: drop the
-  reviewer members and every `role`, rename `before_gate` to `after_review`,
-  delete `reviewer_model`, and add the `review` chore.
+  fixer per finding; the thermo-nuclear review loop replaces them. The
+  implementer's own install-time license check and co-author rules are
+  unchanged.
 
-### Added
-
-- **Maestro: `land` and `propagate`.** `land <run-id>` says how a finished
-  run lands — the plan PR, with a merge commit, and nothing else — lists every
-  phase and integration PR with its state, and marks the ones whose work is
-  already in the base (every commit they add is a merge of commits the base
-  has, such as a GitHub "Update branch"); `--close` closes those with a
-  comment. `propagate <run-id> <phase>` carries a fix made on a phase branch
-  after the run into every `integ-*` and `wave-*` branch that contains it,
-  keeping the wave chain, and stops at a conflict with the branch untouched.
-- **Maestro: `defaults.substitution`** (`same_tier` | `up_one_tier` | `any`,
-  additive, default `up_one_tier`). A busy member's phase may go at most to
-  the next tier the roster has, and a warm session no longer moves a phase up
-  a tier unless `any`. **Behavior change:** runs that relied on warm-session
-  promotion to a higher tier now stay at the planned tier; set `any` to keep
-  it. Substitutions above plan are shown in `status`, the run view and the
-  post-mortem.
-- **Maestro: post-mortem findings** `failure_causes`, `crew_substitutions`,
-  `operations` and `cross_phase_failures`, and `wave_conflicts[].where`
-  (additive). `plan-feature` reads them.
-- **Maestro: the run coordinator.** The run's monitor becomes its
-  coordinator: one agent per run that is woken when a phase fails, an attempt
-  errors, maestro logs an error about itself, a phase waits 20 minutes for
-  the integration worktree, or a phase or gate crosses its cost threshold, and
-  that can act: steer, redirect, pause, abort or retry a phase, answer a
-  question a `--retry-after` timer could answer, amend the live run, and run
-  commands in a lane or the integration worktree. It reaches the run with a
-  token of its own, everything it does is journalled as its own, and the run
-  refuses what it may not do: change what the plan builds, weaken a check
-  (drop a gate or chore, rewrite a gate command beyond its
-  `tuning.allowed_flags`, edit a judge gate, change `hooks`, lower
-  `wave_gates`), answer a question the operator holds, or halt the run. Woken
-  at most 24 times per run; `--no-coordinator` turns the wakes off
-  (`--no-intervene` still works).
-- **Maestro: `node`, `workflow`, `amend` and `exec` commands.** Steer one
-  phase (`context`, `redirect`, `pause`, `abort`, `retry`, `answer`), print or
-  amend a live run's workflow, and run a command in a lane or the integration
-  worktree with that worktree's environment — its database, compose project
-  and ports — from a terminal. `exec … integration` holds the integration
-  worktree while the command runs, so no merge or unattended retry checks a
-  branch out underneath a manual repair.
-- **Maestro: `defaults.wave_gates`** (`off` | `final` | `every`, additive,
-  default `final`). The phases' gates now run in full on the merged tree:
-  every gate of the plan on the last wave before the plan PR opens, and a
-  wave's gates on any wave whose merge needed a conflict resolution; `every`
-  checks every wave. Merged waves were never tested under `gate_scope: full`,
-  and two parallel phases that each passed their gates disagreed on a signal's
-  keyword arguments, failing 22 tests that only showed up after the plan PR.
-  `plan-feature` now puts a contract test for any interface two parallel
-  phases share into the foundation phase.
-- **Maestro: pausing a phase parked on a question holds it.** Under
-  `--retry-after` the unattended timer no longer answers a question the
-  operator paused; a person's answer releases it, and `status` and the node
-  view say "paused by operator". The pause used to be recorded as `ignored`
-  while the timer fired anyway. Node operations now answer with the delivery
-  they recorded, so `POST …/pause` on a node with nothing to pause reports
-  `"delivery": "ignored"` instead of a bare `ok`.
-- **Maestro: `nodes[].deferred`** (additive). A phase carrying it — the
-  soak-gated flag removal `plan-feature` now emits it on — is not dispatched
-  when its dependencies merge; it parks on a question naming the reason, and
-  the operator answers `start` or `stop`. The scheduler used to run such a
-  phase immediately.
-- **Maestro: `node_wait` and the "waiting for the integration worktree"
-  state.** A phase queued behind the integration worktree journals who holds
-  it; `status` and the node view show it. It used to read `running` with no
-  agent process, which looked like a frozen run.
-- **Maestro: `interrupted` run status.** A signal to the job now kills every
-  live agent turn and gate, the fix round in progress and any merge standing
-  in the integration worktree, and ends the run `interrupted` (resumable)
-  instead of `failed` with orphaned agents still editing the worktree. The
-  daemon's close is bounded so an open browser socket cannot hang shutdown.
-- **Maestro: `doctor` warns about `docker compose run`/`exec` without `-T`**
-  in gates and the `project` block, and `plan-feature` says so.
+- **Reviewers on the plan.** `plan-feature`'s Crew table has no `Role` column
+  and no reviewer rows, and phases have no `**Review models**:` line.
+  **Migration:** plans written with them still run; `implement-plan` ignores
+  them.
 
 ### Fixed
 
-- **`vinta-ai-maestro`: a setup that failed on unchanged inputs is not
-  retried unattended.** A phase whose setup failed twice on the same inputs
-  (the run base's tip, its dependencies' tips and the gates run on the
-  merged base) is no longer retried by the `--retry-after` timer. Red base
-  gates count too. The first retry still runs, so a flaky test gets its
-  second chance. The question names the inputs, and under `--retry-after`
-  the phase is retried as soon as one of them moves. One run retried three
-  phases 37 to 40 times each on the same break, a full suite every time.
-- **`vinta-ai-maestro`: a wave that cannot be assembled parks the phase
-  instead of failing it.** Building the wave inside the last phase's
-  integrate step made any wave failure that phase's failure, and its whole
-  pipeline ran again from the implementer. Now the phase parks in integrate,
-  landed so its dependents start. `retry` rebuilds only the wave, `skip`
-  finishes without it, and `stop` fails the phase with no automatic attempt.
-  The merges already made on the wave are kept. A merge that ran out of fix
-  rounds is retried from the tree its last fixer left: it is verified first
-  and committed without spending a round when it passes. Journalled as
-  `wave_failed`.
-- **`vinta-ai-maestro`: a cross-phase fix is made once.** An `integ-`
-  branch is kept across attempts when its first dependency only moved
-  forward (`refs/vinta-ai-maestro/cut/`), so a fix committed on the branch
-  survives the next attempt. What a fixer changed on a merged tree that was
-  already free of conflicts but still red is kept under
-  `refs/vinta-ai-maestro/fixes/`. A later red merge tries those fixes before
-  another fixer round, and keeps them only if the gates pass
-  (`integration_fix_replayed`).
-- **`vinta-ai-maestro`: a killed gate's containers are checked, not
-  assumed gone.** A docker call that times out under load is no longer read
-  as "no containers". It is retried with more patience, the gate result
-  records `orphan_check: failed`, and the next gate in that compose project
-  sweeps first. A killed integration gate also makes the next run there use
-  `fresh_cmd`.
-- **`vinta-ai-maestro`: a silent review is asked for its verdict before it
-  fails.** A review turn that ended without its `VERDICT:` line (typically
-  "waiting on the tests" after starting them in the background) is asked
-  once more, in the same session, to finish in the foreground and state the
-  verdict. Before, the phase was failed and restarted from the implementer.
-- **`vinta-ai-maestro`: abort and retry drop a phase's pause.** A phase
-  that was paused, aborted and retried kept the pause, and the integration
-  queue passed it over. `status` now shows a waiter paused in that queue as
-  paused, not as held by whoever it queued behind.
-- **`vinta-ai-maestro`: red gate errors name the log instead of guessing.**
-  Base, wave and merge-verify errors no longer call the failure "a
-  regression between" the phases. They name the log and point at
-  `logs --failures`. When the log reads as a stale test database and the
-  gate has no `fresh_cmd`, the error says that instead.
-- **`vinta-ai-maestro`: a late `node answer` says who answered first.** It
-  is `409 not_awaiting_answer` naming who answered and when, not a bare
-  `operation_failed`.
-- **`vinta-ai-maestro`: a stalled Docker daemon is not reported as a
-  missing password.** A database command through docker that times out
-  checks `docker info`, and blames the daemon when it is slow or down.
-- **`vinta-ai-maestro` on Windows: a cancelled `exec` ends.** Cancelling a
-  command run through `vinta-ai-maestro exec` sent the polite tree kill,
-  which on Windows closes the shell and orphans the command; the orphan
-  kept the output pipes open and the cancel hung. The kill is forceful
-  there, as it already was for a gate.
-- **`vinta-ai-maestro`: a failing database command names its cause from
-  stdout too.** `cmd.exe`'s own commands report why they failed on stdout,
-  so a lane reset whose template was missing said only "exited 1". The tail
-  of stdout is the cause when stderr said nothing.
-- **`vinta-ai-maestro`: `doctor` labels workflow files with forward
-  slashes on every platform** (`.github/workflows/ci.yml`, never
-  `.github\workflows\ci.yml`).
-- **`vinta-ai-maestro`: a review chore can no longer leave the lane dirty.**
-  Whatever a review leaves uncommitted, such as a mutation experiment's
-  reverted migration or a generated file, is set aside under a
-  `refs/vinta-ai-maestro/wip/` ref. The lane is then reset to `HEAD` before
-  the gates run, and `review_left_lane_dirty` is journalled. The implementer
-  and conflict-fixer prompts now say to run one test command at a time per
-  lane, to check `docker ps` for leftover run containers, and to treat a
-  single test file that runs past two minutes as a lock or hang.
-- **Plan-execution prompts and the review-canvas chore.** The implementer
-  prompt adds the same shared-test-resource rules. The conflict fixer
-  reports `ENVIRONMENT_STALE` (and changes no code) when the merged tree's
-  failures are columns or tables no model defines, and syntax-checks the
-  files git auto-merged. The reviewer leaves the worktree as it found it:
-  mutation experiments run in a throwaway worktree. `plan-feature`'s review
-  chore prompt says so too. Its review-canvas chore passes
-  `--data-dir .pr-review` inside the lane, and setup ignores `.pr-review/`.
-- **`vinta-ai-maestro`: conflicts in generated files no longer fail a
-  merge.** After each conflict-fixer round, codegen outputs that the round
-  left conflicted, or staged with conflict markers, are settled again and
-  regenerated, even when the fixer aborted and redid the merge. The fixer's
-  prompt now matches: with codegen declared, generated files are the
-  integrator's; with none declared, every conflicted file is the fixer's. An
-  unresolved conflict over files that look generated suggests declaring a
-  `codegen` step.
-- **`vinta-ai-maestro`: `exec` streams, accepts `--reason`, and can be
-  cancelled.** The daemon used to read each answer whole before sending
-  it, so an `exec` queued behind the integration worktree sent nothing, and
-  the client said the run was "not live" while the command still ran later.
-  The answer now streams. The client says who it is queued behind, and
-  ending the client cancels the command, whether it is queued or running.
-  `--reason` is journalled. `exec --detach`, `exec list <run>` and
-  `exec cancel <run> <id>` are new. Every release of the integration
-  worktree lets the next waiter in.
-- **`vinta-ai-maestro`: a paused phase no longer takes the integration
-  worktree.** A paused node waiting in the integration queue keeps its place
-  but is passed over, and is let in once it is resumed. This is journalled
-  as `node_wait` with state `paused`. `status` shows a node as paused as soon
-  as the pause is sent, not only once it takes effect.
-- **`vinta-ai-maestro`: a lane that cannot be recycled no longer fails the
-  phase handed to it.** A recycle that fails (outside the `preserve` stage)
-  takes that lane out of the run and provisions a fresh one, `<lane>-r<N>`,
-  and the phase runs there with nothing charged. The old lane stays on disk
-  and is journalled as `lane_unhealthy`, with any paths git could not remove
-  and their owner's uid. `status` shows it.
-- **`vinta-ai-maestro`: a provider or network outage no longer fails
-  phases.** A turn that ends on an infrastructure error (DNS or connection
-  failures, `upstream-unavailable`, HTTP 5xx or 529, an expired or rejected
-  login) parks the harness with backoff and re-runs the phase when the
-  harness answers. Nothing is charged to its attempts, retries or
-  "N failures in a row" count. A lapsed login is asked once per harness, not
-  once per phase. Each outage is journalled as `outage_started` /
-  `outage_ended`, and `status` shows a line for every open one. The
-  coordinator's digest no longer lists error lines from before a phase's
-  last session that ended well.
-- **`vinta-ai-maestro`: integration gates no longer run against a test
-  database left by another branch.** A command gate may declare `fresh_cmd`
-  (also in `maestro.gates.<type>`), the same check from a fresh database (for
-  example `pytest --create-db`). In the integration worktree it runs instead
-  of `cmd` in four cases: when the tree moved anywhere but forward since the
-  gate last ran there, on the gate's first run there, once more after a red
-  run whose output shows missing or extra columns or relations, and after a
-  conflict fixer ends its turn on `ENVIRONMENT_STALE`. That last round is
-  given back. Each fresh run is journalled as `integration_fresh_state`.
-- **`vinta-ai-maestro`: a killed gate no longer leaves its Docker container
-  running.** A timed-out or cancelled gate, `with` command or `exec` also
-  removes the one-off `docker compose run` containers its lane's compose
-  project started since the command began, before the pools, lease or
-  integration worktree it held are released. A sweep every five minutes
-  removes one-off containers in lanes no phase or `exec` is using, journalled
-  as `orphan_containers_stopped`. Without docker, nothing changes.
-- **`vinta-ai-maestro`: the integrator no longer stages untracked files into
-  a merge resolution.** It stages tracked paths and the merge's own paths
-  instead of `git add --all`, so a gate's leftovers in the integration
-  worktree (a `.testmondata-wal`, say) stay out of the merge commit. A kept
-  resolution that changes paths outside the merge, or whose commit is refused
-  again, is dropped instead of replayed on every retry. A conflict fixer now
-  stages any new file it creates itself, and its prompt says so.
-- **`vinta-ai-maestro`: an amendment reaches the conflict fixer.** The fixer
-  is rebuilt from the amended crew when the plan is amended, so a run whose
-  desks moved to another harness stops failing on "conflict fixer spawn
-  refused" for the harness it left.
-- **`vinta-ai-maestro`: a conflict fixer stopped by its time limit keeps its
-  work.** What the round had is kept under `refs/vinta-ai-maestro/abandoned/`
-  (an interrupted round's too), and the retry's fixer is pointed at it to
-  continue instead of redoing the resolution from scratch.
-- **`vinta-ai-maestro`: an amended harness reaches every phase it moved.** An
-  amendment changed the harness only on phases still `pending`; a failed or
-  blocked one waiting on a retry kept naming the old harness in `status` and
-  the run view, and once the job loaded only the new harness's adapter the
-  run view answered 500 `unknown harness`. Phases past `pending` now take the
-  new harness without losing their status, and the run view leaves out the
-  capacity of a harness the live run loaded no adapter for.
-- **`vinta-ai-maestro`: `land` decides "already in the base" by content.** A
-  review PR is landed when merging it into the base would leave the base's
-  tree unchanged. The ancestry test it used alone kept an `integ-*` PR open
-  after its plan PR merged: three bookkeeping merges were not in `main`, though
-  every branch they merged was. A draft plan PR is now named as one (GitHub
-  will not merge a draft), and `land <run> --ready` marks it ready for review.
-- **`vinta-ai-maestro`: a hook that rewrites files no longer refuses the
-  commit outright.** When a commit fails having left modified files behind — a
-  `pre-commit` formatter or schema generator — they are staged and the commit
-  is tried once more before the operator is asked, in lanes and in the
-  integration worktree. One run had seven merge commits refused this way.
+- **`open-pr.sh` posts inline comments on macOS and reports why a comment
+  failed.** Four bugs in the `open-pr-from-context` script, all seen while
+  publishing a stacked plan from a Mac: a GNU-only `sed` idiom that BSD `sed`
+  rejected, so trailing blank lines were never trimmed; a lowercase
+  `side: right` that GitHub answered with "422 Validation Failed", now
+  upper-cased; `gh api` and `glab api` stderr thrown away, so a failed comment
+  gave no reason; and a multi-line `awk -v` that BSD `awk` rejected when
+  adding to a `## Publish log` section. Projects that patched their own copy
+  can re-sync with `vinta-sync-ai-tools`.
 
-- **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
-  fails unless a tool was refused in it.** The CLI's own turn summary marks a
-  turn `blocked` whenever its last message names a next step for a person —
-  a review ending "Nothing was pushed." over `VERDICT: pass`, an implementer
-  listing an open point — and each such turn was recorded as failed
-  ("claude-code: the turn ended blocked"), an approving review included. One
-  observed phase had 43 of them. The summary now fails a turn only alongside a
-  `permission_denied` in the same turn, the case it was added for; whether
-  the rest did their job is for verdicts, gates and the agent's questions. A
-  turn's errors no longer outlive it in a session held open for background
-  work.
-- **`vinta-ai-maestro`: a merge git stopped with nothing unmerged no longer
-  starts a fixer.** `rerere.autoupdate` replaying a recorded resolution, or a
-  `pre-merge-commit` / `commit-msg` hook refusing the merged code, leaves
-  `git merge` non-zero with no unmerged path, and the integrator handed the
-  conflict fixer an empty file list — nineteen rounds in one observed phase,
-  each told to resolve nothing. With no conflict markers left, the merge now
-  goes to `verify` and is committed, recorded as resolved in 0 rounds; a hook
-  that refuses that commit gets the refused-commit question (commit, commit
-  past the hooks, or abort), worded for a clean merge. Only a red gate sends it
-  to the fixer. A merge git refused before merging anything (an untracked file
-  in the way) fails with git's own error.
-- **`vinta-ai-maestro`: a merge finished by hand survives the next attempt.**
-  A conflict the fixer could not settle fails the phase with "finish the merge
-  by hand … and commit it", and the next attempt's `mergeWave` cut
-  `wave-<N>` again from `wave-<N-1>` and re-merged every member, throwing the
-  resolution away and hitting the same conflict on every attempt. A wave or
-  `integ-<id>` branch that still contains its starting point, and whose merges
-  all brought in work still in the members' current tips, is now kept, and only
-  the members it lacks are merged. A member redone after it was merged still
-  forces a rebuild. The error now says the branch is kept.
-- **`vinta-ai-maestro`: a merged tree that fails its gates is no longer
-  reported as an unresolved conflict with no paths.** Two sibling phases that
-  each added a Django migration on the same parent merged cleanly and failed
-  `verify` together, and the phase failed "unresolved conflict: p4a both
-  changed , …". Each fix round is now told which gate the merged tree failed
-  and where its log is, and the rounds end in `IntegrationVerifyError`, naming
-  the gate and its log path (`nodes/_integration/gates/<gate>.log`).
-- **`vinta-ai-maestro`: `exec` accepts a lane's short name or its phase, and
-  `with` / `gate` work inside it.** `exec <run> crew-3-tier2-2` and
-  `exec <run> p1` were refused `unknown_target`; only the full
-  `<run-id>-crew-3-tier2-2` worked. Both now resolve, and a refusal lists the
-  run's targets. Inside `exec`, `with test-suite -- make test` said "no live
-  run is available" while the run was live: the command now holds leases as the
-  phase running in the lane, or as itself on an idle one, until it exits.
-- **`vinta-ai-maestro`: a fix loop that changes nothing now stops and asks.**
-  A typecheck red because of ignored files left in a lane kept coming back
-  from the gate cache after they were gone, and twenty fixers in a row found
-  nothing to fix. When a gate is red again on the very tree a fixer turn left
-  unchanged, the scheduler reruns that gate once without the cache; if it is
-  still red the same way, `standard-phase` goes to `exhausted` instead of
-  spawning another fixer — with or without `max_fix_rounds` — and the run
-  coordinator is woken. New guard fact `gate.stalled`, new `run_gate` param
-  `no_cache`, new journal event `gate_stalled`. A fixer that moved the tree at
-  all is never a stall. A custom pipeline keeps its own guards and can opt in
-  on `gate.stalled`.
-
-- **`vinta-ai-maestro`: a claude-code review no longer loses a reviewer answer
-  that comes back early.** When a reviewer resumed with `SendMessage` answered
-  while the agent was still writing its last message, the session ended at the
-  turn's `result` and killed the turn the CLI starts to hand over the answer.
-  The review then stated no verdict and went to the operator as `unapproved`.
-  The session now waits for that turn, for at most a minute of silence.
-
-- **`vinta-ai-maestro purge` no longer ends a run you did not name.** A bulk
-  `purge --lanes` removed the lanes of paused, failed and interrupted runs —
-  the integration worktree included — so `run --resume` had nothing to adopt,
-  and a bulk `purge` deleted those runs' frozen snapshots. A run that could
-  still be resumed is now kept whole, directory and lanes, and named with the
-  reason; purge it by name, or pass the new `--force`. A run whose job is
-  still running is kept even then.
-- **`vinta-ai-maestro purge --lanes` tears a lane down, not just its
-  worktree.** It used to leave every forked database, compose stack and lane
-  summary behind, including summaries whose worktree was already gone. Each
-  reaped lane's summary is now its teardown manifest: `docker compose -p
-  <project> down`, `docker volume rm` for its forked volumes, the `reset_cmd`
-  of its own service namespaces, and `dropdb` (or the project's `dropdb_cmd`)
-  for its forked databases — every command listed before anything runs, and
-  under `--dry-run` nothing runs. Only what is provably that lane's is
-  touched: never a compose-delivered database, an index-numbered service slot,
-  or a summary `prepare-worktree` wrote for a worktree you made. A step that
-  fails is reported, and its lane's summary is kept so a rerun retries it.
-- **`vinta-ai-maestro run --help` says which runs resume.** It claimed a run
-  that "finished" could not be resumed, while a `failed` run resumes — its
-  failed phases and the ones they blocked are attempted again, and `status`
-  prints the command for it. The help now names paused, interrupted and
-  failed as resumable, and only `done` and `cancelled` as refused.
-- **`vinta-ai-maestro`: the shipped permission-judge question no longer
-  refuses routine commands.** Under `--permission judged` it allowed 44 of 69
-  commands from a real run, refusing `ls .env*`, `cat .env.example`,
-  `docker ps` and the project's own `make` targets. The question now says a
-  secret is a *value* — listing env files and reading templates is allowed,
-  reading a real `.env` is not — allows read-only inspection and the project's
-  own commands in its worktree, and still refuses pushes, `sudo`, writes
-  outside the worktree and another project's containers or volumes. A
-  project that set its own `judges.permission.question` is unaffected; the
-  default `allow_above` stays 0.9.
-
-- **`vinta-ai-maestro`: the disk preflight sizes the pool the run will
-  really create.** `run --resume` with every worktree still on disk was
-  refused (`3 lanes + 1 integration worktree needs 37.9 GiB, only 18.0 GiB
-  free`) by a doctor that charged for them all again; it now charges only the
-  worktrees still to be made, and passes a resume that makes none. A staffed run
-  is counted as the pool provisions it — a worktree per crew member, not per
-  unit of `resources.lane.capacity` — plus `defaults.max_spare_crew`
-  headroom, and the doctor, the pool and the refusal line now name the same
-  count. The per-lane estimate is the tracked tree at the base branch, the
-  copied `node_modules` and the `env_files`, instead of a walk of the whole
-  main checkout that counted `.git`, the `.vinta-ai-maestro/` store (lanes
-  included) and ignored caches — one run's estimate had grown from 4.0 to
-  9.5 GiB a lane against real lanes of about 1.1 GiB.
-
-- **`vinta-ai-maestro`: an integration merge a pause, stop or kill caught
-  half-way no longer wedges the run.** Every later attempt used to fail on
-  `integration worktree is mid-merge` until someone ran `git merge --abort` by
-  hand. The integrator now recognises a merge it started — one of the plan's
-  phase branches (or a kept resolution, or the plan branch) into one of its
-  `integ-`/`wave-` branches — keeps what it had under
-  `refs/vinta-ai-maestro/abandoned/<branch>`, aborts it and redoes it, so the
-  result is gated again; each one journals `integration_reclaimed`. The same
-  sweep runs on `run --resume` and when a stop outlives its deadline. A conflict
-  left for a person that nobody finished is redone on the retry the same way.
-  A merge the run did not start is still refused by name. A failed `git_merge`
-  of a named branch now aborts its merge.
-
-- **`vinta-ai-maestro`: aborting the only runnable phase no longer ends the
-  run.** A run whose remaining phases all depended on an aborted one ended
-  `failed` at once, and the `node retry` that followed was refused as `run has
-  ended`. Aborted phases now hold the run open for their retry (no timer retries
-  them); `pause` or `stop` ends it. Under `--on-failure stop` an abort still ends
-  the run. A retry sent while the aborted attempt is still winding down is
-  applied once it has.
-
-- **`vinta-ai-maestro`: a gate run inside `with` no longer deadlocks every
-  lane.** `vinta-ai-maestro with test-suite -- vinta-ai-maestro gate test`
-  held the only `test-suite` slot while the gate queued for it, and every
-  lane's tests and gates queued behind the pair (55 minutes in one run). The
-  gate guard now refuses `gate` inside `with` and tells the agent to run the
-  gate on its own. The daemon refuses a gate whose resources the asking phase
-  already holds through `with` (`holds_required:<resource>`), naming the
-  process holding them. The agent prompts state the same rule.
-- **`vinta-ai-maestro`: `with` and `gate` say who they are waiting on.** A
-  queued answer names each holder of the resource: the phase, its lane, and
-  how it holds it (`with` with its process id, a gate an agent ran, or the
-  phase's own gate step). When the holder is the asking phase itself, the
-  message says so. It used to say "held by another lane" in exactly that case.
-  `gate` now says "queued" until the gate has its resources and "running"
-  after; it used to say "running" throughout.
-- **`vinta-ai-maestro`: commands left behind by an ended agent session stop
-  holding capacity.** Each agent session gets a turn id
-  (`VINTA_AI_MAESTRO_TURN_ID`), which `with` and `gate` send with every
-  request. When the session ends, the leases its commands hold are released,
-  their queued waits and queued gates are cancelled, and their next request is
-  refused (`turn_ended`). A request for a phase that is not running is refused
-  too (`holder_not_running`). A command backgrounded with `&` used to keep its
-  place in the queue for as long as it lived: one run had nine such waiters,
-  up to 55 minutes old.
-- **`vinta-ai-maestro`: `pause` finishes while an agent waits on a lease or a
-  gate.** A pause (or stop) now answers every queued `with` and `gate` with
-  `run_pausing` (`run_stopping`) and refuses new ones. The CLIs tell the agent
-  to end its turn, which is the step boundary the pause waits for. Commands
-  and gates already running finish as before. The halt log names each node
-  the drain is still waiting on and what it is doing, and
-  `vinta-ai-maestro pause` prints the same list.
-
-- **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
-  as work.** A session that ended with no text and no tool call — observed when
-  a resumed claude-code session closed a replay of killed background tasks
-  before reading the prompt — counted as a failed review with no reviewer
-  behind it, or, on a crew member's first turn of a new phase, swallowed the
-  new phase's brief so every later turn carried on with the old phase. Such a
-  turn is now retried once, cold, with the whole brief (`node_session`
-  `reason: empty_turn`), and a cold one that is empty too fails the turn.
-
-- **Maestro: an amended gate re-runs instead of returning its old result.**
-  The gate cache matched only the gate's command, so changing a gate's
-  `timeout_s` (the monitor's `retime_gate`) or its `requires` partway through
-  a run reused the result from the old settings on an unchanged tree. The
-  cache now matches every setting that affects the run. Edits to
-  `description` or `tuning` still reuse the result, and so does a
-  `scoped_cmd` edit for runs that use the full `cmd`. Existing
-  `gate-cache.db` entries are dropped once, at the first start after
-  upgrading.
-- **Maestro: PRs say how the plan lands.** Every phase and integration PR is
-  marked as a review unit that lands through the plan PR, and the plan PR says
-  to merge it alone; it used to offer two landing paths, and a 36-PR landing
-  resolved the same conflicts several times by hand. A phase PR also names the
-  sibling phases its base leaves out, so a CI failure in their area is not
-  read as its own.
-- **Maestro: the post-mortem reports what happened.** Conflicts are read from
-  the journal, base merges included, so a run that restarted no longer
-  reports none; amendments and operator operations, failure causes, crew
-  substitutions and cross-phase failures on merged waves are recorded.
-- **Maestro: a finished run stops its compose stacks** (volumes kept) and
-  prints how to remove its lanes and volumes; `status` and `doctor` list what
-  runs that are over left running or on disk. One run left twenty containers,
-  five worktrees and a job process up a day and a half after it was done.
-- **Maestro: wave branches are built across a restart.** Wave completion was
-  counted in memory, so a run that restarted with some phases of a wave merged
-  before and the rest after never built that wave, and the next wave failed on
-  `git checkout` (exit 128) on every retry. A phase the journal calls `done`
-  now counts as arrived; a wave the run never built is built before the wave
-  on top of it, and a wave that completes before the one under it waits for
-  it (`wave_deferred`) instead of failing. A missing wave is named
-  ("wave 5 was never built") rather than left to git. New `wave_built` event.
-- **Maestro: a phase that moved lanes can check out its branch.** The branch
-  is released from the sibling worktree that still had it (detached at its
-  commit, tree untouched) before the new lane takes it. Git's "already used
-  by worktree" refusal failed one phase 39 attempts in a row.
-- **Maestro: a conflict-fixer round has a time limit** (20 minutes by
-  default) and is told to verify only the files it touched; one round spent
-  hours re-running a suite that could not reach its database while three
-  phases queued behind it.
-- **Maestro: recreated lanes read the amended `env_files`.** The pool takes
-  the amended `project` block, so a single-use lane re-provisioned mid-run no
-  longer loses files declared after the run started. A compose-delivered
-  database whose service is in `compose.publish` also gets
-  `<connection_url_var>_HOST`, the same URL on the published host port.
-- **Maestro: a merge commit git refuses no longer leaves the integration
-  worktree mid-merge.** A pre-commit hook failing in the integration worktree
-  left `MERGE_HEAD` behind, and every phase whose base was built there then
-  failed in its own setup on `git checkout exited 1` — four phases, up to
-  twenty-three attempts each, in one run. The integrator now keeps the
-  resolution as a commit under `refs/vinta-ai-maestro/resolutions/<node>`,
-  abandons the merge, and asks the phase whose merge it is: `commit`,
-  `commit --no-verify`, or `abort merge` (the unattended answer under
-  `--retry-after`). A retry reuses the kept resolution. Before any checkout,
-  the integrator refuses a worktree that is mid-merge, mid-rebase or
-  mid-cherry-pick *by name* (`integration worktree is mid-merge: a merge of
-  plan/x/phase-b into plan/x/integ-c …`). A conflict fixer that could not run
-  abandons the merge it was handed.
-- **Maestro: `GitCommandError` carries git's stderr.** The redacted, bounded
-  tail of what git said is in the error, in `node.attempt_failed`, in the
-  journal's `node_error` and so in the UI — `git commit exited 1: …No module
-  named 'settings.local'` instead of `git commit exited 1`. The integrator's
-  own errors (`UnresolvedConflictError` among them) keep their messages too
-  instead of being reported as their class name.
-- **Maestro: a setup failure that repeats is not retried unattended.** A phase
-  that fails before any agent ran, twice in a row on the same line, is parked
-  on its question without `--retry-after`'s self-answer, and the question
-  says why.
-- **Maestro: `project.env_files` reaches adopted lanes.** A resume gives each
-  lane the declared files it lacks and never overwrites one it has, so
-  amending the list reaches lanes that already exist. `doctor` fails a
-  declared file missing from the checkout and warns, by name, when a
-  gitignored file has a tracked example (`.env.example`,
-  `settings/local.py.example`) and nothing declares it.
-- **Maestro: a phase with no gates is no longer a silent pass.** `validate`
-  refuses a node that resolves to an empty `gates` list and `doctor` warns
-  naming the phases, unless the plan sets `defaults.allow_ungated_phases:
-  true` (new, additive). Twelve phases had finished without a check because
-  every node carried `gates: []` where its author meant "the project's".
-- **Maestro: a refused conflict-fixer spawn is backpressure.** A plan limit or
-  quota refusal while spawning the fixer parks the phase on the harness's
-  wait (`waiting_on_capacity`) instead of failing it and retrying on a timer.
-- **Maestro: `createdb` / `dropdb` reach the server `server_url` names.** The
-  template and lane commands pass `-h`, `-p` and `-U` from the URL; they used
-  the local socket, which is not a Docker-published server. The password stays
-  off the command line (`PGPASSWORD` or `~/.pgpass`).
-- **Maestro: `vinta-ai-maestro` resolves from inside every lane.** The daemon
-  writes a launcher for itself into `.vinta-ai-maestro/bin/` and puts it first
-  on the agents' `PATH`, so `with` and `gate` work when maestro is a project
-  devDependency reached through `node_modules/.bin` or `npx`.
-- **Maestro: agents are told a compose-delivered database is unreachable from
-  the host.** The implementer prompt names the connection variables that
-  resolve only inside the lane's compose network and says to run the suite
-  through the project's commands or the gate verb.
-- **Maestro: an editor save writes a patch even when the stored file does not
-  validate.** A cross-reference error in the committed file (a chore the
-  project no longer declares) made the save write the whole resolved document
-  — a hundred-line diff for a one-field edit. The shape is now enough to diff
-  against.
-- **Maestro: `purge <run-id>` forgets the run in `flow.db` too.** The UI went
-  on listing, and offering to resume, a run whose directory was gone.
-- **Maestro: the monitor thinks with the model the run declares now.** It was
-  built once at job start; an amendment to the crew's models reached it only
-  after a pause and resume.
-- **Maestro: `run` says where the run's state lives.** The store is the
-  checkout's, so a `ui` started in another checkout of the same repository
-  (the main one, while the run is in a worktree) lists other runs; the output
-  now names the store and the `--repo` to pass.
-- **plan-feature: `project.env_files` and the gate/chore inheritance rules.**
-  The skill told authors env-file copying did not belong in the `project`
-  block, which left every lane without `.env`; it now tells them to find the
-  gitignored files the project's hooks, gates and settings need (`*.example`
-  siblings, compose `env_file:` lines, the settings module) and to declare
-  them — once, in `.vinta-ai-workflows.yaml` under `maestro.project.env_files`,
-  or in the workflow. It also states plainly that `gates: []` and
-  `defaults.chores: []` mean *none* rather than "the project's", that an
-  override of a project gate must carry `type`, and that `vinta-ai-maestro
-  validate` must exit 0 before the plan is handed over. `vinta-bootstrap-ai-tools`
-  asks about `env_files` when it writes the `maestro:` section.
-- **Maestro: wave merges again use the membership the executor counted.**
-  `RecordingIntegrator.mergeWave` dropped it, so in production a merge fell
-  back to the integrator's own reading of the wave. That reading could differ
-  from the count if an amendment landed in between.
-- **Maestro: the gate run on a conflict resolution uses the amended gate
-  commands.** It used the workflow from the start of the run.
-- **Maestro: the API serves a run's definition as amended.** It cached the
-  snapshot forever, so a monitor retune made in the run's own process never
-  reached the UI.
-- **Maestro: an editor save from `ui` now reaches the run's job.** `ui`
-  is a separate process from the job hosting a run. A save to a running
-  plan's workflow used to replace the run's frozen snapshot from `ui` with no
-  runner: nothing adopted the change, and an amendment that needed a rebase
-  was refused. The job kept running the old definition until a resume. The
-  save is now sent to the job (`POST /api/runs/<id>/amend`), which applies it
-  under the usual amend rules, and `ui` writes the plan file only once the
-  job has accepted it. If the job does not answer, the save is refused
-  (`run_host_unreachable`) and nothing is written.
-- **Maestro: saving in the editor during a run no longer reports a failure.**
-  The amendment response failed the client's schema check even though the
-  save had gone through.
+- **`check-ai-models` no longer mistakes sibling models for snapshots of a
+  cited id.** The matcher used substrings, so `claude-sonnet-5` matched
+  `claude-sonnet-5-5` and hid the newer release, and `gemini-3-pro` matched
+  `gemini-3-pro-image` so a retired model still looked available. It accepts
+  only exact ids, dated or `-vN` snapshot suffixes, and provider prefixes.
 
 - **`implement-plan`'s final report no longer suggests `docker compose down -v`
   to tear down a lane.** `down -v` also deletes the compose volumes a worktree
-  deliberately shares with the main checkout (`shared_volumes`, such as a
-  dependency cache). The report now prints the same sequence the
-  `prepare-worktree` skill documents: `docker compose -p <project> down`, then
-  `docker volume rm` for each volume the worktree forked, then removal of the
-  generated compose override.
-- **`open-pr.sh` posts inline comments on macOS and reports why a comment
-  failed.** Four bugs in the `open-pr-from-context` script, all seen while
-  publishing a stacked plan from a Mac:
-  - Trimming trailing blank lines from `# Title`, `# Description` and
-    `# Comments` used a GNU-only `sed` idiom. BSD `sed` fails on it with
-    "unused label" and trims nothing. A portable `awk` helper does it now.
-  - A comment with lowercase `side: right` got "422 Validation Failed" from
-    GitHub, so failures looked random across files. The script now converts
-    `side` to upper case and falls back to `RIGHT` for any other value. The
-    `prs-context-comments` schema still only allows `LEFT` / `RIGHT`.
-  - The `gh api` call threw away its stderr, so a run of failed comments
-    gave no reason. The CLI's error now prints on one line above each
-    `FAILED` line, and the comment still counts toward exit `1`. The
-    `glab api` call for GitLab had the same problem and gets the same fix.
-  - Adding entries to an existing `## Publish log` section passed several
-    lines through `awk -v`, which BSD `awk` rejects ("newline in string").
-    The entries go through the environment now.
-
-  Projects that patched their own copy can re-sync with `vinta-sync-ai-tools`.
-
-- **`check-ai-models` no longer mistakes sibling models for snapshots of a
-  cited id.** The id matcher used substring matching, so `claude-sonnet-5`
-  matched `claude-sonnet-5-5` (hiding the newer Sonnet and Opus releases).
-  It also matched `gemini-3-pro` to `gemini-3-pro-image`, so a retired model
-  still looked available. It now accepts only exact ids, dated or `-vN`
-  snapshot suffixes, and provider prefixes.
-
-- **The editor's canvas inspector no longer offers fields it then discards.**
-  Its Status and Wave fields were folded back into the workflow and silently
-  dropped — status is run state and wave is computed from dependencies — and
-  Name duplicated the field in the panel beside the graph. They are hidden in
-  the editor through the parts the component now exposes, leaving the
-  inspector the one thing only it can do: a dependency's artifact and the
-  delete actions.
-- **Picking a dependency after a node no longer loses it on the next frame.**
-  The host reported an edge selection as "no node", pushed that back into the
-  canvas, and cleared the edge the moment it was picked; the edge's inspector
-  flashed and vanished. A cleared node selection now leaves an edge selection
-  alone.
-- **Pressing on the canvas's toolbar or inspector no longer pans the graph.**
-- **A timed-out gate says whether it hung or was slow.** A `gate_result` with
-  `status: timed_out` used to carry only the status, so a run with nine
-  timeouts could not say whether any of them was a stuck suite or a host too
-  busy to finish one. It now carries `timeout`: `quiet_ms` (how long the gate
-  had gone without writing anything when it was killed), `output_bytes`, and
-  the host's `load_1m` beside `cpus`. `quiet_ms` near the timeout is a gate
-  waiting on something; a small one with `load_1m` well above `cpus` is
-  contention. Numbers only, as before: nothing the gate printed reaches the
-  row. The monitor's brief points at the new field. Older rows have no
-  `timeout`.
-
-- **Gate durations are now kept, not just displayed.** Every `gate_result` has
-  carried the runner's own `duration_ms` since gates were journalled, and
-  nothing read it back: the figure went to a live panel and was afterwards
-  reachable only by hand-parsing event payloads, so the one measurement that
-  answers "is the suite why this run took an hour" could not be asked of a
-  finished run. `analyzeRun` now rolls it up per gate — runs, cache hits,
-  summed runtime, the slowest single run, verdicts by kind — and each phase's
-  time split carries `gateRunMs` beside `gatePoolQueueMs`, so a run says how
-  much of its working time was the gate queue and how much was the gate. The
-  post-mortem carries the same as a `gate_costs` finding, which is what makes
-  it durable: `plan-feature` reads these artifacts when sizing the next plan,
-  and a gate pool's capacity and `max_parallel_lanes` are one decision made
-  with half the numbers. Cache hits are counted and their time kept in its own
-  `cache_saved_ms` column — a hit's duration is what the gate cost when it last
-  ran, and adding it to the runtime would report time the run specifically did
-  not spend. A verdict written before the runner measured itself is counted and
-  its milliseconds are not: both reports emit a `gate_durations_unrecorded` gap
-  naming the gates, because a gate reported as free is the number a planner
-  would act on hardest.
-
-- **Phases can run chores: declared agent turns that change the diff rather than
-  judge it.** A gate is a shell command that says pass or fail; a chore is an
-  agent asked to do something to the work — rewrite the comments this phase
-  wrote, add the changelog entry, extract the strings that need translating. It
-  runs on the implementer's own session, so the agent that wrote the diff is the
-  one asked to act on it. Declare them in `chores.<id>` (a `prompt` or a
-  `prompt_ref` into the plan, plus an optional `skill` the prompt names) and
-  pick them with `defaults.chores` for the run or `nodes[].chores` for one
-  phase — a node's list replaces the default rather than adding to it, so `[]`
-  opts a phase out. In `standard-phase` they run in a new `polish` state,
-  between a passing review and the gate: a chore edits the tree, so running it
-  later would merge a diff the gates never ran against, and running it earlier
-  would have the fixer rewrite what it just did. A chore that fails, or that the
-  harness had no capacity for, is journalled and the phase continues to its
-  gates — `on_failure: "fail"` is for one the phase is not correct without.
-
-- **The post-mortem now reports what the schedule cost.** Two findings, both
-  derived from events the journal already carried. `critical_path` is the
-  dependency chain that decided the wall clock — each phase's span, the total,
-  and its share of elapsed — because every phase *off* that chain could be made
-  instant without moving the run, and nothing said which phases those were.
-  `idle_capacity` reports the width the graph actually reached against the lanes
-  it asked for: a plan declaring three lanes that never runs more than two
-  phases at once pays for a third worktree, a third forked database and a third
-  desk, and gets none of them back. Run against a real fourteen-hour build, the
-  two say its critical path was **99% of elapsed time** — six phases, effectively
-  serial — with peak concurrency 2 against 3 lanes and **55% of lane time idle**.
-  `plan-feature` already reads these artifacts before drawing the next set of
-  dependency lines; until now neither depth nor width was in them. A
-  `blocking_cause_unrecorded` gap ships alongside, because the chain is what the
-  *graph* forced and a phase can also wait on a busy lane or an unanswered
-  question — which the journal cannot currently tell apart.
-
-- **`--retry-after <15m>`: an unanswered failure question eventually answers
-  itself.** An observed fourteen-hour run spent 4h07m — 29% of its wall clock —
-  parked on "This phase failed. Try it again?" with nobody at the keyboard; the
-  answer, when it came, was `retry`, and it worked. Unset by default, so a run
-  behaves exactly as it did. Accepts minutes bare or a unit (`15`, `15m`, `90s`,
-  `2h`) on both `run` and `serve`. It is deliberately unbounded and fires again
-  on each new question: a version capped by `--retries` would stall at the cap
-  and idle for the rest of the night, which is the failure it exists for. Every
-  firing is a full phase attempt, so the interval is the throttle. It reaches
-  the failure question and nothing else — a plan's own `await_human` gate asked
-  for a person, and both park through the same code, so answering those would be
-  the orchestrator overruling the plan. An unattended answer is journalled with
-  `unattended: true`, because "a human said try again" and "nobody was here" are
-  the same answer with very different meanings.
-
-- **The daemon now has a log of its own, and a Logs view to read it in.**
-  Transcripts said what the agents did; nothing said what the *daemon* did, so
-  "the run stopped and I don't know why" had no evidence behind it at all.
-  `.vinta-ai-maestro/logs/daemon.ndjson` now records what the process bound,
-  every HTTP request and socket upgrade it refused and why, every start request
-  that produced no run, every scheduler dispatch and node transition, and every
-  deadlock — on one clock, so a node failure can be read beside the refusal
-  thirty seconds before it. `GET /api/logs` serves it as a tail or a follow,
-  with filters for level, run, node and a substring of any event or field; the
-  UI's new **Logs** section follows the tail until you scroll up. The file
-  rotates at 8 MiB and keeps five rotations, so it is bounded whatever the
-  daemon's uptime, and `purge` leaves it alone for the same reason it leaves
-  `flow.db` alone — it holds no repository contents, and it is the record of the
-  failure somebody is about to ask about.
-
-- **A crash is no longer silent.** An exception escaping a node's own handling
-  used to become an unhandled rejection on a promise the scheduler does not
-  hold, and an unhandled rejection ends the process: hours of agent turns and a
-  real amount of money, gone with no journal row, no transcript entry and
-  nothing on disk saying why — because the thing that would have said it was the
-  thing that died. Three changes. A node that throws is now **contained** by the
-  rule §6 already states for failures: it fails, its transitive dependents
-  block, and everything independent of it keeps going. A crash that is still
-  fatal is **recorded first** — `daemon.uncaught_exception` /
-  `daemon.unhandled_rejection`, with the error's kind, its stack frames and the
-  ids of every run in flight. And the in-flight runs are **journalled as ended**
-  before the process goes, so `run --resume <run-id>` picks them up instead of
-  finding a row that says `running` for ever. `serve` and `run` both take
-  `--log-level`, `--log-stderr` and `--log-detail`.
-
-- **The log is identifiers only, enforced rather than asked for — plus the one
-  field that is deliberately prose.** A log is called from anywhere, and "please
-  do not log repository contents" is a hope rather than a control. So a field
-  may only hold a string, a number, a boolean or null — an object is dropped,
-  never stringified, which is the way a diff or a file read becomes a log line —
-  identifier values are capped at 200 characters, field names that are secrets
-  by their name are redacted, and the daemon's token is registered at boot so
-  any value containing it is written `<redacted>`.
-
-  The exception is an error's **`message`**, which every failure record carries
-  beside its kind, capped at 2000 characters and redacted like anything else. It
-  is the default because `.vinta-ai-maestro/runs/` already holds every agent
-  transcript and gate log *verbatim*, in the same gitignored store and under the
-  same `purge` — an error message is a rounding error against a directory that
-  is already a copy of the repository, and excluding it cost the one string that
-  most often explains a failure. `--log-detail kind` narrows to the kind and the
-  stack frames for a checkout under a stricter obligation than this store's own.
-- **A run that is dragging can now tune itself, within bounds somebody wrote
-  down.** A run can be mis-*configured* rather than broken — every phase doing
-  what it was asked, every gate reporting honestly, and the whole thing paying
-  for a test database it rebuilds on every gate run in every lane. Nobody needs
-  waking for that, and the post-mortem found it out an afternoon too late to
-  help. Now a watchdog wakes the run's monitor when a phase passes an hour or a
-  gate's uncached cost passes thirty minutes, the monitor reads the gate logs
-  and the durations, and it answers with a **proposal** that the daemon
-  validates and applies through the existing amend path. `--no-intervene` turns
-  it off.
-
-  It proposes; it never writes. Its authority is four verbs — a gate's command,
-  a gate's timeout, a phase's fix budget, a phase's model — and the line they
-  draw is that it may change **how** the run executes and never **what** it
-  builds. There is no way to express a change to a dependency, a phase brief, a
-  touch list, the base branch, or the set of phases: not refused at runtime,
-  unrepresentable.
-
-  The one field that can do real damage is a gate's command, because
-  `--reuse-db` and `-k not_slow` are the same edit to the same string, and a
-  gate narrowed wrongly goes green and looks like success in every log there
-  is. So a command may only be changed when the gate itself declares
-  `tuning.allowed_flags` — a list a person wrote in the committed plan, under
-  review, before the run started — and the proposed command must be the current
-  one's argv tokens, in order, plus additions from that list. A gate that
-  declares no `tuning` block is not tunable, which is the default.
-
-  A run gets three of these in its life, at most one per gate and per phase.
-  What it changed is journalled as identifiers; why it changed it is the
-  monitor's prose and goes in `runs/<run-id>/interventions.jsonl` beside the
-  run, including every attempt that was refused — an agent trying to do
-  something it may not do, with nobody in the room, is the record most worth
-  keeping. See `packages/vinta-ai-maestro/docs/monitor-intervention.md`.
-
-- **`plan-feature` is told what the newer post-mortem findings mean.** The
-  skill documents each finding and what to *do* about it, and three had been
-  added to the artifact without reaching it: `gate_costs`, `critical_path` and
-  `idle_capacity`. A finding a planning agent cannot interpret is a finding
-  that changes no plan, which is the whole return on emitting it — and the
-  three are among the most actionable there are. `gate_costs` sizes the gate
-  pool capacities a plan declares, and separates a slow suite from a fix loop
-  re-paying for the same one. `critical_path` is the chain to re-draw the graph
-  against: shortening a phase that is not on it changes nothing, so a plan that
-  parallelises harder without touching that chain buys nothing at all.
-  `idle_capacity` says the graph never got as wide as the lanes it asked for,
-  which is a fact about the plan rather than about the machine. Each now has a
-  row beside the findings that already had one.
-
-- **The post-mortem says what a run changed about itself, and whether it
-  helped.** `postmortem.v1` gains an `interventions[]` finding: one entry per
-  amendment the run made to itself, with the effect on the thing it changed. A
-  gate is scored against its own uncached durations either side of the
-  amendment — mean before, mean after, `cheaper` / `dearer` / `unchanged`
-  outside a ten-per-cent band. Cached hits are excluded, because a hit reports
-  the duration of the run that filled the cache and would drag the mean toward
-  whichever side of the boundary that run fell on.
-
-  It is a comparison and not a claim of cause, and the schema says so: a gate
-  that got cheaper did so while phases were finishing and caches warming. It is
-  worth carrying anyway, because without it an autonomous editor is one nobody
-  can tell is making runs worse — and because `plan-feature` now reads it, so a
-  project whose `unit` gate wants `--reuse-db` pays to find that out once
-  instead of every run.
-
-  A phase-level change (a fix budget, a model) is reported `unmeasured` rather
-  than estimated: a phase runs once, so there is no before to compare an after
-  against, and the only candidate baseline is a different phase doing different
-  work. An operator's amendment is not scored at all — a person deciding
-  something is not the run choosing it.
-
-- **`schemas/intervention.v1.schema.json`** — the document the monitor answers
-  with, generated from `src/intervention/intervention.ts` the way the workflow
-  and post-mortem schemas are generated from theirs. It is the odd one in
-  `schemas/`: it validates something a *model* writes rather than a skill or a
-  person, and it is the boundary deciding what an unattended run may change
-  about itself.
-
-- **A run no longer dies with the terminal that started it.** `vinta-ai-maestro
-  serve` accepts `POST /api/runs`, so a run can be submitted to a daemon that
-  was already listening and belongs to that daemon rather than to the shell that
-  asked for it; the request answers with the run id as soon as the run is
-  registered, not when it finishes. Previously `run` was the only way to start a
-  run and it hosted its own daemon, so closing the window killed the scheduler
-  and every agent under it — and left the journal claiming `running` for ever,
-  with nothing able to tell that row apart from a run still in flight.
-
-- **`vinta-ai-maestro run --resume <run-id>` picks an interrupted run back up.**
-  Phases already `done` stay done and are not dispatched again, their lane
-  worktrees are adopted rather than re-provisioned — so whatever an agent had
-  written and not committed is still there — and a phase that was mid-turn when
-  the process died runs again from the top of its pipeline, because the turn it
-  was in belonged to a process that is gone. The plan comes from the run's
-  frozen snapshot, never from the document it was written from, so editing that
-  file in the meantime cannot switch plans under a run already under way. A new
-  `run_resumed` event records each hand-over; it is deliberately not a second
-  `run_started`, which would have moved the run's `started_at` to whenever it
-  was last picked up and made every duration short by the length of the outage.
-
-- **`vinta-ai-maestro gate <gate-id>` runs a declared gate from inside an agent
-  turn.** A phase used to run its full gate suite five or six times a round —
-  implementer, reviewer, fixer, reviewer again, then the authoritative `gate`
-  node — and only the last of those consulted the gate cache or the resource
-  pool. Agents now ask the daemon for a gate by id: the result is cached on the
-  same `(gate id, lane tree hash)` key the `gate` node reads, the gate's
-  resources are held by the daemon rather than by whichever agent remembered to
-  wrap the command, and the id resolves to the plan's own command so a scoped
-  approximation cannot be reported as the gate. Each run is journalled as a
-  `gate_result` event and a `gate_run` transcript entry under the GATE band,
-  whoever asked for it.
-
-- **A project declares what makes a lane runnable.** `project.env_files` copies
-  ignored configuration into each worktree, `project.setup_cmd` runs an
-  idempotent setup hook on provisioning and recycle, and the fixed
-  `project.commands` vocabulary tells implementers, reviewers and fixers the
-  project's real lint, typecheck, test and migration entry points.
-
-- **Compose-backed lanes are isolated past `COMPOSE_PROJECT_NAME`.** The daemon
-  now generates an out-of-tree Compose override per lane, strips fixed host
-  ports, re-pins fixed and external volumes, and carries the complete lane
-  environment into agent and takeover processes as well as gates. Explicitly
-  published services receive probed per-lane ports recorded in the teardown
-  summary.
-
-- **Shared services get one namespace per lane.** `project.services` models a
-  fixed index or lane-derived name inside one Redis, RabbitMQ, object-storage,
-  or similar server, with project-owned create/reset commands and capacity
-  validation before provisioning creates templates or worktrees.
-
-- **Agents can take the semaphore a workflow declares.**
-  `vinta-ai-maestro with <resource> -- <cmd>` waits on the run's existing
-  `ResourcePools`, runs the heavy inner-loop command, and releases on exit.
-  Renewable leases expire when their client disappears, are visible in the
-  live journal, and are surfaced in implementer, reviewer and fixer prompts.
-
-- **A failed phase retries itself, and then asks.** `--on-failure` defaults to
-  `retry`: one cold re-attempt (`--retries <n>`, 0–5), and then the node parks
-  on a question — retry, retry with another member of the crew, or stop. The
-  failures this system produces are overwhelmingly environmental and are gone by
-  the second attempt; the ones that survive it are the ones worth a person.
-  `ask` skips the automatic attempt. `stop` is the old behaviour and remains the
-  right choice for CI, because everything else eventually **waits**.
-
-  A failure that survives its retries says so: the reason carries
-  `(after N attempts)`, which no event otherwise records.
-
-- **A failed phase can be retried by hand.** A **Retry phase** button, and
-  `POST /api/runs/:runId/nodes/:nodeId/retry`. It returns the node to the ready
-  set and unblocks the subtree its failure blocked — a phase that died of
-  something environmental holds up work that was never broken. It needs the run
-  to still be in flight, which with the new default it usually is; a run that
-  has genuinely ended is re-run, not retried, and says so rather than doing
-  nothing.
-
-- **The monitor can go and look.** It was given a digest and nothing else, and
-  read exactly as thin as that sounds — it could say a phase had failed and
-  never say what the phase had written. It is briefed as a technical project
-  manager now, with the map: the plan document, each phase's brief, each lane's
-  worktree path, each branch and its base, and where the journal and transcripts
-  live. It has a shell and its working directory is the repository, so it can
-  read the diff before drawing a conclusion. The digest stays as the index —
-  bounded, cheap, enough to know which phase is worth a closer look.
-
-- **The monitor conversation is kept.** It lived in component state, so a reload
-  threw away every question and every answer — a worse record than the run it
-  describes. It is written to the transcript store under a reserved node id and
-  read back on load, so it outlives the tab, the daemon and the run.
-
-- **Panels expand.** Anything holding content that is only nominally
-  summarisable — an agent's transcript, a gate log, the monitor conversation,
-  the steering box — takes the full container width and about a screen of
-  height on demand. The height travels as a CSS variable, because the element
-  that has to grow is a scroller several components below the panel.
-
-- **A run has a spokesperson you can ask.** `serve` grows a **Monitor** panel on
-  the run view: one agent that reads the journal and answers in prose — what is
-  blocked, why a phase failed, what it would take to move on. It runs on the
-  dearest tier on the crew, because it is read by a person deciding what to do
-  about a failing run, and it is asked a handful of times rather than hundreds.
-
-  Three things it deliberately is not.
-
-  **It is not in the permission path.** The obvious thought, once an agent has
-  been refused something, is to put a smarter agent in front of the refusals —
-  but a phase makes hundreds of tool calls (one node in one real run made 179)
-  and a model turn before each is latency and cost spent on questions like "may
-  I run ruff", which should never have been questions. Permissions are settled
-  structurally, once per spawn, for free.
-
-  **It does not read the transcripts.** Piping every agent's output into a
-  second agent would make the monitor the most expensive thing in the run and
-  tie its cost to the work rather than to the questions. It reads a bounded
-  digest — statuses, failure reasons, pending questions, the last few refusals
-  with their sentences, one trimmed last word per phase — so a one-hour run and
-  a one-day run cost about the same to ask about.
-
-  **It has no authority.** It can explain a §9.1 pause; it cannot answer one.
-  An agent that could quietly approve its colleagues' work would turn a
-  checkpoint into a formality, and the checkpoint is the point.
-
-  It answers about **finished runs too**, which is when "why did this fail" is
-  usually asked, and it needs no lane: it writes nothing.
-
-- **`serve` reads `--permission`.** The flag has been accepted and ignored since
-  it existed. It decides how the monitor is spawned, so it is read now.
-
-- **A plan staffs a team, instead of picking a model per phase.** Choosing a tier
-  phase by phase answers "what runs this one" ten times and never adds it up, so the
-  two questions that decide what a feature costs go unasked: how many agents does
-  this need at once, and is any of them too junior for what it was handed.
-  - `plan-feature` opens **Phased Rollout** with a **Crew** table — one row per
-    agent, carrying its tier and the phases it takes — and every phase carries an
-    **`**Assigned to**:`** line naming one of them. It replaces
-    `**Suggested AI model**:`; a plan that still has the old line keeps working, and
-    the executor reads the tier straight off it.
-  - The **Execution graph** table gains an **Agent** column and an **Idle** note.
-    Reading across a row says who is working that wave; reading down a column says
-    who is not. A wave that will serialize because the roster cannot staff it is now
-    stated in the plan rather than discovered as a slow run.
-  - **Every member has to earn their place**, by concurrency (a wave genuinely needs
-    that many hands *at or above* those phases' tiers) or by cheapness (they take
-    work a dearer member would otherwise do). The roster is therefore **not** capped
-    at the widest wave — a junior who runs the migration and the flag deletion is
-    worth having in a graph that never runs two phases at once — but the lane pool
-    still is, because lanes are bought with concurrency and crew are not.
-  - **Reviewers are a role on the crew, and implementers and reviewers are
-    disjoint.** A member has `role: implementer` or `role: reviewer`; a phase cannot
-    be assigned to a reviewer and a reviewer never writes code, so an agent reading
-    its own diff is not something a plan can express. A phase is read by the
-    cheapest reviewer at or above its tier. A roster with no reviewer still runs and
-    falls back to `agent_models.reviewer`, cold, one session per phase.
-    - **A reviewer reads the lane it is reviewing**, with the phase's changes still
-      uncommitted in it, and has no worktree of its own. That is what puts review
-      before the commit: a finding is fixed in the working tree rather than
-      recorded as a mistake on the branch plus a correction after it. The cost is
-      that a reviewer's directory follows the work, so its session carries only
-      between reviews that land in the same lane.
-  - **A crew member is an agent that lives for the whole run.** Each one keeps its
-    own worktree and its own session across every phase it takes, so the agent that
-    takes Phase 4 still knows what it learned about the codebase in Phase 1 —
-    which is most of what a cold agent's first turn of a phase is spent
-    rediscovering.
-    - This works because the *directory* stops moving. Lanes used to be anonymous
-      slots handed out by a free list, so a member landed somewhere different each
-      phase and its context described paths it was not standing in. Pinning each
-      member to one worktree leaves a far smaller question — which files changed —
-      and `git diff --name-only` answers it exactly.
-    - A cross-phase continuation therefore gets the new phase's **full brief** (it
-      is new work, not a delta) behind a re-orientation: same agent, same directory,
-      everything you learned still holds; the tree is on a different branch; these
-      files differ; and — the sentence that matters most — whether the previous
-      phase's own work is in this tree at all.
-    - A delta that cannot be computed is reported as **unknown**, never as empty.
-      "Nothing changed" is the one wording that would stop an agent re-reading.
-    - Two things still start cold: a member whose previous phase **failed**, because
-      its session is the context that failed with it, and the final fix round.
-    - The cost, stated plainly: **one worktree and one set of forked databases per
-      implementer**, so `resources.lane.capacity` is now the implementer count
-      rather than the widest wave, and adding a cheaper implementer is a trade of
-      disk against money rather than free.
-  - The workflow document gained a top-level **`crew`** block and **`nodes[].crew`**.
-    A staffed node carries no `model` — the member has one — and a document that is
-    half-staffed, names a member nobody declared, assigns a phase to a reviewer,
-    declares an implementer nobody is assigned to, or staffs a reviewer below every
-    phase on the plan is refused before the run starts.
-  - `vinta-ai-maestro` claims an agent **before** the lane, prefers the member the plan
-    named, covers with the **cheapest** qualified free peer when they are busy, and
-    **waits rather than handing a phase below its tier** — even with a lane free. A
-    lane is disk; a phase run by too junior an agent does not fail cleanly, it fails
-    review two rounds later with nothing pointing back at the staffing. A reviewer is
-    claimed per review turn rather than per phase — it has one session ledger and
-    two concurrent reviews would collide over it — so one reviewer on a three-lane
-    plan is a queue at the review step and not a serialised run.
-    - **"Cheapest qualified" has one exception, and it is about sessions.** A
-      member who already holds a session this phase would genuinely resume takes
-      it ahead of a cheaper member who would have to start cold — even when they
-      are more senior than the phase needs, and even when the member the plan
-      named is free. What it buys is the context a cold session spends its first
-      turn rebuilding; what it costs is the dearer model for that phase, which is
-      the smaller of the two bills. **The tier floor is untouched**: warmth
-      reorders the members who already qualify and never widens them, so a warm
-      junior still cannot take a Tier 3 phase.
-    - **Only when a session is genuinely already up.** "Warm" means the scheduler
-      asked its own session-reuse rules and got a yes — same pinned lane, same
-      harness, under the turn ceiling, not poisoned by a failed phase. A member
-      who has merely run before is not warm, because a promotion bought on a
-      resume that is then refused pays the senior's rate *and* cold-starts
-      anyway. With nobody warm, staffing is exactly what it was: a session is
-      being opened either way, and the plan's own level wins.
-    - An operator who picks the member by hand on a retry gets that member. A
-      saving nobody asked for does not overrule an explicit answer.
-  - The run view reports who actually worked against who the plan said would.
-    `substituted` is the figure to read beside a cost that overran: every
-    substitution ran at or above the budgeted tier, so a run can be entirely green
-    and still have been staffed dearer than planned. The phases promoted to reuse
-    a warm session are counted **within** that figure and reported apart from it —
-    a peer covering for a busy member costs what the plan budgeted, while a warm
-    promotion is the scheduler deliberately trading model rate against cold
-    starts, and folded together a run that promoted everything to the top tier
-    would read as an ordinary busy wave.
-
-- **`implement-plan` runs independent phases in parallel.** The plan now carries a
-  dependency graph and the conductor schedules against it: a phase starts as soon as
-  every phase it depends on is green and a worktree lane is free, instead of waiting
-  for its turn in plan order. A chain-shaped plan behaves exactly as before —
-  sequential execution is the one-lane case of the same scheduler.
-  - `plan-feature` gives every phase a **`**Depends on**:`** line naming the artifact
-    it needs from each upstream phase, and opens **Phased Rollout** with an
-    **Execution graph** table derived from those lines. It also checks same-wave
-    phases against the **Touch List** for file overlap and tells you to add an edge
-    when two phases would fight over the same file.
-  - New shared partial `plan-execution/partials/parallel-lanes.md` carries the graph
-    parse, the worktree lane pool, the dependency-derived branch topology, the
-    dispatch loop, the tracking-directory schema, and the sibling-lane write guard.
-  - `prepare-worktree` documents provisioning a **pool** of lanes for one plan and
-    records a `reset_cmd` per forked DB so a lane can be reused across phases without
-    carrying the previous phase's migrations into the next one's test run.
-  - Two new config fields: `run_options.implement-plan.parallel_phases` (default
-    `true`) and `run_options.implement-plan.max_parallel_lanes` (default `3`), asked
-    at bootstrap alongside the existing `prepare-worktree` follow-ups.
-
-- **`plan-feature` emits an executable `ai-plans/<feature-kebab>.workflow.json`
-  beside every plan.** The markdown stays the document humans review; the JSON is
-  the same phase graph in the form an orchestrator runs — one node per phase, one
-  `depends_on` entry per `**Depends on**:` clause carrying both the upstream phase
-  and the artifact it provides, plus the phase's Touch List, gates, capacity pools
-  and model tier. Validated by
-  [`schemas/workflow.v1.schema.json`](schemas/workflow.v1.schema.json), which the
-  emitted file references from its `$schema` key so editors validate it as it is
-  written. **Unconditional** — no config field, no bootstrap question, no opt-in:
-  a project with no orchestrator carries a file nothing reads, and a project that
-  adopts one later finds its plans already executable.
-
-- **Review findings go back to the phase's own implementer, not to a fresh fixer.**
-  The agent that wrote the code still holds the phase brief, the plan's bounds, the
-  dependency context and its own reasoning; a fresh fixer held a quoted finding and
-  had to rediscover the rest — slower, dearer, and likelier to "fix" a symptom by
-  undoing something the phase chose deliberately. The fix message is now a delta —
-  the findings, nothing else — because re-sending the brief invites a
-  re-implementation rather than a fix.
-
-  Three rules keep that from costing what it buys. **The reviewer is never the
-  implementer**: continuing the reviewer across rounds is fine, but the review must
-  come from an agent that did not write the code. **The last round before giving up
-  goes to a fresh fixer, always** — reuse means the agent that wrote the bug is
-  fixing it, which is usually the point and occasionally exactly wrong, because that
-  assumption *was* the bug. And where a runtime cannot continue a finished
-  sub-agent, the old cold hand-off still happens and is recorded as one, so a slow
-  phase can be read later without guessing.
-
-  One consequence worth knowing: a continued implementer fixes at its own crew
-  member's tier, so `agent_models.fixer` now governs only the cold cases. A project
-  that set `fixer` cheap to save money is saving it on fewer rounds.
-
-- **The workflow schema gained `defaults.max_session_turns`.** Optional, default
-  12. An orchestrator that reuses one agent session across a phase's implement
-  and fix turns needs a ceiling on how long that session may grow before the next
-  turn starts cold; without one a long phase eventually dies on a context-window
-  error that reads as a broken harness. `plan-feature` omits the field — it is a
-  safety limit, not something a plan tunes — and its field table says so.
-
-- **`plan-feature` asks about the project's databases and emits the workflow's
-  `project` block.** The block records what a phase lane must **fork** to be a
-  working checkout — the `dev` and `test` databases, and the project's own
-  migrate command, which runs once per template database rather than once per
-  lane. Without it every lane got a git worktree and nothing else, so two phases
-  running concurrently pointed their test gate at the same rows. Asked at
-  emission time with one `AskUserQuestion` call ("what does a phase lane need its
-  own copy of", "how is that database delivered"); the rest — the migrate
-  command, the database names, the env var names — is read out of the project's
-  settings and task runner rather than asked.
-
-  Two rules the skill is explicit about, because both are easy to get wrong:
-  **sharing is the absence of a declaration** (there is no `share` value, and a
-  lane that reads the main checkout's database has nothing to describe), and
-  **each role names its own database** (a lane's fork is named from `name` and
-  the lane, not the role, so `dev` and `test` sharing one `name` collapse to one
-  forked database). Everything `prepare-worktree` discovers per worktree —
-  `reset_cmd`, compose project names, volume forks, seed commands, env-file
-  strategy — stays out of the block by design.
-
-- **New schema
-  [`postmortem.v1.schema.json`](schemas/postmortem.v1.schema.json)** — the
-  structured plan post-mortem an orchestrator writes at
-  `.vinta-ai-maestro/runs/<run-id>/postmortem.json` once a run has ended: dependencies
-  that were declared but never used, dependencies discovered at gate time,
-  same-wave phases that actually conflicted, and phases whose real duration
-  diverged from their wave placement. `plan-feature` reads it before drawing the
-  next feature's Execution graph, which is what stops a plan from repeating a
-  defect the last run already paid for. Like
-  [`workflow.v1.schema.json`](schemas/workflow.v1.schema.json) it is
-  **generated** from a zod source rather than hand-written — see
-  [`schemas/README.md`](schemas/README.md).
-
-- **The monitor keeps thinking when you look away, and thinks out loud.**
-  Asking used to be one long HTTP request that produced the whole answer inside
-  it, which made the turn's lifetime the browser's connection: switching view,
-  reloading or letting a laptop sleep killed the monitor mid-thought and left a
-  question with no answer and no record that one had been attempted. The daemon
-  owns the turn now — `POST` answers `202`, and the monitor journals each
-  thought and each sentence as it produces them, so the conversation is
-  readable while it is being written and by any tab that opens it. The panel
-  renders through the same rows a phase's transcript uses, which is what the
-  API always claimed and the UI never did.
-
-- **A phase's transcript says which agent wrote each line, and holds the gates.**
-  Every spawn on a node appends to one file whatever its role, so a phase that
-  took two fix rounds held five agents' output in one undifferentiated stream —
-  the role was in scope at the append and simply not written down. Each line now
-  carries the role and the session slot that produced it, the view bands the
-  list where one agent stops and the next starts, and gate runs are entries in
-  it rather than only in a log beside it. The operator's own steering stays the
-  operator's (§7), even though the adapter echoes it back on the agent's event
-  stream. Transcripts written before this render exactly as they did, with no
-  bands. The band stays pinned to the top of the scroller while its own run of
-  rows goes past, so the agent you are reading is named without scrolling back
-  to where it started — in the phase transcript and in the monitor conversation
-  alike.
-
-### Changed
-
-- **maestro's review/fix loop is now the thermo-nuclear review loop.** The
-  shipped `standard-phase` changes for every run that uses it:
-  - **The reviewer** keeps its session across rounds. It is held to a shipped
-    Review Standard (evidence bar, priority order, approval bar), or to the
-    project's `REVIEW.md`, which replaces that standard when the lane has one.
-    `VERDICT: pass` is now an explicit approval. A re-review gets the fixer's
-    report, every finding already rejected or settled, and the pass-two rules.
-  - **The orchestrator checks that a review turn changed nothing.** If `HEAD`
-    or a tracked file moved, the node stops and asks whether to keep the edits
-    or stop the phase.
-  - **The fixer** (the implementer continuing its session) verifies each
-    finding before acting on it and rejects unsupported ones with
-    counter-evidence. It sends scope decisions to the operator instead of
-    making them: unreachable scenarios, defensive checks, requirements
-    ambiguities, destructive operations. The new `consult` state asks about the
-    whole batch at once and does not count as a fix round.
-  - **The review ledger.** Rejections and the operator's answers are kept in
-    `runs/<run-id>/nodes/<node-id>/review-ledger.jsonl` and shown to every
-    later review and fix.
-  - **The budget.** `max_fix_rounds` now defaults to **4** (was 2). Running out
-    asks `continue` / `stop` instead of failing the phase.
-  - **Unattended runs.** Under `--retry-after`, a scope question nobody answers
-    takes each item's default, and an exhausted budget nobody answers takes
-    `stop`, which fails into `--on-failure` as before. Without `--retry-after`
-    both questions wait for a person.
-  - **The reviewer's model.** An unstaffed review runs on the new optional
-    `defaults.reviewer_model`, then the harness's top tier (`opus` on
-    claude-code), then the phase's model.
-  - **New pieces.** `await_human` gains an optional `unattended_answer`, and
-    there are two new effects, `record_decision` and `grant_fix_rounds`; the
-    schema stays at `workflow.v1`.
-  - **Migration.** A workflow that pins `max_fix_rounds` keeps its number but
-    now gets asked at the end of it. One that ships its own `standard-phase`
-    shadows the built-in and is unaffected. The skills-path review partials
-    are not updated yet (SPEC §16.6). See
-    [SPEC §16](packages/vinta-ai-maestro/SPEC.md#16-the-review-loop).
-
-- **maestro starts one session at a time per harness, and remembers the
-  account's limit.** Sessions used to boot simultaneously up to the harness
-  ceiling, and N Claude Code CLIs starting together contend for the same local
-  config and OAuth token: a probe against 2.1.274 measured time to `init`
-  rising from 1.2 s with two simultaneous starts to 4.8 s with sixteen, against
-  a flat 0.7 s when each waited for the previous one. A spawn now waits until
-  the one ahead of it has a session or a refusal, so a refusal also parks every
-  queued spawn before it spends one. The ceiling AIMD discovers after a
-  `concurrency` or `rate_limit` refusal is kept per harness in `flow.db` and a
-  run started within six hours opens at it instead of re-learning the limit by
-  being refused; clean spawns still probe back up to the configured value, and
-  the hint is dropped once the ceiling recovers or goes stale. When a harness
-  is throttled, the freed slot goes to the node with the longest chain of work
-  still in front of it rather than to whichever queued first.
-
-- **Updated the OpenAI and Anthropic models to their latest version.**
-
-- **Updated the generated skills to have `disable-model-invocation: true` set.**
-
-- **An expanded panel reads in a centred column.** Full page used to mean
-  full width too, so on a large monitor a transcript or gate log ran in lines
-  too long to follow. The overlay still covers the window; its header and
-  content now sit in a centred column capped at `max-w-6xl`.
-
-- **The node view reads like a chat.** The transcript now sits above the
-  steering box instead of below it, so the conversation comes first and the
-  box you answer it in is under its newest turn. A terminal opened by *Take
-  over* still appears under the steering box.
-
-- **`--retry-after` backs off when attempts fail faster than it.** An
-  unanswered failure question used to answer itself on a flat interval
-  forever, so a phase whose attempts died within seconds was retried every
-  fifteen minutes for hours, against the same failure, at the price of a cold
-  lane each time. Each attempt that fails in less time than the interval now
-  doubles the next wait, up to 8× (15m becomes 2h); one attempt that runs at
-  least the interval long puts it back. It still never stops on its own: a
-  run whose cause goes away overnight is moving again before morning. The
-  `node.unattended_retry` log line reports the actual wait and the streak.
-
-- **Notifications have an inbox, and are heard from every view.** The UI's
-  notifications used to be a row of banners in the top bar, shown only when
-  browser notifications were refused. They piled up there and could be read
-  only one at a time, by dismissing whichever was in front. Every notification
-  now lands in an inbox behind a bell with an unread count: newest first,
-  filterable by unread and by still-waiting pauses, marked read one at a time
-  or all at once, dismissed singly or cleared. A pause that gets answered stays
-  listed and says *Answered*. The inbox is kept in `localStorage` and shared by
-  every tab, so a reload no longer loses it. It stores what a notification
-  body already carries — a run id, a node id, a reason and the journal's
-  timestamp — and no question text, output or diff. Browser notifications also
-  reach the operator more often now. They used to fire only for the run open
-  on screen; the UI now follows every running run in the background, and a run
-  view takes over that run's stream instead of opening a second one. They also
-  depended on a permission prompt raised by the first pause, which Firefox and
-  Safari ignore when no click raised it, so on those browsers they could never
-  turn on. An *Enable notifications* button now sits in the top bar until the
-  browser has been asked (and in the inbox too), and confirms with one test
-  notification. It also says why the channel is off
-  when it is: blocked in the browser's site settings, or served over plain
-  HTTP on a remote `--host`, which browsers do not allow notifications from.
-  The reminder interval moved into the inbox.
-
-- **The run view's Nodes table names a lane by what distinguishes it.**
-  Every lane in a run is named `${runId}-...`, so the column spelled them in
-  full as `2026-09-11-graphql-aggregations-mubou9ar-crew-3-tier4` on every
-  row, phase after phase — the same forty characters of prefix repeated down
-  the table, wide enough to push the whole table into a horizontal scroll for
-  the sake of a string that was identical everywhere it appeared. The cell now
-  shows the tail that actually differs (`crew-3-tier4`, `lane-2`, `integ`) and
-  keeps the full name in its `title`, because that is what the worktree
-  directory and the branch are called. The phase description beside the node
-  id is bounded and wraps for the same reason — table cells are
-  `whitespace-nowrap`, so one long phase name was setting the width of the
-  whole table.
-
-- **A dispatched phase agent does the work itself, instead of spawning an
-  implementer under it.** claude-code sessions run by the orchestrator were
-  handing their phase to a sub-agent and reporting its summary back, and the
-  pull was not laziness — `implement-phase` ships into the same repositories,
-  its description matches "you are implementing P3 of plan X", and its content
-  is "spawn exactly one implementer subagent". So a session was loading a
-  conductor skill on its own and correctly following it, one level below the
-  conductor that had already spawned it. The cost is the whole point of session
-  reuse: a sub-agent's reading of the codebase ends with the sub-agent, so the
-  warm session that every cross-phase turn greets with "everything you learned
-  still holds" was left holding a paragraph, and each phase paid a cold agent's
-  first turn again. Both halves are now closed. Every `vinta-ai-maestro` role
-  prompt (implementer, reviewer, fixer, chore — cold and continued) carries a
-  no-delegation section that names those skills and says what delegating costs,
-  and the plan-execution unit grows a `dispatched-agent` partial: a guard at the
-  top of all four conductors refusing entry to an agent that was itself handed
-  one phase, plus the same rule inside every composed implementer prompt.
-
-- **The node view's gate panel is a list of verdicts you can open, not a stack
-  of scrolling boxes.** Every gate used to render its whole log at once, each
-  in its own fixed-height box with its own scrollbar — so three gates in a
-  third of a grid row was a column of letterbox slots, and a wheel gesture
-  over one of them was swallowed by that box instead of scrolling the page.
-  Gates are now an accordion: one row per gate, only one open at a time, and
-  the open log has no scroller of its own (it is tail-truncated at 64 KiB
-  already, and long lines wrap the way the diff panel's do). The panel opens
-  on the gate a human question points at, or on the first that is not passing.
-
-- **Each gate row says what happened and what it cost.** The verdict —
-  `running`, `passed`, `failed`, `timed out` — is on the wire now, so a phase
-  whose lint gate passed and whose unit gate failed reads as that instead of
-  as two identical rows; previously the UI could only name the single gate
-  §9.1's question happened to point at, because `NodeDetail` carried an id and
-  a log and nothing else. A running gate shows a clock counting from the
-  daemon's own start time, so a tab opened halfway through a slow suite shows
-  the true elapsed figure rather than starting from zero; a finished one shows
-  the runner's measurement of its latest attempt, with `cached` where the
-  cache served the verdict and a `×N` count where the gate has run more than
-  once.
-
-- **Crew members are named after their tier, not after a seniority.** A roster
-  reads `tier1`, `tier2-1`, `tier2-2`, `tier4` and `reviewer` where it used to
-  read `junior`, `mid-1`, `mid-2` and `senior`. Nothing about the data model
-  moved — `tier` was already the 1-4 number the orchestrator staffs on, and it
-  is still the only thing compared when one member covers for another. What
-  changed is that the label beside it now says the same thing, instead of
-  offering a second vocabulary that could drift from it and that reads as a
-  ranking of people rather than of difficulty. Workflows using the old ids keep
-  running: the ids are free-form and nothing resolves them by name.
-
-- **`plan-feature` emits its workflow with the plan's date prefix.** The
-  executable sibling is now
-  `ai-plans/YYYY-MM-DD-<feature-kebab>.workflow.json` — previously it carried
-  no date, which sorted it away from the `YYYY-MM-DD-FEATURE_NAME_PLAN.md` and
-  `_SPEC.md` it belongs to, so the one file you want with the plan open was the
-  one you had to go looking for. A feature's three files now land adjacent. The
-  case difference between them is not an oversight: the markdown convention is
-  `UPPERCASE_WITH_UNDERSCORES` and a workflow's filename stem *is* its `id`,
-  which the schema requires to be lowercase kebab-case, so the date prefix is
-  the only part the three can share. Existing dateless workflows are unaffected
-  — this is the emitter's convention, not a schema rule.
-- **A gate's command can be retuned while the phase that runs it is still
-  running.** §9's amend refused any change reaching a node in flight, which is
-  exactly the node anyone is looking at when a run is dragging: a `unit` gate
-  missing `--reuse-db` could not be fixed until the run it was costing hours
-  had finished. The refusal now reads a narrower set. A node's harness, model,
-  pipeline, body and base are each read at a moment that has already passed, so
-  changing them is refused as before; a gate's *command* is resolved per gate
-  run by every reader of it, so a running phase simply runs the new command at
-  its next gate. Nothing downstream is blocked either, because a command moves
-  no branch's base. Changing **which** gates a node declares is still refused
-  mid-flight — a phase that gained a gate would finish without ever running it —
-  so that now counts as part of the phase body.
-
-- **A gate result is cached against the command that produced it.** The key was
-  `(gate id, tree hash)`, on the assumption that a gate id names a command.
-  Amending a live run makes that false, and an unchanged tree would have been
-  served the old command's verdict. The command is now part of the key, hashed
-  rather than stored — a command line is repository content. A cache database
-  written before this is dropped when it is opened: its rows cannot say which
-  command produced them, and one re-run per stale entry is the price a lost row
-  already costs.
-
-- **A session cannot inherit a machine's decision to stop compacting.** All
-  three harnesses compact automatically when their context fills — there was
-  never a flag to turn on — but each honours an environment variable that turns
-  it off, and an agent spawned on a machine carrying one would run a long phase
-  straight into a wall it was supposed to be able to survive. Those variables
-  are now stripped from every child the daemon spawns, and claude-code's own
-  setting is reasserted in the per-lane file beside its permission rules. The
-  window itself is left alone: an operator who narrowed theirs compacts earlier,
-  which is not the failure this guards against. A harness that compacts declares
-  it, and a compaction the harness reports is a transcript row like any other.
-
-  One consequence worth knowing: `max_session_turns` used to be a proxy for "this
-  session is nearing a context window it will die on". That death no longer
-  happens, so the ceiling now guards a different thing — a session whose memory
-  was replaced by a summary of itself, and which answers just as confidently.
-
-- **Agent prompts name gates by id rather than printing their commands.** The
-  implementer's step 4 was descriptive — "Outer gate… These run against your
-  lane:" followed by the gate commands — and implementers were observed reading
-  it as a note about what would run later, finishing the scoped inner loop and
-  never running a gate at all. It is imperative now, and every role that runs a
-  gate (implementer, reviewer, fixer, and the continuation of each) is pointed
-  at `vinta-ai-maestro gate <id>`. The fixer prompts no longer say to re-run the
-  gates "until they are green", which contradicted the commit protocol directly
-  below them and left fixers running out the turn with the work uncommitted;
-  they now say to commit and report FAILURE when a gate cannot be turned green.
-  Implementers and fixers report which gates they ran and what each returned —
-  a record for the reviewer to check against, explicitly not a licence for the
-  reviewer to skip running them itself.
-
-- **Phase branches base on their dependencies, not on the previous phase.** A phase
-  with no dependencies cuts from the default branch; one with a single dependency
-  cuts from that phase's branch; one with several cuts from a
-  `plan/{plan-id}/integ-{phase-id}` branch that merges them. Each wave is then merged
-  into a `plan/{plan-id}/wave-{N}` integration branch, which is what a resume anchors
-  on and what the final report points at. The PR `base` follows the same value —
-  a stacked plan produces exactly the stack it did before.
-- **Tracking is a directory, not a file.** `{{PLAN_DIR}}/TRACKING_{plan-id}/` holds
-  `run.md` (conductor-owned), one `phase-{id}.md` per phase (written only by the lane
-  that ran it, committed on that phase's own branch), and `waves/wave-{N}.md`. No two
-  branches write the same path, so wave merges no longer conflict on tracking. A run
-  started under the old single-file layout is migrated on resume.
-- **An implementer is told about its dependencies only.** Prior-phase context passed
-  into a phase prompt is now that phase's transitive dependency closure rather than
-  "everything finished so far" — a sibling lane's work is not in the phase's base
-  branch, and describing it as done made the implementer code against files it could
-  not see.
-- **The stray-write guard covers sibling lanes.** The sandbox denies the whole
-  worktree pool root and allows back only the running lane; the review-phase backstop
-  checks the main checkout and every sibling workroot after each implementer and
-  fixer. A write into a lane that is mid-implementation is worse than a stray
-  main-checkout write.
-- **`amend-plan` cascades along the dependency graph.** A rewrite touches the
-  amended phase's dependent closure instead of "every phase with a higher number",
-  rebases in topological order, rebuilds `integ-` bases before rebasing a
-  multi-dependency phase onto them, and refuses to run while any phase is still in
-  flight. It gained a `dependency-change` amendment kind for edits to a
-  `**Depends on**:` line.
-- **`implement-plan` refuses rather than degrading** when parallel execution is asked
-  for but worktrees are unavailable — several agents cannot share one working tree,
-  and silently falling back to sequential would discard the schedule the user
-  approved.
-- **`modular-commits` supports parallel runs**: lanes commit their atomic units on
-  `plan/{plan-id}/lane-{phase-id}` branches, merged `--no-ff` into the single plan
-  branch at each wave boundary, so the unit commits survive.
-
-- **`project.prepare_cmd`, for the shared servers a run depends on.** A project
-  whose databases are `delivery: external` and whose services point at one Redis
-  has no long-lived containers of its own — the shape these fields recommend —
-  and that makes some *other* stack a hard dependency of every run. Nothing in
-  the package could bring it up. `setup_cmd` looks like the place and is not: it
-  runs per lane, long after the template database was created on a server that
-  had to be up for `createdb` to work at all.
-
-  It runs in the repository root **before anything else a run does** — before
-  the preflight, before the templates, before the first worktree — and again
-  before every lane recycle, so a server that dies mid-run is restored at the
-  next hand-off rather than failing every phase after it. Failure aborts with
-  the exit code and a bounded stderr tail, and says what the failure means
-  rather than only that a command exited. It must be idempotent, and `--wait`
-  is only as good as the `healthcheck` a service declares: without one, compose
-  returns as soon as the container starts and `createdb` races the server.
-
-- **A merge conflict goes to the most senior member who wrote one of its
-  sides.** The conflict fixer was staffed from `defaults` and ignored the roster
-  entirely, so on a tiered crew a collision between two Tier 4 phases was handed
-  to a default-tier agent that had read neither of them — the hardest merge in
-  the run going to the least contextualised agent available, and resolved by
-  guessing which side looked more finished.
-
-  `Integrator` already knows which nodes own the contested paths, and `node_crew`
-  already records who took each one; this is the join. Highest tier among them
-  wins, on that member's own `model` and `harness`, and a tier tie breaks on
-  member id the way roster substitution breaks its own. An unstaffed workflow
-  still resolves through `defaults`, unchanged, and so does a conflict whose
-  nodes cannot be resolved to a member.
-
-  What is carried is the member's **capability, not their session**. A phase's
-  session ran in that phase's lane; the fixer runs in the integration worktree,
-  where the files in dispute are half-merged and unlike anything that session
-  saw — resuming there would give the agent confident, false memories of exactly
-  the files it is merging. The prompt tells the fixer which side is its own, and
-  in the same breath that it is a fresh session and must read rather than
-  recall.
-
-### Fixed
-
-- **maestro asks you to log in instead of failing on a logged-out harness.**
-  A CLI that was not logged in (or whose token was rejected) was `fatal`: the
-  node failed and its whole subtree blocked. It now parks in `awaiting_human`
-  on a "not logged in" question answered with `logged in` or `stop`, holding
-  its lane. Nothing answers it for you — no automatic or unattended retry,
-  regardless of `onFailure` — and one `logged in` resumes every node that
-  harness refused. Adapters report it as the new `unauthenticated` refusal
-  kind (Claude Code, Codex and opencode).
-- **maestro no longer fails a node on an organization spend cap.** Claude
-  Code's `billing_error` "spend limit reached (daily; resets …)", the
-  `org_spend_cap_reached` overage reason and "usage credit limit reached"
-  matched no refusal pattern and were classified `fatal`, failing the node and
-  blocking its subtree. They are now `quota` waits, and the stated
-  `resets YYYY-MM-DD HH:MM UTC` time is honored as the wake time.
-
-- **A failed Claude Code turn no longer reads as `claude-code result:
-  success`.** When the CLI ends a turn with `is_error: true` beside
-  `subtype: "success"` (how a plan limit arrives, for one), the recorded
-  error printed the subtype and said "success" — 189 times in one observed
-  run. It now reads `claude-code result: is_error`. Other subtypes
-  (`error_max_turns`, …) are unchanged.
-
-- **The monitor's conversation was mostly unformatted JSON.** Not its answers —
-  its *watchdog's*. An intervention turn must reply with one document matching
-  `intervention.v1.schema.json`, which is what makes the monitor's authority
-  over a live run a closed set of verbs rather than an editor over
-  `workflow.json`; and that turn is journalled into the conversation a person
-  reads, because a run that retuned itself should say so where somebody is
-  already looking. Both of those are right. Rendering the document verbatim was
-  not, and the summary paragraph the operator wanted arrived a thousand
-  characters into one unwrapped line of braces. A proposal now renders as what
-  it says: the summary, then one line per proposed change with its evidence
-  under it, and a tone dot only when something was actually proposed — a turn
-  that looked and changed nothing is the expected outcome and should not shout.
-  The verb table is keyed on the daemon's own union, so a fifth verb fails the
-  UI build rather than shipping as a bare identifier. The journal still holds
-  the bytes the model wrote — only the row changed, so conversations already on
-  disk read as well as new ones. Any other whole-JSON answer is at least
-  indented.
-
-- **The monitor's conversation opened at its oldest entry and never scrolled.**
-  It followed the newest row *only while a turn was running*, on the reasoning
-  that the list is short and the operator is watching the answer they just
-  asked for. Neither half held: the conversation is the journal's, so it holds
-  every question ever asked about the run plus every proposal the run's own
-  watchdog made with nobody asking anything — a hundred entries is ordinary.
-  Opening the panel therefore put the reader at the oldest of them. It now
-  follows the way a phase's transcript does: stuck to the newest row, letting
-  go the moment the reader scrolls up to read, with a "Jump to latest" as the
-  way back. That rule is one module now rather than a well-tested copy in the
-  transcript and none in the monitor, which is how the panel came to be missing
-  three of its parts — including the one that survives a panel being expanded
-  to full page, where the portal hands the view a brand new list scrolled to
-  the top.
-
-- **Hitting the plan's session or weekly limit failed the node instead of
-  waiting for the window to end.** `claude-code`'s refusal table recognised
-  "usage limit reached" and nothing else, and the classifier's default is
-  `fatal` — correctly, since an unrecognised failure must not become an
-  unbounded wait. But the CLI announces a plan window in its own words:
-  "You've hit your session limit", "Session limit reached · resets 3am",
-  "5-hour limit reached", "You've reached your weekly limit". None of those
-  contain "usage limit", so every one of them fell past the table to `fatal`,
-  which fails the node and blocks its whole dependent subtree — for a window
-  that ends by itself in a few hours. The machinery to do the right thing was
-  already there and simply never reached: a `quota` refusal parks the harness,
-  not the node, so every later node joins one wait instead of discovering the
-  limit for itself; the wake time is journalled and survives a daemon restart;
-  and the AIMD ceiling is left alone, because a plan window says nothing about
-  how many agents may run at once. Those wordings are now `quota`. The new row
-  sits *below* `concurrency` and `rate_limit` so that "concurrent session limit
-  reached" keeps the kind that halves the ceiling, and "approaching session
-  limit" — a warning from a harness that is still working — matches nothing.
-
-- **A window that closed *under* a running turn was an ordinary turn failure.**
-  §6.1 is written about a spawn, because that is where a vendor usually says
-  "not right now" — and everything that follows from it, parking the harness so
-  every later node joins one wait, journalling the wake time so a daemon
-  restart does not forget it, leaving the AIMD ceiling alone for a window that
-  says nothing about concurrency, hung off `admit`. So the other arrival of the
-  same fact had none of it: a plan window that closes while an agent is twenty
-  minutes into a phase ends the turn, and the node then burnt its retries
-  against a closed window and failed, blocking its whole dependent subtree —
-  the exact outcome §6.1 exists to prevent, reached by the one path that did not
-  go through admission control. A session now reports a `TurnRefusal`, and the
-  caller answers it with the `CapacityRetry` a refused spawn raises: the lane
-  goes back, the harness parks until the stated reset, and the node re-drives
-  when the window opens.
-
-  Each adapter reads it where its own failure prose is, which is not where its
-  events are: `claude-code`'s terminal `result` frame carries the sentence in
-  the `result` string that `mapResult` deliberately drops (it is agent output,
-  §11), `codex` states a failure as prose on three different frames, and
-  `opencode`'s `session.error` carries it under `data`, which `#errorName`
-  refuses to put in an event. All three read that prose, match it against the
-  table they already had, and drop it — what reaches the caller is a kind, a
-  fixed reason token and a reset time, and what reaches the transcript is one
-  token-only line so the record says why the turn stopped. The stderr-and-exit
-  shape of the same event is read too, from the diagnostics buffer that is the
-  only place that sentence exists.
-
-  The re-drive is a full one, and that is deliberate: the session the turn was
-  using is gone, and resuming from a memory of files a recycle has removed is
-  worse than redoing the work. Nothing is destroyed by it — `recycle` sets
-  aside whatever the turn left uncommitted as a WIP ref first. What it costs is
-  the turn. What it used to cost was the node.
-
-- **A stated reset time was only read when it was an hour on the same day.**
-  `parseRetryAfter` prefers a reset the vendor reported over a guessed backoff,
-  and its wall-clock pattern wanted `am`/`pm` immediately after "reset", so
-  "resets at 15:00", "resets tomorrow at 2am" and the weekly window's "resets
-  on Monday at 12am" all reported nothing — falling back to the five-minute
-  re-probe interval, which across a week-long window is two thousand spawns to
-  discover what the first sentence said. It now reads 24-hour times, `today`,
-  `tomorrow` and a named weekday (the next occurrence of it, which is today
-  only while the hour is still ahead). A reset named by date, "resets Nov 3 at
-  9am", still reports nothing on purpose: a month with no year is a guess, and
-  the re-probe is a better answer than a wait that is wrong by a year. So are
-  "reset 3", "resets at 25:00" and "resets at 13pm" — an hour with neither
-  minutes nor a meridiem is as likely to be a version or a retry count, and
-  everything this function returns becomes a wait.
-
-- **`run --resume` could not provision a pool at all on a project that
-  disables hooks.** `#configureHooks` enables `extensions.worktreeConfig`
-  before it can set `core.hooksPath --worktree`, and that first key is
-  repository-wide: the write lands in the shared `.git/config`, which git takes
-  `.git/config.lock` to edit. Called once per lane out of the provisioning
-  `Promise.all`, the lanes collided on that lock — `could not lock config file
-  …: File exists`. A fresh provision never showed it, because `worktree add`
-  goes through the pool's serialized git turn and staggered the lanes apart by
-  the time they reached the shared write; `adopt` skips `worktree add`, so every
-  lane arrived in the same tick and **every** resume of a `hooks: false` project
-  failed, reproducibly, before a single phase was scheduled. The extension now
-  goes through the same serialized turn. The `--worktree` write stays parallel:
-  it lands in `.git/worktrees/<name>/config.worktree`, one file per lane.
-
-- **A provision failure that was not one of three enumerated kinds said nothing
-  about itself.** `refusal` detailed `DiskProbeError`, `LaneSetupError` and
-  `LaneEnvFileError`; everything else — including the lock collision above and
-  `LaneAdoptError`, the one error a resume is most likely to hit — collapsed to
-  "could not provision the lane pool under …", and the daemon log recorded that
-  same sentence as `run.provision_failed`'s `reason` with no `error` field and
-  no stack. So the run that could not start left behind no record of why, in
-  either place an operator looks. The exclusion was a §11 reading
-  `LaneSetupError` had already revised for this exact reason: §11 keeps
-  repository *contents* out of the record — diffs, file bodies, gate output —
-  and an error's own complaint about a lock file or a ref is not that. An
-  unenumerated error's message is now carried, capped at 500 characters and run
-  through the log's redaction set; `LaneAdoptError` speaks for itself like the
-  other lane errors; and the failure is logged with its kind and stack frames.
-
-- **`doctor` reported the resumed run's own lanes as leftovers blocking it, and
-  offered to destroy them.** The held-branch check fails a run whose phase
-  branches are checked out in another worktree, which is right for a fresh run
-  and exactly wrong for a resume: the integrator puts a lane on
-  `plan/<id>/phase-<n>` for the duration of a phase, so a run killed mid-phase
-  — the kill a resume is *for* — leaves its own lanes holding precisely those
-  branches. Every `run --resume` therefore refused preflight with one failure
-  per phase in flight, each remedied by `git worktree remove --force <lane>`,
-  which deletes the uncommitted work the resume existed to adopt. The check now
-  takes the run being resumed and excludes lanes belonging to it, identified by
-  reading the lane root and asking each worktree which branch it holds — never
-  by comparing git's printed paths with this process's, the platform trap
-  `reap` and `LanePool` both document. `doctor` takes `--resume <run-id>` to ask
-  the same question before a resume, and a lane of *another* run still fails.
-
-- **`vinta-ai-maestro gate` gave up on the slowest gate after five minutes and
-  called it a daemon it could not reach.** The command awaited one `fetch`, on
-  the stated reasoning that a gate is slow for reasons the client cannot shorten
-  and so the client should simply wait — while its own comment claimed it
-  imposed no deadline of its own. It imposed 300 seconds, because that is where
-  Node's `fetch` abandons a response whose headers have not arrived, and a gate
-  that queues for a capacity-1 semaphore and then runs a test suite is routinely
-  slower. In a measured fourteen-hour run this fired **33 times, every one of
-  them on the `unit` gate and none on any other** — a perfect correlation with
-  duration, not a flaky daemon. The gates were running fine and cached green
-  results minutes later; only the answer was lost. Told a transport lie about
-  work in progress, agents wrote polling loops around a command documented as
-  needing none: in one phase, **24 of 108 shell turns were pure waiting, six of
-  them burning a full ten-minute ceiling — 60 minutes, 31% of that phase.** The
-  wait is a `202` hop loop now, which is what `with` already does, having found
-  the same bug the same way and fixed it first.
-
-- **A gate command cut short by the harness started the suite over.** An agent
-  harness caps how long one command may run, and a gate may exceed any such cap
-  — a plan declaring `timeout_s: 2400` is asking for forty minutes against a
-  ten-minute budget. So being killed partway is the *ordinary* ending, and what
-  an agent does next is run the command again. That used to start a second full
-  suite beside the first, queued behind the very semaphore its own predecessor
-  was still holding. The daemon now keys a running gate on `(phase, gate id)`
-  and the re-invocation attaches to it, which makes re-running the command the
-  correct move rather than a wasteful one — worth having, because it is the move
-  an agent makes anyway. There is no token to carry, deliberately: a client that
-  was killed has nothing in hand, and needing something would defeat the point.
-
-- **A pipeline that could not progress was journalled as the word "Error".** The
-  interpreter composes an id-safe reason for exactly this case — which state it
-  could not leave, and which trigger failed to match — and the scheduler threw
-  it as a bare `Error`. `failureReason` reports an unrecognised error by its
-  name, so the sentence was discarded at the one moment it was worth keeping.
-  It is a `PipelineStuckError` now, carrying the state, and the reason survives
-  into the journal. The same shape as the non-zero git exit, fixed the same way.
-
-- **A pull request said nothing but the plan anchor.** The daemon opened PRs
-  with `title: node.name` and `body: node.prompt_ref` — one line, a link to a
-  heading. It had no idea the `prs-context` mechanism existed: there was not a
-  single reference to it in the package, so the rich path the skills use
-  (`open-pr-from-context`, the project's own PR template, inline review
-  comments) was never reached from a run. `open_pr` now reads the phase's
-  `.vinta-ai-workflows/prs-context/<plan>/phase-<node>.md` when the agent wrote
-  one, and the implementer is asked to write it — the 5–15 line summary it
-  already produces, put where a human will read it instead of only the
-  transcript. With no context file the body is composed from the run's own
-  record: the brief, what the phase is based on and why that is not the default
-  branch, its declared surface, its gates, how many attempts it took, and any
-  merge conflicts an agent resolved on the way in — which nobody reviews.
-
-- **A phase with two dependencies could never open a pull request.** Its base is
-  an `integ-<id>` branch and `git_push` pushes only the node's own branch, so
-  `gh` was asked to open against a ref the forge had never seen. It refused, the
-  refusal was discarded, and the phase completed with no PR and nothing saying
-  so — in one observed run, the single node with two dependencies was the single
-  node with no PR. The integration base is pushed before the PR is opened, and
-  every outcome is journalled as `node_pr`, so a PR that did not open is now as
-  visible as one that did.
-
-- **A conflict resolution was never gated.** `IntegratorOptions.verify` has
-  existed as long as the conflict loop, documented as "a resolution that does
-  not build is not a resolution", and nothing ever supplied it. Six merges in
-  one run were resolved by an agent and went straight in — ungated — to become
-  the base the next phase built on, while the phases either side were gated to
-  the hilt. The union of the conflicting nodes' declared gates now runs in the
-  integration worktree, with that worktree's environment, and a red gate spends
-  a fix round instead of shipping.
-
-- **A conflict fixer that committed its own resolution failed the phase.** An
-  agent told to resolve a merge conflict reaches for the sequence a person
-  would — abort, merge again, resolve, commit — and the orchestrator then
-  committed unconditionally on top of it. Against an already-committed
-  resolution `git add --all` is a no-op that exits 0 and `git commit --no-edit`
-  exits 1 with "nothing to commit", which is a throw. A successful resolution
-  was reported as a failed phase, deterministically, on **every wave after a
-  parallel one**: a multi-dependency node is the only thing that merges here,
-  and two sibling phases both creating one file is the common case rather than
-  the rare one. The phase died before its branch was cut, so it left no
-  transcript, no gate log and no branch — only a resolved merge commit sitting
-  in the integration worktree. The commit is now conditional on there being
-  something to commit, and a fixer that discarded the merge instead of resolving
-  it is refused rather than recorded as integrated.
-
-- **The conflict fixer's turn is in the transcript now.** Its event stream was
-  drained and every event dropped — an unread stream never ends — so the one
-  agent turn in a run nobody could watch live was also the one nobody could read
-  afterwards: a resolved merge, a row saying it took two rounds, and no record of
-  what was decided. It lands in the incoming phase's own transcript, beside the
-  implementer and reviewer turns that produced the branches being merged, under
-  a `conflict-fixer` role that keeps it distinguishable from the review fixer —
-  a different job, in a different worktree, on a different thing. The UI has had
-  a band for that role since transcripts learned to name their authors; it had
-  simply never been given one to draw.
-
-- **`PlanDefectError` is now `UnresolvedConflictError`.** The old name made a
-  judgement the orchestrator is not entitled to make. Two same-wave phases
-  touching one file is not a broken plan — the plan's file-overlap analysis is a
-  guess made before a line was written, and the fixer exists because of it. What
-  reaching that error means is narrower: *this* conflict outlasted its rounds and
-  needs a person. The message says so, and now leads with finishing the merge by
-  hand in the integration worktree — which, since a prepared base is reused,
-  survives into the retry — rather than with re-cutting the plan.
-
-- **A conflict was resolved again on every retry, and recorded nowhere.**
-  Conflicts are an ordinary outcome — the plan's file-overlap analysis is a
-  guess and two sibling phases legitimately edit one file — but `prepareBase`
-  reset and re-merged its `integ-<id>` branch unconditionally, so each retry
-  spawned a fresh fixer agent to redo work already done, and discarded any
-  resolution a person had finished by hand in that worktree. One observed run
-  paid for the same resolution three times. A base that already integrates every
-  dependency's current tip is now kept; one built before a dependency moved is
-  still rebuilt, because reuse is about reachability of the tips rather than
-  about the branch existing. Every settled conflict is also journalled as a
-  `node_conflict` event naming both participants, the paths and the rounds it
-  took — previously a wave conflict reached only the post-mortem and a *base*
-  conflict was discarded entirely, so a phase could sit in `running` for minutes
-  while an agent merged in a worktree nobody could see.
-
-- **A failed attempt now says why, wherever it goes next.** The reason was
-  computed at the failure site and handed to the path that gives up — which the
-  default `onFailure: retry` does not take: it retries automatically, then parks
-  on "This phase failed. Try it again?". Both paths dropped the reason, and
-  `#offerRetry` carried a comment asserting the opposite. A phase that failed
-  three times before any agent ran was undiagnosable after the fact, and the
-  only offered action was to repeat it. Every attempt now writes a `node_error`
-  event carrying its reason and attempt number, and a `node.attempt_failed`
-  record to the daemon log.
-
-- **A git command that exited non-zero was persisted as the word "Error".**
-  `failureReason` reports an unrecognised error by its name plus a *string*
-  `code`, and an `execFile` rejection carries `name: 'Error'` with a *numeric*
-  one — so the most common real failure in this package said nothing at all.
-  Git failures now carry their subcommand and exit status (`git commit exited
-  1`), which is a command name and an exit code rather than anything §11 keeps
-  out of the journal.
-
-- **The conflict fixer ran without its worktree's environment.** It was the one
-  agent spawn not given `AgentTask.env`, whose own docstring records this exact
-  bug class. With the daemon's bare environment its `docker compose` resolved to
-  a project named after the directory rather than the isolated one, ignored the
-  `compose.publish: []` override that rides in `COMPOSE_FILE`, and published the
-  project's fixed ports on the host — colliding with the developer's own stack
-  and outliving the run.
-
-- **"Retry with <member>" offered the member that had just failed.** The menu
-  excluded the member the *plan* named, but a substitution means the member that
-  actually ran is someone else — so a phase declared for one tier and covered by
-  a higher one offered that higher one as its escalation, and a third of the
-  menu did nothing distinguishable from plain retry.
-- **An amended workflow now reaches the integrator too, and a wave merge is
-  pinned to the membership it was decided with.** Fixing the executor without
-  fixing the integrator is what made this reachable: `#lastOfWave` decides a
-  wave is complete by counting the executor's node set and `mergeWave` decided
-  what to merge by reading the integrator's, so while both were stale they
-  agreed with each other and nothing showed. One fresh and one stale is a wave
-  whose merge silently omits the branch of a phase that ran.
-
-  The case that gets there is a phase nobody depends on. An amendment is
-  refused while a node it *blocks* is in flight, and such a phase blocks
-  nothing, so it lands freely beside the wave-mates it will be merged with.
-
-  A wave's membership is now computed once, synchronously, by the code that
-  decides the wave is complete, and handed to the merge — a wave merge runs
-  behind the integration worktree's queue and an amendment can land in between,
-  so a merge that re-derived its own membership would merge a phase that never
-  ran. §9's rebase goes through that same queue now, since "the nodes this
-  amendment blocks are idle" says nothing about whether another wave's merge is
-  writing in that directory.
-
-- **An amended workflow now reaches the code that runs the gate.** `adopt`
-  replaced the scheduler's copy of the run's definition and nothing else, while
-  the effect executor and the agent-gate broker each held the snapshot they were
-  constructed with — and the command a gate actually runs is read from the
-  executor's. So an operator who edited a gate command mid-run moved the
-  snapshot, the journal and the pool reservations, watched the amendment be
-  accepted, and went on getting the old command. All three take the amendment
-  now, fanned out from one place, host side before the scheduler so that no
-  phase is dispatched against a definition half the system has not seen yet.
-
-- **Closing a terminal on a run now records the interruption.** `run` and
-  `serve` handle SIGHUP as well as SIGINT and SIGTERM — SIGHUP is what a
-  terminal sends when its window closes, and with no handler Node's default was
-  to die on the spot, running no teardown and writing no `run_ended`. Both
-  commands now mark their live runs interrupted before exiting and print the
-  `--resume` line for each, so a closed window leaves something recoverable
-  instead of a row nothing will ever move again.
-
-- **A member's reviews were counted as phases they took.** `node_crew` is
-  written for both seats — the reviewer's claim carries `role: 'reviewer'`, the
-  implementer's omits it — and the staffing rollup read neither, so every phase
-  a member reviewed was folded into the count of phases they implemented. On any
-  run with reviewers that inflated the number the rollup exists to put beside
-  the plan's estimate, and inflated `asPlanned`, which the run view divides by.
-  The two seats are counted apart now rather than one of them dropped: a review
-  is real work by a real member, and a member who only reviewed is neither a
-  phase-taker nor idle.
-
-- **An agent taking a lease left the resource panel showing the one before it.**
-  The scheduler's own gate-pool transitions are journalled as `gate_pool`
-  events, so the browser re-reads the snapshot when one lands. An agent's lease,
-  taken through `vinta-ai-maestro with`, was only a row in the `leases` table —
-  correct in the daemon's projection and announced to nobody. A projection
-  nobody is told changed is a projection nobody sees change, so the panel showed
-  whatever holders it had last time some unrelated event happened to arrive, and
-  the waits it was stalest about were the agent ones, which are the long ones.
-  The broker now journals `agent_lease` on both edges. A renewal writes nothing:
-  it is a heartbeat on a lease already reported, and journalling it would bury
-  the two rows that are transitions under a liveness log.
-
-- **An agent waiting for a semaphore could be overtaken without bound.** A
-  `vinta-ai-maestro with` wait is served in fifteen-second hops so no client
-  timeout has an opinion about it, and each hop used to abort the underlying
-  `pools.acquire`. Aborting leaves the pool queue, and the next POST re-entered
-  it — at the tail, behind every waiter that had arrived in the meantime. Since
-  a gate run holds a capacity-1 semaphore for minutes, an agent lost that race
-  on hop after hop while the scheduler's own in-process waiters, which never
-  leave the queue, did not. The pool's aging rule could not help: aging reserves
-  against waiters *behind* the aged one, and the waiters that overtook it are in
-  front of it. A `202` now carries a `waitToken` naming the wait, the client
-  sends it back, and the daemon keeps the one queue entry — one arrival time,
-  one place in line — across the whole wait. A parked wait whose client stops
-  hopping is reaped after a minute, releasing the slot if one was granted to it
-  while nobody was watching.
-
-- **The monitor's conversation could never be written on Windows.** It is kept
-  under a reserved node id that becomes a directory, and that id was
-  `monitor:conversation` — a colon, chosen because no phase id may contain one,
-  and the drive separator on Windows. `mkdir` failed with `ENOENT`, so every
-  question threw on its first append and the endpoint reported the monitor
-  unavailable. A colon is legal in a macOS or Linux filename, which is why no
-  machine the feature was built on ever saw it. The id is now
-  `_monitor-conversation`: still unrepresentable as a phase id, and legal
-  everywhere. Conversations recorded under the old id are not migrated.
-
-- **An implementer was told both to commit and never to commit.** The prompt
-  carried "never commit while a gate is red" beside "the turn is not complete
-  until `git status --porcelain` is empty of your work" — a contradiction
-  whenever the gate could not be turned green inside the turn, which is most of
-  why fix rounds exist. Agents obeyed the `never`, and the reviewer one node
-  later raised the BLOCKER it is told to raise for uncommitted work, spending a
-  fix round re-implementing code that was already on disk. A red gate now
-  changes the report and never the decision to commit: commit, and report
-  FAILURE saying what is still red.
-
-  The reviewer's side was a false BLOCKER independently of that. Any unclean
-  tree was a finding, and a lane's tree is never clean — the pool copies
-  configuration in, links dependency trees, and the gates leave build output
-  behind, none of which the implementer is allowed to stage. It is scoped to
-  the failure it was written for now: work that is in the tree and missing from
-  the diff.
-- **A live transcript stops following at entry sixty.** The effect that kept the
-  box on the newest row was keyed on how many rows were *shown*, which is
-  `min(entries, window)` — so it stopped changing the moment a transcript
-  outgrew one window, and the following died silently and permanently, including
-  after the operator scrolled back to the bottom to ask for it. Which is roughly
-  minute two of any real phase. It follows on the entry count now, growing the
-  window keeps the reader on the row they were reading instead of teleporting
-  them, and a **Jump to latest** button says so out loud rather than leaving a
-  60px band at the bottom of a scroller as the only way back in.
-
-- **The transcript spends its space on the noisiest rows.** An agent's answer,
-  its private reasoning and four hundred characters of tool-call JSON all
-  rendered as the same two lines at the same weight. Thinking is now small and
-  quiet, and a streamed thought is one row rather than the dozen events it
-  arrived as; tool calls and their results fold to the argument that says what
-  they did — a command, a path — and open individually or a whole kind at a time
-  from the panel header. Prose is untouched and never folds.
-
-- **A panel's expand control did nothing on the node view.** It expanded by
-  taking `col-span-full`, which on the run view bought a strip a third wider and
-  on the node view matched nothing at all — those panels sit in a flex column,
-  not a grid, so the only thing the button changed was the height of the
-  scroller inside it. It now opens the panel over the whole page through a
-  portal, so no scrolling ancestor can clip it, with Escape to leave and the
-  page behind it held still. A transcript that was following stays on its newest
-  row across the change.
-
-- **`doctor` checks that the shared servers answer.** It verified that binaries
-  existed and disk fitted, and never looked at a `server_url` — so a project
-  whose Postgres lives in another checkout's compose stack passed the preflight
-  with that stack down and died on the first `createdb`, before a worktree
-  existed. Each external database's server and each service URL is now probed
-  with a TCP connect, and a failure names the address that did not answer. A
-  compose-delivered database is deliberately not probed: the lane starts it.
-
-  The order matters as much as the check. `prepare_cmd` runs *before* the
-  preflight, so the check reports the world that hook just made rather than the
-  one in front of it.
-
-- **A service's `create_cmd` runs with the lane's environment.** `reset_cmd`
-  always had it and `create_cmd` did not, so a `create_cmd` that reached for
-  `docker compose` ran against the lane's own compose file with no project name
-  and no override — booting a stack on the project's fixed host ports, which is
-  the collision the override exists to prevent, caused by the step that sets a
-  lane up.
-
-- **`vinta-ai-maestro with` waits for the lock instead of giving up on it.** Its
-  usage said it blocked until the resource was granted, and it did — for about
-  five minutes, which is where Node's own `fetch` stops waiting for a response.
-  A test suite behind a capacity-1 semaphore beats that regularly. What the
-  agent saw was "could not reach the lease daemon", and what agents did with
-  that, repeatedly, was run the command without a lease: exactly the stampede
-  the pool exists to prevent, arrived at by an agent behaving reasonably.
-
-  The wait is the client's now. The daemon answers `202 still queued` within
-  seconds and **leaves its own queue behind it**, so nothing is granted to a
-  request that has gone away; the client loops until it is granted, saying so
-  once and then occasionally, so a transcript shows a wait rather than a
-  silence. Only answers that waiting cannot change — a resource this run does
-  not declare, a run that is no longer live — end it.
-
-  And when it does end that way, the refusal says what not to do about it.
-  "The resource lease was not granted" is an error with no alternative in it;
-  the rule against working around it now travels with the message rather than
-  sitting only in a prompt the agent read twenty minutes earlier. The prompt
-  says it too, including that waiting is the expected outcome and not a failure.
-
-- **A retry gets a fresh fix budget.** `fix_rounds` was set to 0 when a node was
-  created and never again, so a phase that spent its whole budget on attempt 1
-  began attempt 2 already exhausted — one review, one fix, and the exhaustion
-  transition fired straight back. Seen with `max_fix_rounds: 4`: the retry got a
-  single round before the operator was asked again, forty seconds of work
-  standing in for four rounds of it. A retry that inherits the reason the last
-  attempt ran out is not a retry. It resets wherever a node is re-driven from
-  its pipeline's initial state — a capacity refusal, an automatic retry, the
-  operator's answer, the `retry` verb — which is one place rather than four.
-
-- **The last fix is reviewed rather than failed unread.** `standard-phase`
-  checked the budget on the way *out* of `fix`, so the final fixer's work went
-  straight to `failed` with nothing looking at it. Two phases in one run ended
-  on a fixer reporting "all gates green, committed, tree clean" and were failed
-  anyway. The check now sits in front of the fixer, on both doors into it: every
-  fixer that runs is reviewed, and the review after the last one can still pass
-  the phase. Guarding only the review side left a red gate under a passing
-  reviewer looping forever, which is the other half of the same change.
-
-  `max_fix_rounds` still means the number of fixers a phase may spend. `0` now
-  means none, where before it let one run and failed the phase regardless.
-
-- **Agents are told not to background their work.** An implementer started five
-  commands with `run_in_background: true` and closed its turn with "I'll wait for
-  the test result notification before continuing to the outer gate". There is no
-  notification: a headless session ends when the turn ends and whatever it
-  backgrounded is killed with it. Three sessions ended with no report and no
-  commit, and the reviewer failed each for uncommitted work — true, and not the
-  cause. Nothing had said so, and believing a tool that offers backgrounding will
-  still be there afterwards is not unreasonable.
-
-- **The reviewer runs the gates instead of taking their word for it.** The prompt
-  asked it to confirm the outer gate was green, which an agent can do by reading
-  the implementer's report — one reused reviewer session reached a verdict in
-  under four minutes without running the project's tests at all. It is now asked
-  to run them, to say what they returned, and to treat being unable to run them
-  as a finding. Re-review rounds are asked again, because a session that
-  remembers running them last round is remembering a different tree.
-
-- **A retried phase keeps the commits the attempt before it made.** A failed
-  phase re-enters its pipeline at the initial state, which runs `git_branch`
-  again — and `checkout -B` moves an existing branch unconditionally, so attempt
-  2 began by resetting attempt 1's work to base. The files left the worktree,
-  the next reviewer correctly reported "phase not implemented at all", and the
-  fix budget burned re-implementing from nothing until the operator was asked. A
-  phase that produced real commits was guaranteed to lose them.
-
-  "Cold" was always meant to describe the agent's *session*, not its branch —
-  and the default policy targets environmental failures, which is exactly when
-  the previous attempt's code is worth keeping. A resumed branch is checked out,
-  never rebased onto a base that moved: a conflict there would fail the retry
-  during its setup, before the agent that might resolve it has run. A branch
-  that committed nothing is still moved up. Whether this is a second attempt is
-  read from the journal rather than from the ref, because a phase branch's name
-  carries the plan id and not the run id — an identically named branch left by
-  an earlier run must still be cut fresh. `node_assigned` now records
-  `previous_head`, so a reset that does happen is visible in the run rather than
-  only in a reflog.
-
-- **A phase is judged on commits, and the prompts finally say so.** An
-  implementer ran four sessions, reported `SUCCESS` with a green inner loop, and
-  never ran `git commit`: its deliverables were untracked files. The reviewer
-  reads the committed diff, so it saw an empty one and reported "not implemented
-  at all"; the fixer re-implemented, also without committing; the rounds ran out
-  and the lane was recycled over the files. Every instruction that agent had was
-  *about* committing — "never commit while a gate is red" — and none of them
-  said it had to.
-
-  Implementers and fixers, cold and continued, are now told that the phase is
-  reviewed and merged from commits on its branch, that an uncommitted file does
-  not exist as far as the run is concerned, and that the turn is not over until
-  `git status --porcelain` is empty of their work — staged by explicit path,
-  never `git add -A`, because a lane holds local files that are not theirs to
-  commit. The reviewer reads the working tree as well as the diff: a full tree
-  with an empty diff is a real failure and is *not* "not implemented", and the
-  difference decides whether the fixer writes the code again or simply commits
-  it.
-
-- **A recycled lane no longer deletes work nobody committed.** Both recycle
-  paths throw the working tree away. The tree is now committed first — with
-  plumbing, and **off the branch**, under `refs/vinta-ai-maestro/wip/`. On the
-  branch was the first implementation, and it was wrong: a lane's dirty tree
-  holds gate artifacts as often as deliverables, and a phase branch is the base
-  of its dependents, so one gate's scratch file reached the next phase and
-  failed a gate for a reason nothing in that phase caused. Nothing merges,
-  nothing reaches a dependent, and one `git restore --source <ref>` gets a file
-  back. Where the rescue itself fails, the recycle refuses and names the paths.
-
-  The retry question says how much is at stake: commits are kept, and *N*
-  uncommitted files in the lane will be set aside.
-
-- **`project.hooks: skip`.** Committing is not optional any more, and a
-  `language: system` pre-commit chain reads a never-committed-in worktree as a
-  fresh machine — one project's hooks built a 510 MB virtualenv before allowing
-  a first commit, per lane, after four attempts and a two-minute timeout. Set
-  per worktree, so the operator's own checkout keeps its hooks, and opt-in,
-  because hooks are usually there for a reason.
-
-- **`doctor` knows when a project needs docker compose.** It assembled its
-  options without a `project`, so `needsCompose` was handed `undefined` on every
-  invocation and reported "not required by this project" for a
-  compose-delivered database — and `run`'s own preflight did the same. A check
-  nothing can reach is worse than an absent one: it reads as a pass.
-
-- **A failing `setup_cmd` says why.** It carried a lane name and nothing else,
-  so the operator saw "could not provision the lane pool under …" and had to
-  replay the command by hand with the lane environment rebuilt to find a missing
-  settings module. It carries the exit code and a bounded stderr tail now — the
-  same class of thing as a harness refusal's own explanation, which this package
-  already decided to carry after an afternoon lost to the same silence.
-
-- **A lane the executor was not given is refused, not guessed.** It fell back to
-  the right directory with an *empty environment* — a gate running against the
-  wrong compose project and no forked connection string, with nothing anywhere
-  saying a lane was missing.
-
-- **The monitor reads, and does not run.** Its shell has no lane environment, so
-  the project's own commands run from it contend with the lanes instead of
-  observing them. One reported "the final gate fails on a port conflict" when no
-  gate had run at all, and the operator believed it. Gate results come from the
-  journal and the gate logs.
-
-- **`serve --host 0.0.0.0` prints a URL another machine can open.** Binding
-  every interface made the server report the wildcard back, so the line printed
-  for the operator to open — and share — was `http://0.0.0.0:<port>`, which
-  resolves for nobody. The bind is unchanged; the printed host is now this
-  machine's LAN address. The daemon still warns, because the token in that URL
-  is the only thing between the run and anyone who can reach the port.
-
-- **An agent can run a shell command.** `auto` mapped to the vendor's
-  `acceptEdits`, which accepts file *edits* and nothing else — a shell command
-  still goes to a permission prompt, and in `-p` there is nobody to answer one.
-  A run of eight phases died of it: the agents wrote their code and were then
-  refused `ruff`, `pytest`, `git add` and `docker compose`, **69 denials across
-  two lanes**, every gate failing on work that was never allowed to be checked.
-  `auto` now allows `Bash` in the policy file it already writes.
-
-  What that costs is worth stating plainly: **`Bash` was never confined to the
-  lane.** The deny list covers the file-editing tools and a shell redirection
-  walks through it, so allowing the shell allows commands on the machine.
-  `auto` has always promised exactly this in words — "the agent works unattended
-  inside its lane" — and this is the first version where the words are true.
-  `ask` still does not allow it: that mode exists for a human at the browser,
-  and the prompt is its purpose.
-
-- **A refusal says why, in the words the harness used.** `permission_denied`
-  carried a decision token and deliberately dropped the sentence beside it, on
-  §11 grounds. Then a run failed with forty-five denials reading
-  `reason: "other"`, and finding out what that meant cost an afternoon and a
-  rebuilt reproduction — the sentence said "this Bash command contains multiple
-  operations; the following parts require approval". §11 keeps repository
-  *contents* out of the record; a refusal's own explanation is not contents, and
-  the `tool_use` row above it already carries the path and the command verbatim.
-  Withholding it protected nothing and hid the one fact worth having.
-
-- **`serve` opens a run that has already finished.** The API resolved a run from
-  the in-memory registry *and* the journal and required both, so a daemon
-  started with nothing running listed the operator's history — the list reads
-  the journal — and then answered 404 for every run in it, under a message
-  saying the daemon was not running. Reads now need only the journal, which is
-  where a run's whole record lives and which outlives the daemon by design
-  (§5.3). Steering a finished run is still refused, with `409` rather than
-  `404`: the run exists, and saying it does not sends the operator hunting for a
-  typo instead of reading the status in front of them.
-
-- **Four places the UI asked the operator to work around it.** The transcript
-  opened at the *oldest* row it held, so a live agent's newest line — the one
-  the panel was opened to read — sat below the fold and every arriving entry
-  pushed it further down; it now opens at the newest and stays there, but only
-  while the operator is already at the bottom, because scrolling up is reading.
-  The `git diff` command overflowed its panel, uncopyable without selecting
-  blind, and now wraps. The shell's bounded column went from 1280px to 1600px:
-  1280 is a reading measure, and the Nodes table's columns are ids, lane names
-  and branch names, none of which can be abbreviated without losing what
-  identifies them. And the notification interval said "Remind every 5 min"
-  without ever saying what it would remind anyone about — it repeats the
-  notification for a phase that stopped to ask the operator something, until
-  they answer, which is what the options say now.
-
-- **A killed terminal releases its directory on Windows.** Two PTY tests failed
-  teardown with `EBUSY: rmdir`: killing a process there is not synchronous with
-  releasing what it held, so the conpty and its background child are gone as far
-  as the test is concerned while the OS still has the working directory open.
-
-- **A failed phase can be retried instead of ending the run.** `run` takes
-  `--on-failure <stop|ask>`. `stop` is the default and is what every run has
-  always done — the phase fails, its dependents block, the run finishes. `ask`
-  parks the node on a question instead: retry, retry with another member of the
-  crew, or stop.
-
-  It exists because the failures worth retrying are overwhelmingly
-  environmental — a permission wall, a grant nobody made, a gate whose service
-  was not up — and the only recovery was to start the whole plan again, running
-  every phase that had already succeeded a second time. Only pass `ask` when
-  somebody is watching: the run waits, which is exactly why it is not the
-  default.
-
-  The alternatives offered are **members of the crew, not models**. A staffed
-  run has no free-floating models in it — a phase is taken by a member, and the
-  tier floor that decides who may take it is the assigned member's own — so a
-  model is something the plan cannot express and nobody could be found to hold.
-  A member below the phase's tier is never offered: an operator answering a
-  question is not a reason to hand a phase to somebody the plan judged too
-  junior for it.
-
-  The retry starts **cold**, and everything the node held goes back before it
-  waits (§6.1) — an operator at lunch must not be holding a lane another phase
-  could use.
-
-- **A refusal nobody was asked about is now said out loud.** The adapter knew
-  about `permission_request`, a question waiting for an answer, and nothing
-  else. The refusal an operator actually hits is not a question: a read outside
-  the working directory is decided by the CLI and announced as
-  `permission_denied`, with no request to reply to. That frame was dropped at
-  the first `switch` — no event, no journal row, no transcript line. The new
-  `permission_denied` event carries the decision token (`workingDir`, `mode`)
-  and never the vendor's prose, which names the file being read (§11).
-
-- **A turn that ended blocked is no longer a turn that succeeded.** The CLI
-  says `status_category: "blocked"` one frame before reporting
-  `is_error: false`, and both are true from its side: it was asked for
-  something it could not do and said so. Taking the second at its word is how a
-  phase passed having written no code and then failed two steps later under
-  another name. A session that reported an error no longer ends `ok` — which
-  also makes a reviewer fail closed, since its verdict is read back out of a
-  transcript whose session did not end cleanly.
-
-- **An agent still could not write in its own lane.** The entry below passed
-  claude-code `--permission-mode auto`, which matched our own vocabulary for
-  "works unattended" and is not what the vendor means by the word: `auto` still
-  routes a write to a permission prompt, and in `-p` there is nobody to answer
-  one. Run against the CLI, a `Write` to the agent's *own working directory*
-  comes back denied with no reason attached — the same dead end, wearing the
-  word that made it look closed. `acceptEdits` is the mode under which that
-  write succeeds, and is what `auto` now maps to. The test covering this
-  asserted the word rather than the behaviour, so it pinned the bug in place.
-
-- **A phase can read the operator's checkout.** A lane is a worktree cut from a
-  branch, so anything uncommitted — a plan written this morning, a spec that
-  never leaves the operator's machine — is present where they are and absent
-  from every lane. Reaching for it was refused before the model saw a byte, with
-  a message that reads like a prompt awaiting an answer ("Claude requested
-  permissions to read from …, but you haven't granted it yet") when in fact
-  nothing is asking: the CLI denies it outright, emits no permission request,
-  and the session then ends *successfully*, having written nothing.
-
-  The repository root is now granted to every claude-code agent for **reading**.
-  Granting a directory also grants writing in it, and the lane sits inside the
-  directory being granted, so the grant is paired with a deny list that keeps
-  the lane the only writable place under it — the operator's source and every
-  sibling lane stay refused. That list names the *siblings* at each level down
-  to the lane rather than the root itself, because the vendor resolves deny
-  before allow with no carve-out: `deny: <repo>/**` plus `allow: <lane>/**`
-  refuses the lane too. Each of those facts was established by running the CLI.
-
-  **This covers the file-editing tools and not `Bash`.** A shell redirection was
-  never confined to the working directory and is not confined now; that boundary
-  is the OS's, and the vendor's sandbox that enforces it also switches off the
-  network a phase needs to install anything.
-
-  codex needed nothing: under `--approve-for-me` it already reads anywhere on
-  disk, which was confirmed the same way.
-
-- **An agent can write in its own lane.** Every adapter declared
-  `permissionControl: true` and passed no policy at all: claude-code was spawned
-  as `-p --output-format stream-json …` with no `--permission-mode`, and codex as
-  `exec --json` with no sandbox and no approval flag, under a comment saying it
-  took both on the command line. So a headless run asked before its first write,
-  emitted a `permission_request`, rendered it in the transcript — and nothing
-  anywhere answered. The phase failed reporting a permission system it could not
-  see, having written nothing.
-
-  `run` and `serve` now take `--permission <ask|auto|full>`, defaulting to
-  `auto`. **The operator sets it, never the workflow document**: the document is
-  committed and shared, and a file in a repository should not be able to tell
-  someone else's machine to run agents without approvals.
-
-  Both CLIs refuse combinations that looked reasonable, and both were found by
-  running them rather than reading them: codex rejects `--sandbox` alongside
-  `--approve-for-me`, and `codex exec resume` accepts neither — passing the
-  fresh-spawn policy there turned a `stale_session` refusal, which the scheduler
-  retries cold, into a `fatal` one that fails the node.
-
-  This reverses a documented decision. The README said the daemon passed no
-  permission flags and that a committed `.claude/settings.json` was what made a
-  run able to write; that is now the narrowing layer on top of a mode, not the
-  only thing standing between an agent and a blocked lane.
-- **`purge --lanes --branches` clears what a failed run leaves behind.** A run's
-  lane worktrees are not under `runs/`, so no purge ever reached them: three
-  failed attempts at one plan left twelve worktrees, twelve summaries, and a set
-  of `plan/<id>/phase-*` branches still checked out — which is what makes the
-  *next* run of that plan impossible, since git refuses to check out a branch a
-  second worktree holds.
-
-  One rule decides both: **never delete the only copy of work.** A phase can
-  leave work committed on its branch or uncommitted in its worktree, and both
-  count — so a branch carrying commits no other branch has is kept, a lane with
-  a dirty tree is kept, and each is listed with the command to remove it by
-  hand. Untracked files count as work: a phase that wrote three new modules and
-  never committed them is exactly the case worth protecting.
-
-  Emptiness is measured as "carries no commit another branch does not already
-  have", not as "merged into HEAD". The latter is relative to wherever the
-  operator is standing, so on a feature branch — the checkout this is most often
-  run from — every empty phase branch looked unmerged and nothing was ever
-  cleaned up.
-
-  `--dry-run` and `--yes` work as they already did, and a worktree that will not
-  go is named rather than counted.
-
-- **`doctor` now catches, before a lane exists, the failures that used to take a
-  run each.** Four consecutive runs of one plan failed four different ways, and
-  every one of them was knowable at minute zero from the workflow and the repo.
-  - **Every `prompt_ref` and `plan_context_ref` is resolved against
-    `base_branch`**, with `git cat-file -e`, which reads the branch's tree and
-    so cannot be satisfied by a working-tree copy — the working tree being
-    exactly what a lane will not have. It distinguishes the three cases, because
-    they have three different fixes: never committed, **staged but never
-    committed** (`git add` alone does not put a file in a branch), and committed
-    on a different branch. The last offers both routes out — merge it, or point
-    `base_branch` at the branch that has it — since only the operator knows
-    which they want.
-  - **Phase branches held by another worktree** are reported with the directory
-    to remove. Lane directories are named per run and phase branches per
-    workflow, so a failed run leaves worktrees holding the branch names the next
-    run will try to cut, and git refuses to check out a branch twice. Nothing
-    cleans those up: `purge` deletes run state under `.vinta-ai-maestro/runs/`,
-    and lane worktrees are not there. `doctor` does not delete them either — a
-    failed lane's worktree is the only place its state survives — but it now
-    names each one and the exact command.
-
-- **A failed node records why.** `node_status` carried `{"status":"failed"}` and
-  nothing else, so two runs failing for two unrelated reasons produced identical
-  journal rows and the cause survived only in the operator's terminal. The
-  reason is now persisted — **sanitized**, not raw: errors the package builds
-  itself are identifiers by construction and are kept verbatim, and anything
-  else is reduced to its kind, the rule `recycleStage` already followed. The
-  journal is durable and API-served, and an exception message from a dependency
-  is exactly how repository content gets into one. Blocked dependents record
-  which node blocked them.
-
-- **Two diagnostics that named the symptom and hid the cause.** Both came out of
-  one real run, and neither was a wrong answer — just an unusable one.
-  - **A phase whose plan is not committed** failed with `prompt_ref "…" names no
-    readable file`, against a path that was spelled correctly. A lane is a fresh
-    worktree of the base branch, so a plan sitting untracked in the operator's
-    checkout is in the one place the run cannot look. The message now names the
-    directory it resolved against and says why a plan is often not in it.
-  - **A lane summary the daemon could not accept** reported `summary unreadable`
-    and advised deleting the lane — which takes its forked databases with it,
-    over what turned out to be two wrong fields. `doctor` now names the fields
-    and what was expected, and offers repair before deletion. A file that does
-    not parse at all still reports as unreadable, because there is no field to
-    name. Neither message carries the offending *value*: a summary holds
-    database names and connection variables, and the value that failed
-    validation is the likeliest thing in it to be one.
-
-  `prepare-worktree` gained the rule that would have prevented the summary in
-  the first place — its `|` alternatives are closed sets read by machine, `null`
-  is how you say "none", and a strategy outside the set should be the closest
-  one plus a `note:` rather than a fourth word.
-
-- **`npx vinta-ai-maestro` now runs.** The published package pointed its `bin` at
-  `src/cli/bin.ts` and relied on Node stripping the types at startup — which Node
-  refuses to do anywhere under `node_modules`, unconditionally and with no flag to
-  override. So the CLI worked from a checkout and died on first run once installed,
-  with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`.
-
-  `packages/vinta-ai-maestro` now builds: `tsc` emits `dist/` with
-  `rewriteRelativeImportExtensions` (the source imports `.ts` specifiers, which
-  emitted JS cannot keep), vite writes the daemon's UI into `dist/ui`, and the
-  shebang is rewritten from the source's `--experimental-transform-types` form to
-  a plain `#!/usr/bin/env node` — a compiled entry point has no types left to
-  transform, and should not ask Node for a flag it is free to retire. `prepack`
-  runs the build, so a tarball can never be cut from a stale `dist/`.
-
-  Three packaging faults surfaced with it, each of which broke an install on its
-  own:
-  - **The UI was never in the tarball.** `serve` resolves its static root as
-    `dist/ui` and refuses to read outside it, so it would have booted and answered
-    every page with "build the UI first". The build now asserts `dist/ui/index.html`
-    exists rather than trusting a vite config that writes outside its own root.
-  - **`tailwindcss` and `tw-animate-css` were imported but never declared.** They
-    resolved only through pnpm's `.bin` shim setting `NODE_PATH`; building by any
-    other path failed to resolve them. Both are now devDependencies.
-  - **Everything the UI imports was a runtime dependency.** React, xterm,
-    lucide-react and the three workspace packages are bundled into `dist/ui` by
-    vite and cannot be loaded at runtime — yet a consumer installed all of them,
-    and two carried `workspace:*` specifiers that no registry understands. Moved to
-    devDependencies; the published package now declares six runtime dependencies
-    instead of fourteen.
-
-  CI packs the tarball, installs it into a throwaway project and runs the binary
-  from `node_modules`. Every previous check ran from a checkout, which is the one
-  place this class of bug cannot appear.
-
-- **Lane provisioning serializes `git worktree add`, not only the database
-  template.** `prepare-worktree` previously named one serialization point; there
-  are two. Git rewrites `.git/worktrees/` metadata on every add, and concurrent
-  adds against one repository clobber each other's entries — a reproducible
-  corruption, not a theoretical race. Worktrees are added one at a time; the
-  expensive per-lane work (dependency linking, database cloning, summary
-  writing) still overlaps around it.
-
-- **The conflict-fixer round budget is an integration-level setting, not a
-  phase's `max_fix_rounds`.** `parallel-lanes.md` now says so, and defaults it to
-  two. A merge conflict belongs to a *pair* of phases, so deriving the budget
-  from one of them made the answer depend on which phase happened to merge
-  second.
-
-- **A resolved merge conflict is confirmed by scanning the files, never by asking
-  git.** `git add` clears a path's unmerged flag whether or not `<<<<<<<` is
-  still sitting in it, so git's index cannot answer "did the fixer actually fix
-  it". `parallel-lanes.md` now requires scanning the conflicted paths for
-  conflict markers before the merge is committed. Without it, a fixer that did
-  nothing produces a merge commit full of markers that passes into the wave
-  branch unnoticed.
-
-### Security
-
-- **Maestro: lane agents hold a token of their own.** A run's agents used to
-  reach its API with the operator's token (`VINTA_AI_MAESTRO_TOKEN`), so an
-  agent could steer, abort, amend, `exec` in, pause or stop its own run, or
-  save a workflow from the editor, as the operator. They now get an agent
-  token that reaches only their own leases (`with`), `gate`, and the
-  permission-judge and gate-guard hooks; every other route answers
-  `403 agent_forbidden`. It does not open the WebSocket (and so no PTY
-  takeover), `ui` never forwards it to a run's job, and it is redacted from
-  the logs like the other tokens. Nothing to migrate: lanes are handed the new
-  token when a run starts or resumes.
-
-> The repository also gained `packages/vinta-ai-maestro/`, the workspace package
-> that executes these workflows. It is published as its own npm package,
-> `vinta-ai-maestro`, carrying the same version as `vinta-ai-workflows`, and is
-> run with `npx vinta-ai-maestro`. It is not part of the `vinta-ai-workflows`
-> tarball — the root `files` whitelist excludes `packages/`, so nothing in it is
-> installed by `npx vinta-ai-workflows install`. What ships from that work into
-> the skills package is the two generated schemas above and the skill changes
-> that produce and consume them.
->
-> Its browser UI is now built on `packages/design-system/` (`vinta-design-system`),
-> a second workspace package: oklch tokens in three layers mirroring
-> `vinta-schedule-design-system`, six run-status **tones** (`idle`, `active`,
-> `wait`, `attention`, `ok`, `error` — waiting is amber and failure is red, never
-> the same hue), shadcn/ui components on Tailwind CSS v4, a small layout kit, and
-> a light/dark/system theme. The run graph and the pipeline editor are re-skinned
-> through their own custom properties, so the canvas and the badges beside it
-> share one palette. It and `vinta-dag-editor` publish on their own cadence
-> (`0.1.0`) as dependencies of `vinta-ai-maestro`; nothing in either reaches
-> `npx vinta-ai-workflows install`.
+  deliberately shares with the main checkout. The report prints the sequence
+  `prepare-worktree` documents: `docker compose -p <project> down`, then
+  `docker volume rm` for each forked volume, then removal of the generated
+  compose override.
+
+- **`prepare-worktree` serialises `git worktree add`, not only the database
+  template.** Git rewrites `.git/worktrees/` metadata on every add, and
+  concurrent adds against one repository clobber each other's entries.
+  Worktrees are added one at a time; the per-lane work around them still
+  overlaps.
 
 ## [0.6.1] — 2026-08-17
 
