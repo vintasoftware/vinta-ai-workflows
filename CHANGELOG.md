@@ -5,7 +5,7 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] — YYYY-MM-DD
+## [0.7.0] — 2026-11-03
 
 <!-- Graduates the 0.7.0-alpha1 … 0.7.0-alpha39 series (2026-09-11 to
      2026-10-24). This section is the net change since 0.6.1. The
