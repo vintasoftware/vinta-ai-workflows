@@ -982,6 +982,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     optional field of `postmortem.v1`. The plan PR lists only the chores that
     had failed when it opened. The last phase's own `after_pr` chores run
     after it opens, so they appear only in `status` and the post-mortem.
+- **`vinta-ai-maestro`: `better-sqlite3` 13 and `zod` 4.6.7.** `better-sqlite3`
+  moves from `^12.4.1` to `^13.0.3`, a major release that needs Node 22 or
+  newer, as maestro already does. It no longer pulls in its prebuilt-binary
+  download chain, so an install fetches about 35 fewer packages. `zod` moves
+  from `^4.6.1` to `^4.6.7`. Neither changes maestro's behaviour.
 - **`vinta-ai-maestro`: the coordinator's wakes are more specific.**
   - The `gate_cost` wake lists uncached minutes per phase and flags any
     single run of 20 minutes or more as probably a cold lane. Runs of a
