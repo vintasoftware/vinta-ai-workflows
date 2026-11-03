@@ -60,7 +60,7 @@ pnpm install
 That is the development setup. To *use* it, there is no clone at all — the package is published:
 
 ```bash
-npx vinta-ai-maestro@alpha ui
+npx vinta-ai-maestro ui
 ```
 
 `@alpha` while the only published versions are pre-releases. Plain `npx vinta-ai-maestro` resolves the `latest` dist-tag, which is correct once a stable exists.
@@ -920,7 +920,7 @@ The answer resumes the agent's own session, so it carries on from where it stopp
 A plan is cheapest to fix before anything has run. The **Plans** section of the UI is a review page for a plan in `ai-plans/` that has not run yet. You can read and comment on all of it, and talk to the agent that wrote it, which revises the plan while you watch.
 
 ```bash
-npx vinta-ai-maestro@alpha review open ai-plans/2026-03-04-bookmark-folders.workflow.json
+npx vinta-ai-maestro review open ai-plans/2026-03-04-bookmark-folders.workflow.json
 ```
 
 `review open` serves the UI, as `ui` does, and prints a URL that opens on that plan's page. The page has four tabs and a sidebar:

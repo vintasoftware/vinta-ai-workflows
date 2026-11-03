@@ -19,7 +19,7 @@ For finite-set answers, **list options**. Provide one-sentence **why** so they u
 
 ### Pick the interview surface first — browser or chat
 
-When `ai-tools/skills/interview-ui/SKILL.md` exists in the project, ask once before the first batch, via `AskUserQuestion`: *"Where do you want to make the spec decisions?"* — `In the browser (one decision per screen, with diagrams)` or `Here in chat`. Browser needs `vinta-ai-maestro` runnable from the project (`npx --no-install vinta-ai-maestro`, or `npx vinta-ai-maestro@alpha`) and a browser on this machine; when in doubt, say so and default to chat. When the skill is absent, interview in chat; don't mention the browser.
+When `ai-tools/skills/interview-ui/SKILL.md` exists in the project, ask once before the first batch, via `AskUserQuestion`: *"Where do you want to make the spec decisions?"* — `In the browser (one decision per screen, with diagrams)` or `Here in chat`. Browser needs `vinta-ai-maestro` runnable from the project (`npx --no-install vinta-ai-maestro`, or `npx vinta-ai-maestro`) and a browser on this machine; when in doubt, say so and default to chat. When the skill is absent, interview in chat; don't mention the browser.
 
 **Browser surface.** Follow `ai-tools/skills/interview-ui/SKILL.md`. Everything below about *what* to ask still holds — groups A–I, the clarity loop, the read-back, the exit conditions. What changes is *how*:
 

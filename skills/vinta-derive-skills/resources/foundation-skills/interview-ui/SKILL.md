@@ -22,7 +22,7 @@ Default `<interview-dir>`: `.vinta-ai-workflows/interviews/<slug>/` — the giti
 
 ## Requirements
 
-- **`vinta-ai-maestro`** reachable from the project. When it is a devDependency, every command below is `npx --no-install vinta-ai-maestro interview …`. When it is not, `npx vinta-ai-maestro@alpha interview …` fetches it (`@alpha` while only pre-releases are published; plain `npx vinta-ai-maestro` once a stable exists). The commands below write `vinta-ai-maestro` and mean whichever of those the project uses. Run `vinta-ai-maestro interview --help` once to confirm it is there; a failure means the browser surface is unavailable and the interview runs in chat.
+- **`vinta-ai-maestro`** reachable from the project. When it is a devDependency, every command below is `npx --no-install vinta-ai-maestro interview …`. When it is not, `npx vinta-ai-maestro interview …` fetches the latest stable release. The commands below write `vinta-ai-maestro` and mean whichever of those the project uses. Run `vinta-ai-maestro interview --help` once to confirm it is there; a failure means the browser surface is unavailable and the interview runs in chat.
 - Node ≥ 22 on the machine running the agent (maestro's requirement).
 - A browser on the same machine. The server binds `127.0.0.1` only and never accepts remote connections.
 
