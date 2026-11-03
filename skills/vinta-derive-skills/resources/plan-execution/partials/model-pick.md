@@ -19,7 +19,7 @@ Pick:
 
 **A crew member is an agent, and it is still alive.** If this member has already taken a phase on this run, continue that sub-agent rather than spawning a new one: it is standing in the same worktree — a member keeps one for the whole run — and it already knows where this codebase keeps things, how its suite is run and what its conventions are. Rediscovering that is most of what a cold agent's first turn costs.
 
-Because it is new work, the continuation gets the phase's **full brief**, not a delta. Precede it with the re-orientation described in [Re-orienting a member after the reset](../implement-plan/SKILL.md#re-orienting-a-member-after-the-reset): same agent and same directory, whether the previous phase's work is in this tree, and which files differ from what it last saw.
+Because it is new work, the continuation gets the phase's **full brief**, not a delta. Precede it with the re-orientation described in [Re-orienting a member after the reset](../implement-plan/SKILL.md#re-orienting-a-member-after-the-reset): the previous phase is finished and this one is its objective now, same agent and same directory, whether the previous phase's work is in this tree, and which files differ from what it last saw.
 
 Start cold instead when any of these hold:
 
@@ -29,7 +29,11 @@ Start cold instead when any of these hold:
 
 Record which of those applied, so a phase that was unexpectedly slow can be read later without guessing.
 
+**A continuation that fails or comes back empty.** A continue that errors because the session is gone, or returns no text and no tool call, is retried once **cold, with the full brief** — the decisions block included — never with the delta the continuation carried. A delta only makes sense to the session that read what came before it. Two empty turns in a row are an infrastructure fault (below), not the phase's.
+
 **Out of quota (no user prompt):** the spawn is refused, or the turn cut off, because the picked model's quota or credits are spent — a usage-limit, credit-balance or insufficient-quota error, not a capability gap — and its entry in `ai-models.yaml` carries a `fallback:`. Re-spawn on the fallback at once instead of waiting, and keep using the fallback in place of that model for the rest of the run; say so once. If the fallback is refused the same way, the account is out rather than the model: wait for the reset as you would with no fallback. A plan's workflow JSON may carry the same map as `defaults.model_fallbacks`; when it does, it wins over `ai-models.yaml`.
+
+**An infrastructure failure is not the phase's failure.** The API is overloaded or returns a 5xx, the network fails, the harness's login expired, the harness will not start: none of these says anything about the model's capability. Don't step up a tier, and don't count the attempt as the phase's retry. Stop dispatching new phases — the others in flight are about to hit the same wall — and ask with `AskUserQuestion` (header `Outage`), quoting the error: `Wait and retry (Recommended)` (when the human says so, retry each phase that hit it at the step it reached), `Switch model` (re-spawn on another model of the same tier from `ai-models.yaml`), `Stop the run`. Running out of quota is the case above, not this one.
 
 **Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. After Tier 4 fails, STOP. Update tracking with `❌` and hand the failure back to the conductor, which asks the user how to proceed with a structured question (see its **Model escalation** rule).
 

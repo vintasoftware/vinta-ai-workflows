@@ -38,4 +38,4 @@ Feed that tier into the resolution below, which turns a tier into the model the 
 
 ## Output
 
-Return to the conductor `PASS` — the reviewer explicitly approved — with the approval line, the iteration commits, the `--shortstat` at the start and the end, the rejected findings and the settled decisions; or `STOPPED`, with the blockers that remain and why the loop stopped. The conductor owns branch / push / PR — this skill hands back a working tree in `WORKROOT` whose fixes are committed.
+Return to the conductor `PASS` — the reviewer explicitly approved — with the approval line, the iteration commits, the `--shortstat` at the start and the end, the rejected findings and the settled decisions; `ACCEPTED` — the human took the phase as it stands — with the blockers that remain and the same records; or `STOPPED`, with the blockers that remain and why the loop stopped. The conductor owns branch / push / PR — this skill hands back a working tree in `WORKROOT` whose fixes are committed.

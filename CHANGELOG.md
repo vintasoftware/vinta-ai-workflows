@@ -993,7 +993,70 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/interview.test.ts` — and have fixtures under `tests/schema-fixtures/`.
   Same shapes and descriptions; `$defs` are named (`explainer`, `option`,
   `decision`, …) rather than inlined.
-
+- **`implement-plan` and its sub-skills follow what `vinta-ai-maestro` learned
+  from real runs.** Re-derive the skills to pick this up. Plans and tracking
+  directories written before the change still work as they are.
+  - **Implementers commit when a gate stays red.** They report `FAILURE`,
+    naming the gate, instead of leaving the work on disk. A `NEEDS_INPUT`
+    report also commits what it has. Implementers run every command in the
+    foreground, and never hand-edit a generated file. Each report lists every
+    outer-gate command it ran and its result. The conductor reviews only a
+    `SUCCESS` report whose gates are all green.
+  - **Every spawn of a phase carries its decisions.** A cold re-spawn, a
+    relay re-spawn, a retry and a cold review fix all get a **Decisions
+    already made in this phase** block. A resumed implementer checks the
+    branch for work already committed before it starts.
+  - **Every merged tree runs the full gate**, whatever the `full_test_suite`
+    answer is. That covers each `integ-` base before its phase is dispatched,
+    each wave merge (clean ones included) and the final wave before the plan
+    PR. The integration worktree's test database is recreated when the tree
+    moved under it. Generated files are regenerated, not merged.
+  - **The Quick test scope** now means scoped tests until the review
+    approves, then the full suite once before the phase is integrated.
+  - **The merge fixer gets more rules.** What a side deleted stays deleted.
+    It stages by name only, and verifies narrowly. It also checks for a
+    clean merge that still broke, such as two migrations on one parent.
+    Kept lines a side had deleted are flagged in the wave record and the
+    plan PR.
+  - **Merge handling.** A merge refused by a hook or by git goes to the
+    human, not to a fixer. Existing `integ-` and `wave-` branches are kept
+    rather than recut. A failed wave build is the wave's failure, and its
+    phases stay done.
+  - **The review loop.** A reviewer pass with no verdict is continued once,
+    and never counts as approval. The human can now **Accept as is**, which
+    returns `ACCEPTED`: the phase is integrated with its open blockers
+    recorded. A finding re-raised without new evidence is rejected on the
+    spot. After 3 rejecting passes, a fresh implementer one tier up takes
+    over the phase. A fix round that leaves the tree unchanged while a gate
+    is still red asks the human instead of spending another round. After
+    approval the implementer runs `deslop-comments` over the comments the
+    phase added.
+  - **Re-orientation.** A member moved to its next phase is told first that
+    its objective changed. A continuation that fails or comes back empty is
+    retried cold, with the full brief. An outage, a network error or an
+    expired login no longer escalates the model tier. It asks
+    `Wait and retry` / `Switch model` / `Stop the run`.
+  - **Lanes are recycled fully between phases**, in this order: leftovers are
+    saved to a `refs/wip/` ref, then the tree is reset and cleaned, the branch
+    cut, the database reset and dependencies installed. A lane that will not
+    recycle is replaced by `<lane>-r<N>`. Containers a killed gate left
+    behind are removed. Lane worktrees are provisioned one at a time. A
+    resume rebuilds every wave branch that is missing or short, and redoes
+    an interrupted merge.
+  - **Scheduling.** Two parallel phases adding migrations to the same app now
+    count as file overlap. A covering crew member is capped at one tier
+    above the planned one, and a member planned for a pending phase is not
+    borrowed. The start-run summary lists CI commands that no gate runs.
+  - **The plan PR is the one PR that lands the plan.** The second landing
+    route, merging the phase PRs in order, is gone. Every phase and
+    integration PR opens with a **Landing** section that points at the plan
+    PR. The plan PR marks PRs whose changes are already in the base. The
+    final report says how to carry a late fix into the `integ-` and `wave-`
+    branches, and how to merge a moved base.
+  - **`amend-plan`'s maestro operator recipes** use `switch-harness`,
+    `node reassign`, `node interrupt`, `--harness-profile`, `propagate` and
+    `sync-base`. They no longer tell you to pass a resumed run's flags again,
+    because `run --resume` reuses the run's own policy.
 - **`plan-feature`: plans have fewer, longer phases.** Re-derive the skill to
   pick this up. A plan drawn before the change is still valid as written.
   - The phase size ceiling rises from 1500 to 4000 LoC, tests included. The
