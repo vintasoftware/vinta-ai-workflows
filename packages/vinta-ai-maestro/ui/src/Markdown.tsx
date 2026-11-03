@@ -6,7 +6,8 @@
  * backticks. This renders it, with two rules carried over from everywhere else
  * on the page: fenced code goes through the same highlighter the diff uses, so
  * a block of TypeScript an agent quoted looks like the TypeScript in the diff
- * beside it; and raw HTML in the text is text, never markup. react-markdown
+ * beside it; a `mermaid` fence is drawn (`Mermaid.tsx`); and raw HTML in the
+ * text is text, never markup. react-markdown
  * builds elements rather than a string, so there is no `innerHTML` here for
  * repository content to reach (§11), and its default of not rendering HTML
  * nodes is kept.
@@ -20,6 +21,7 @@ import remarkGfm from 'remark-gfm'
 import { cn } from 'vinta-design-system/lib/utils'
 import { CodeBlock } from './Code.tsx'
 import { supported } from './highlight.ts'
+import { Mermaid } from './Mermaid.tsx'
 
 const PLUGINS = [remarkGfm]
 
@@ -44,6 +46,8 @@ const COMPONENTS: Components = {
     const classes = Array.isArray(className) ? className.join(' ') : String(className ?? '')
     const lang = LANGUAGE.exec(classes)?.[1] ?? null
     const text = textOf(code).replace(/\n$/, '')
+    // A diagram, not code: drawn, with the source as its fallback.
+    if (lang === 'mermaid') return <Mermaid source={text} className="my-2" />
     return <CodeBlock code={text} lang={lang !== null && supported(lang) ? lang : null} className="my-2" />
   },
   // Inline code: `pre` above never renders its child, so anything reaching

@@ -39,6 +39,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro interview` — the browser interview, served by maestro.**
+  `interview start|wait|status|stop --dir <interview-dir>` serves the
+  interview page that `create-spec`'s Step 0 uses through the `interview-ui`
+  foundation skill: one decision per screen, the rail of groups and
+  decisions, Markdown and Mermaid explainers, option cards with their
+  consequences and the recommended default marked, the question panel for
+  the agent — rendered with `vinta-design-system`, in the same bundle as the
+  run monitor (`dist/ui/interview.html`), so an interview looks like the rest
+  of the toolchain. The protocol is unchanged: the agent writes
+  `rounds/round-NN.json` (`interview-round.v1`), the page writes
+  `answers/round-NN.json` (`interview-answers.v1`) through the server. The
+  server binds loopback, gates its API behind a token in the printed URL,
+  serves documents only from the interview's `docs/`, accepts a round's
+  answers once, and streams state so the page switches to the next round as
+  the agent writes it. `wait` watches the directory rather than the server,
+  so it exits `0` with the answers path, `124` on timeout, `1` when nothing
+  is running. [packages/vinta-ai-maestro/SPEC.md § 20](packages/vinta-ai-maestro/SPEC.md).
+- **Mermaid fences render in the maestro UI.** Plan documents, transcripts
+  and interview rounds draw their `mermaid` fences (loaded on first use,
+  `securityLevel: strict`); a diagram that cannot be drawn shows its source.
+
 - **`vinta-ai-maestro` UI: what a phase is running, and a way to stop it.**
   The node view's gates panel is now a **Processes** panel. It lists the
   phase's running processes: the agent's shell commands, marked as waiting
@@ -954,6 +975,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The `interview-ui` foundation skill no longer bundles a server or a
+  shell.** `scripts/interview-ui.mjs` and `resources/index.html` are gone;
+  the skill's commands are `vinta-ai-maestro interview …` (`npx --no-install
+  vinta-ai-maestro` when it is a devDependency, `npx vinta-ai-maestro@alpha`
+  otherwise), and the directory ships `SKILL.md` and `resources/examples/`.
+  The round and answers files are the same, so an interview started on the
+  old shell reads the same under the new page. The requirement moves from
+  Node ≥ 18 to maestro's Node ≥ 22. Projects that bootstrapped the skill
+  before this release keep the old copy until `vinta-sync-ai-tools`
+  refreshes it. `create-spec`, the bootstrap interview's question 7 and the
+  config schema's `foundation_skills.interview-ui` description say so.
+- **`interview-round.v1` and `interview-answers.v1` are generated now**, from
+  `packages/vinta-ai-maestro/src/interview/document.ts` (zod), like
+  `workflow.v1`, `postmortem.v1` and `plan-review.v1` —
+  `pnpm --filter vinta-ai-maestro interview:schema:gen`, checked by
+  `tests/interview.test.ts` — and have fixtures under `tests/schema-fixtures/`.
+  Same shapes and descriptions; `$defs` are named (`explainer`, `option`,
+  `decision`, …) rather than inlined.
 - **`implement-plan` and its sub-skills follow what `vinta-ai-maestro` learned
   from real runs.** Re-derive the skills to pick this up. Plans and tracking
   directories written before the change still work as they are.

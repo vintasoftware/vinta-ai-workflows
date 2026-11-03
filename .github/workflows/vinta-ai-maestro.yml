@@ -84,8 +84,10 @@ jobs:
       # `--frozen-lockfile` is the default in CI and is named anyway: a run that
       # silently resolved a different tree would not be testing this commit.
       # This also runs the package's postinstall (`scripts/fix-node-pty.mjs`)
-      # and builds better-sqlite3 and node-pty, both native — which is itself
-      # part of what the Windows leg is verifying.
+      # and node-pty's install script, which fetches or builds its native
+      # binary — which is itself part of what the Windows leg is verifying.
+      # better-sqlite3 is native too but ships its binaries in the tarball,
+      # so pnpm-workspace.yaml keeps it off the build allowlist.
       - name: Install
         run: pnpm install --frozen-lockfile
         working-directory: .

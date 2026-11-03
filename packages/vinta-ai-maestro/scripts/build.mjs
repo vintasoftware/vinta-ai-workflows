@@ -67,8 +67,10 @@ writeFileSync(entry, `${BUILT_SHEBANG}${source.slice(shebang.length)}`)
 // The one thing a green build can still get wrong: `vite` writes outside its
 // own root here (`outDir: '../dist/ui'`), so a config change that moved it
 // would leave `serve` with no UI and nothing would have failed.
-if (!existsSync(join(PACKAGE_ROOT, 'dist', 'ui', 'index.html'))) {
-  throw new Error('dist/ui/index.html is missing — `serve` would have no UI to hand out')
+for (const page of ['index.html', 'interview.html']) {
+  if (!existsSync(join(PACKAGE_ROOT, 'dist', 'ui', page))) {
+    throw new Error(`dist/ui/${page} is missing — \`serve\` or \`interview\` would have no page to hand out`)
+  }
 }
 
 process.stdout.write(`built dist/ + dist/ui, and set ${BUILT_SHEBANG} on dist/cli/bin.js\n`)

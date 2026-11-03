@@ -732,6 +732,7 @@ React + Vite, served by `vinta-ai-maestro ui` at `127.0.0.1` behind a random tok
 | Editor | `vinta-dag-editor` in edit mode (add node, draw dependency, set gates/harness/model) plus `vinta-state-machine-editor` for pipelines |
 | Plans | §19's review page for a plan that has not run: the graph coloured by review state, each phase's brief, composed prompts and gates, the plan's markdown, a gate matrix, the projected schedule, comments anchored to any of them, and the conversation with the agent that wrote the plan |
 | Logs | The daemon's own log (§13.8) — level, run, node and substring filters, following the tail. Its own section rather than a run panel, because the records worth reading most are the ones with no run to file them under |
+| Interview | `interview.html`, served by `vinta-ai-maestro interview` (§20) rather than by `ui`: an agent's interview as a form, one decision per screen — the rail of groups and decisions, the decision with its context, explainer and option cards, the question panel for the agent — and a bar that moves between decisions and submits the round |
 
 The run view and the workflow editor are **the same component in two modes**, which is what keeps them from drifting into two different pictures of the same graph.
 
@@ -1326,3 +1327,34 @@ The page polls the review every two seconds, along with a stamp of every file th
 - **A hosted reviser.** When no agent is listening, messages wait. Spawning a harness to answer them would add an author maestro would have to permission. A §17-style adapter for that is the natural next step.
 - **Multi-reviewer identity.** A comment's author is `human`, with an optional name. Runs are operator-owned (§1), and so are reviews.
 - **Line-anchored comments on the plan.** Anchors are headings, not lines. A heading survives the edits a review causes; a line number does not.
+
+---
+
+## 20. Browser interview
+
+A skill's interview — `create-spec`'s Step 0 today, through the `interview-ui` foundation skill — asks a person a run of decisions, and chat is a poor surface for deciding: the options arrive as labels, the context scrolled away, and a diagram is impossible. The interview page gives each decision the whole screen. Maestro serves it because maestro already owns the browser surface of the toolchain: the page is in the same bundle as the run monitor, on the same design system, so an interview looks like the rest.
+
+This does not make maestro an interviewer, so the §1 non-goal stands. The agent running the skill writes every question and reads every answer. Maestro serves the page, validates and stores the answers, and tells the agent when they land.
+
+### 20.1 The protocol
+
+File-based and round-based, so it is the same under every harness and the agent needs no tool of its own for it. One directory per interview, `.vinta-ai-workflows/interviews/<slug>/` by convention:
+
+- `rounds/round-NN.json` — the agent writes a round: groups of decisions, each with its context (Markdown, Mermaid), an optional explainer (inline, or a document under `docs/`), and options with their consequences and a recommended default. `schemas/interview-round.v1.schema.json`.
+- `answers/round-NN.json` — the server writes the person's answers when the page submits: per decision `answered` with its values, `waived` (explicitly not applicable), or `skipped`; a note per decision; questions for the agent; a note for the round. `schemas/interview-answers.v1.schema.json`.
+- `docs/` — explainer documents, the only files the server serves out of the directory.
+
+Both schemas are generated from `src/interview/document.ts`. The agent's loop is `interview start`, then per round: write the file, `interview wait --round N` (exit 0 with the answers path, 124 on timeout, 1 with no server), read the answers, write the next round; `interview stop` when the artefact is written. `wait` never talks to the server — it watches the directory — so a `status` after a crash is honest: the files are the state.
+
+### 20.2 The server
+
+`vinta-ai-maestro interview start` spawns `interview serve` detached, the way `run` spawns a job, and records its pid and URL in `server.json`. The server (`src/interview/server.ts`) hosts no run and opens no journal. It serves the bundle unauthenticated for the reasons §10 gives, and everything under `/api/interview` behind a token minted at start and printed once, in the URL — accepted in a header or the query, since the page's event stream and its iframes cannot set a header. A document is resolved inside `docs/` after decoding and refused otherwise; an HTML one is served with a sandboxing policy. A round's answers are validated against the schema and against the round they answer (every decision id must be one it asked), stamped with `submitted_at`, written once — a second submission is `409` — and announced over server-sent events, which the page follows and polls as fallback.
+
+### 20.3 The page
+
+`interview.html`, a second entry of the same bundle, with nothing of the run monitor in it. Three columns on a wide window, stacked on a phone: the rail (every group and decision with done / waived / open state; going back to change an answer is a click), the decision (context, explainer, the agent's replies to the person's earlier questions, option cards, the waive toggle, a note), and the question panel (questions about this decision, general questions, a note for the round). The bar under them moves between decisions and submits; a submit with a required decision open is refused and jumps to it. The draft is kept in the browser per interview and round, so a reload loses nothing before submission. A submitted round is shown read-only, and the page switches to the next round as the agent writes it. Mermaid fences are drawn — on this page and everywhere else the UI renders markdown — by a library loaded on first use.
+
+### 20.4 Not done here
+
+- **Hosting the interviewer.** When no agent is running `wait`, a submitted round waits. Spawning a harness to read it would make maestro the author of the interview.
+- **Editing a round from the page.** The person answers; the agent revises by writing the next round. A page that let the person rewrite a question would leave two authors of one file.
