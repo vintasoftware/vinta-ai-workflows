@@ -246,7 +246,8 @@ Then splice in the shared "return your questions" contract and the inner/outer v
 10. **Do NOT push. Do NOT force-push.** The orchestrator owns the remote.
 
 ## Required output
-- Status: SUCCESS, FAILURE, or NEEDS_INPUT (with the `questions:` block).
+- Status: SUCCESS, FAILURE, or NEEDS_INPUT (with the `questions:` block). SUCCESS means every outer gate is green.
+- Gates: every outer-gate command you ran, in order, and what it returned (green, or red with the failing lines). Name any you did not run, and why.
 - New commit SHA(s) added (or amended SHA).
 - 5–15 line summary.
 - Deviations from new body + reasoning.
@@ -258,7 +259,7 @@ For `change_kind = rebase-only` (downstream phase whose parent moved): skip the 
 
 ### 4c. Run the review loop
 
-Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body as the stated requirement, the branch's base, `WORKROOT`, the amend implementer to continue, and the tier it ran at. The reviewer runs one tier above it and reads the new body's changes, tests and acceptance line as what the diff must do.
+Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body as the stated requirement, the branch's base, `WORKROOT`, the amend implementer to continue, and the tier it ran at. The reviewer runs one tier above it and reads the new body's changes, tests and acceptance line as what the diff must do. Carry on with the branch on `PASS`, or on `ACCEPTED` (the human took it with blockers open: record them in the amendment log), and stop on `STOPPED`.
 
 Skip this step only when `change_kind = rebase-only` (no body change, and no new code to review). Even then, read `git -C <WORKROOT> diff --stat` against the pre-rebase tip to confirm the rebase didn't lose unrelated work.
 
@@ -372,7 +373,7 @@ After every queue entry processes:
 - [ ] Plan file edited; amendment log entry appended; committed on `{{DEFAULT_BRANCH}}`.
 - [ ] Rewrite queue ordered by stack depth (parent first).
 - [ ] For each entry: body change applied (when `amend-existing`); inner + outer gate green.
-- [ ] [review-phase](../review-phase/SKILL.md) run on each rewritten branch, and returned `PASS`.
+- [ ] [review-phase](../review-phase/SKILL.md) run on each rewritten branch, and returned `PASS` (or `ACCEPTED`, with its open blockers in the amendment log).
 - [ ] Rebase onto rewritten parent; conflicts resolved via fixer; tests re-run.
 - [ ] `--force-with-lease` push confirmed and executed per branch.
 - [ ] PR-context file refreshed (pending or republished).

@@ -13,6 +13,8 @@ The plan's **Phased Rollout** section opens with an **Execution graph** table an
    - **Missing line** on any executable phase → do **not** guess. Ask: `Depends on everything before it (Recommended)` (safe, serializing), `Depends on nothing` (parallel). The free-text field takes an explicit id list. Write the answer back into the plan file before starting, so a resume reads the same graph.
    - **Dependency on a deferred phase** (cross-repo or flag-removal, which this skill never executes) → that dependent is also deferred, transitively. Report both.
 4. **Warn on file overlap.** For every pair of phases in the same wave, intersect their **Touch List** entries. A non-empty intersection means two lanes will edit the same file concurrently and the wave merge will conflict. Put the pairs and the shared paths in the question, then ask: `Serialize them (Recommended)` (add a dependency edge and re-derive waves), `Run anyway — I'll take the merge conflict`, `Stop — let me fix the plan`. This is a warning, not a hard stop: two phases legitimately touching one `__init__.py` merge fine, two rewriting the same use case do not.
+
+   **Migrations in one app count as overlap even when the files differ.** Two phases neither of which depends on the other, whose Touch Lists both reach into the same migrations directory (Django's `<app>/migrations/`, Alembic's `versions/`, Rails' `db/migrate/`, Prisma's `prisma/migrations/`), each start from the same latest migration. The merged tree then has two heads and fails its gates, and no same-path check sees it. Ask, naming the pair and the directory: `Serialize them (Recommended)`, `Keep them parallel — the merge fixer writes the merge migration`.
 5. **Read the plan's staffing, and check it against the graph you just computed.** The **Crew** table and the phases' `**Assigned to**:` lines are one decision in two places, and the arithmetic they claim is checkable before anything is dispatched:
    Each "stop and ask" below offers `Stop — I'll fix the plan (Recommended)` plus the concrete repair when one exists (`Assign to <member>`, `Drop <member> from the roster`), and writes an accepted repair back into the plan.
    - **An `**Assigned to**:` naming an agent the table does not list** → stop and ask. Don't invent a member: the roster is the plan's answer to "how many agents does this feature need", and adding one changes it.
@@ -43,7 +45,7 @@ Parallel execution **requires** a worktree provisioner: the project's `commands.
 
    **The reviewer works in the lane it is reviewing.** [review-phase](../review-phase/SKILL.md) spawns it per phase, in that phase's `WORKROOT`, and it gets no worktree of its own.
 2. **Provision each lane.** Run the provisioner once per lane, plan-driven, with worktree name `plan-{plan-id-kebab}-crew-{implementer-id}` (or `plan-{plan-id-kebab}-lane-{i}` on a plan with no roster).
-   - **Skill:** this is the mechanical `worktree_prep` step. Delegate all of them per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern when `agent_models.worktree_prep` is set, and **dispatch the provisioning calls concurrently**, because they are independent.
+   - **Skill:** this is the mechanical `worktree_prep` step. Delegate all of them per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern when `agent_models.worktree_prep` is set, and **dispatch the provisioning calls one at a time**. Each one starts with `git worktree add`, and concurrent adds against one repository clobber each other's entries under `.git/worktrees/`, which leaves a lane that looks provisioned and is not.
    - **Command:** run `commands.worktree_prepare` inline with `VINTA_WORKTREE_KIND=lane`, **one lane at a time**, and post-check each one per [Provisioning with the project's command](#provisioning-with-the-projects-command).
 3. **Provision the integration worktree.** One more, named `plan-{plan-id-kebab}-integ` (`VINTA_WORKTREE_KIND=integration` for the command). The conductor merges lane branches into wave integration branches here (see [Lane branch topology](#lane-branch-topology)) so a merge never disturbs a lane that is still working.
 4. **Record the pool** in `run.md`: for each lane, `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, plus `current_phase` (null when idle). `SANDBOX_TIER` is probed **per lane** — a mixed result is possible in principle and each lane's spawn wrapping follows its own tier.
@@ -53,11 +55,12 @@ Parallel execution **requires** a worktree provisioner: the project's `commands.
 
 A lane worktree carries state from the phase it just ran — most dangerously **applied migrations** in its forked dev / test DB. The next phase assigned to that lane branches from a different base, which may not contain those migrations, and a leftover schema silently invalidates its test run.
 
-**And the agent standing in it has a memory of the old tree.** Continuing a member across phases is only safe if it is told what moved, so the message that starts its next phase is the phase's **full brief** — it is new work, not a delta — preceded by three facts:
+**And the agent standing in it has a memory of the old tree.** Continuing a member across phases is only safe if it is told what moved, so the message that starts its next phase is the phase's **full brief** — it is new work, not a delta — preceded by four facts:
 
-1. **It is the same agent in the same directory**, and everything it knows about the repository's layout, conventions and tooling still holds. Say so: an agent told only that things changed will re-read work it does not need to.
-2. **Whether the previous phase's own work is in this tree** — true exactly when this phase depends on it. This is the sentence that matters most. An agent that remembers writing a model and does not know it is absent will code against something that is not there.
-3. **Which files differ from what it last saw**, as a list:
+1. **Its objective changed.** Open with it, in these words: *"Phase `<prior.id>` is finished. Do not continue it, report on it or re-verify it, and drop anything still in flight for it — a running command, a todo list, findings, a verdict. Your objective from here on is phase `<phase.id>`."* An agent that is not told this keeps working on the phase it remembers, and reports on it under the new phase's name.
+2. **It is the same agent in the same directory**, and everything it knows about the repository's layout, conventions and tooling still holds. Say so: an agent told only that things changed will re-read work it does not need to.
+3. **Whether the previous phase's own work is in this tree** — true exactly when this phase depends on it. This is the sentence that matters most. An agent that remembers writing a model and does not know it is absent will code against something that is not there.
+4. **Which files differ from what it last saw**, as a list:
 
    ```bash
    git -C <lane.workroot> diff --name-only plan/{plan-id-kebab}/phase-{prior.id} HEAD
@@ -67,16 +70,23 @@ A lane worktree carries state from the phase it just ran — most dangerously **
 
 **Start a member cold when their previous phase failed.** Their session is the context that failed with it, and whatever wrong turn it took is exactly what a continuation preserves. Re-reading a repository is cheaper than inheriting a wrong conclusion about it.
 
-Before handing a lane to its next phase:
+### Recycling a lane for its next phase
 
-```bash
-git -C <lane.workroot> checkout <phase.base_branch>
-git -C <lane.workroot> checkout -b plan/{plan-id-kebab}/phase-{phase.id}
-```
+A bare `checkout` of the next base is not a reset. It refuses a dirty tree, and when it succeeds it keeps every ignored file the last phase left: a type-checker cache from a different tree fails the next phase's typecheck on code it never wrote. Before handing a lane to its next phase, in this order:
 
-then **reset that lane's databases to the new base** using the `reset_cmd`s recorded under `state.dev_db` / `state.test_db` in the lane's `worktree_summary` (prepare-worktree writes them, and so may the project's command — drop + recreate from the template, or re-run migrations from zero, per engine). A lane with no `reset_cmd` (or no summary at all), and whose outgoing or incoming phase touches the **Data Model Changes** section, is not safe to reuse: re-provision that lane instead (with the command: [teardown, then prepare again](#teardown-with-the-projects-command)). Never reuse a lane across a migration boundary without the reset.
+1. **Save what is left.** When `git -C <lane.workroot> status --porcelain` shows anything, keep it where nobody has to look for it: `git -C <lane.workroot> stash create` prints a commit holding the tracked changes; store it with `git -C <lane.workroot> update-ref refs/wip/{plan-id-kebab}/{prior.id} <sha>`. Name the ref, and list any untracked paths, in `phase-{prior.id}.md`.
+2. **Return the tree to a commit.** Discard tracked changes (`git -C <lane.workroot> reset` with `--hard`; step 1 saved them), then remove untracked and ignored files with `git -C <lane.workroot> clean -fdx`, passing an `-e <path>` for every path the lane's `worktree_summary` records as copied or linked in (dependency directories, env files, the virtualenv). The clean runs before the database reset, never after: it would delete a SQLite file the reset just restored.
+3. **Cut the phase branch** from the new base:
 
-Dep churn matters less but is real: when the incoming phase's plan body installs dependencies, re-run the project's install command in that lane before dispatching.
+   ```bash
+   git -C <lane.workroot> checkout -b plan/{plan-id-kebab}/phase-{phase.id} <phase.base_branch>
+   ```
+4. **Reset the lane's databases to the new base** using the `reset_cmd`s recorded under `state.dev_db` / `state.test_db` in the lane's `worktree_summary` (prepare-worktree writes them, and so may the project's command — drop + recreate from the template, or re-run migrations from zero, per engine). A lane with no `reset_cmd` (or no summary at all), and whose outgoing or incoming phase touches the **Data Model Changes** section, is not safe to reuse: re-provision that lane instead (with the command: [teardown, then prepare again](#teardown-with-the-projects-command)). Never reuse a lane across a migration boundary without the reset.
+5. **Install** with the project's install command when the incoming phase's plan body adds dependencies, or the base's lockfile differs from the one the lane last installed.
+
+**A lane that will not recycle is the lane's failure, not the phase's.** When any step above fails (a root-owned file `clean` cannot remove, a database that will not drop), don't retry the phase there and don't count it against the phase. Provision a replacement lane named `<lane name>-r<N>`, move the member and the phase to it (the member starts cold there: its session belongs to the old directory), record the move in `run.md`, and leave the old lane on disk for the user. Its teardown command goes in the final report with the others.
+
+**A gate that was killed leaves containers behind.** A test command that timed out or was cancelled — the harness's own command timeout included — can leave its compose project's one-off containers running, holding the test database. After any such run, remove that project's `*-run-*` containers before the next command in the lane. A `docker` call that itself times out means "unknown", not "none": treat the lane's test database as stale and recreate it before its next test run.
 
 ### Teardown
 
@@ -99,27 +109,58 @@ Every phase still gets its own branch. What changes under a DAG is **what that b
 **Multi-dependency base.** Built in the **integration worktree**, before the phase is dispatched:
 
 ```bash
-git -C <integ.workroot> checkout -B plan/{plan-id-kebab}/integ-{P.id} plan/{plan-id-kebab}/phase-{first-dep.id}
+git -C <integ.workroot> checkout -b plan/{plan-id-kebab}/integ-{P.id} plan/{plan-id-kebab}/phase-{first-dep.id}
 git -C <integ.workroot> merge --no-ff plan/{plan-id-kebab}/phase-{next-dep.id}   # once per remaining dep, in plan order
 git -C <integ.workroot> push -u origin plan/{plan-id-kebab}/integ-{P.id}
 ```
 
-**Wave integration branches** are the durable spine. `plan/{plan-id-kebab}/wave-0` is `<BASE_BRANCH>`. When every phase at wave `N` has passed review, the conductor builds `plan/{plan-id-kebab}/wave-{N}` in the integration worktree by merging each wave-`N` lane branch into `wave-{N-1}` with `--no-ff`, in plan order. Wave branches are what a resume anchors on, what the final report points at, and what a phase whose dependency set covers an entire earlier wave may use directly as its base.
+**Keep what the branch already holds.** When `integ-{P.id}` already exists (a resume, a retry of `P`), check it out instead of cutting it again, and merge only the dependencies it lacks (`git merge-base --is-ancestor plan/{plan-id-kebab}/phase-{dep.id} HEAD` is true for the ones it has). Recutting it with `checkout -B` throws away every conflict fix already made on it. Cut it fresh only when it no longer contains its first dependency's tip, because that dependency was rebuilt.
+
+**Gate the base before dispatching `P`.** Every merge into it, clean or conflicted, runs the [merged-tree gate](#gate-every-merged-tree). `P` is not dispatched onto a red base: a red gate after a clean merge goes to the conflict fixer exactly as a conflict does (see [Merge conflicts during integration](#merge-conflicts-during-integration)), because two dependencies that merge cleanly can still break each other.
+
+**Wave integration branches** are the durable spine. `plan/{plan-id-kebab}/wave-0` is `<BASE_BRANCH>`. When every phase at wave `N` has passed review, the conductor builds `plan/{plan-id-kebab}/wave-{N}` in the integration worktree by merging each wave-`N` lane branch into `wave-{N-1}` with `--no-ff`, in plan order, and runs the [merged-tree gate](#gate-every-merged-tree) after each merge. An existing `wave-{N}` that still contains `wave-{N-1}` is kept the same way as an `integ-` branch: merge in only the members it lacks. Wave branches are what a resume anchors on, what the final report points at, and what a phase whose dependency set covers an entire earlier wave may use directly as its base.
+
+### Gate every merged tree
+
+A merged tree is code nobody has run. Each lane's gate ran on its own branch, and two branches that are each green can be red together. So every merge the conductor makes — each dependency merged into an `integ-` base, each lane merged into a wave branch, conflicted or clean — is followed in the integration worktree by:
+
+1. **Generated files, regenerated.** When either side changed a file the project generates (anything AGENTS.md names a generator for, or that opens with a "generated, do not edit" header) or the inputs it is generated from, run that generator and commit what it writes as part of the merge. A schema dump or API client merged line by line is a third version neither side produced.
+2. **A test database that matches the tree.** The integration worktree checks out a different branch for nearly every merge, and a reused test database keeps the last tree's migrations. Recreate it with the `reset_cmd` recorded under `state.test_db` in the integration worktree's `worktree_summary` before the test run when any of these holds: the last commit gated here is not an ancestor of `HEAD`; the last test run here was killed or timed out; a migration file changed between the last gated commit and `HEAD`. Record the gated commit in `run.md` after each run.
+3. **The full gate, whatever `run_options.full_test_suite` says:** `{{BUILD_CMD}}` and the full `{{TEST_CMD}}`, one at a time.
+
+Green → commit the merge (when it is not committed yet), push, and record the result in `waves/wave-{N}.md`. Red with failures that read as a stale schema (missing or extra columns or tables no model in the tree defines) → recreate the test database and run the gate once more before spending a fixer round. Red otherwise → the fixer loop below, with the failing output.
+
+**Before the plan PR, run every gate on the final wave branch** — the lint and e2e gates included, not only build and tests — so the PR opens on a tree that has passed everything a phase had to pass.
 
 **A phase does not wait for its wave — it waits for its dependencies.** Wave branches are built behind the scheduler, not in front of it: a wave-3 phase whose two dependencies are both green starts immediately, even while other wave-2 phases are still running. The wave branch is bookkeeping and integration; the `depends_on` set is the gate.
 
 ### Merge conflicts during integration
 
-The orchestrator **never edits code**, including merge conflicts. On a conflicted `merge`:
+The orchestrator **never edits code**, including merge conflicts. When a `merge` stops, or the merged-tree gate is red:
 
-1. Capture `git -C <integ.workroot> diff --name-only --diff-filter=U`.
-2. Spawn a **fixer** subagent (the project's `fixer` agent type, at the `agent_models.fixer` model) inside the integration worktree. Its prompt carries: the conflicted paths, both phases' bodies from the plan, both phases' `phase-{id}.md` summaries, and the instruction to resolve for **both** intents — never to `--ours` / `--theirs` a conflict away. It also carries two rules:
-   - **A stale environment is not a merge problem.** When the merged tree's failures are missing or extra columns or tables that no model in the tree defines, the integration worktree's test database belongs to another branch. The fixer changes no code and reports `ENVIRONMENT_STALE`; you recreate the test database there (the test command's fresh-database form) and run the outer gate again, without counting the round.
-   - **Check what git merged by itself.** Before the outer gate, syntax-check every file git auto-merged that both sides touched (`python -m py_compile <file>` for Python, the project's type check for the rest). A clean auto-merge of a list both sides appended to has left two openers that never close.
-3. After the fixer returns, re-run the **outer gate** (`{{BUILD_CMD}}` plus the test scope `run_options.full_test_suite` selects) in the integration worktree. Red → loop back to step 2 with the failure.
-4. Green → commit the merge, push the branch, and record the conflict + resolution in `waves/wave-{N}.md`.
+1. **Read why it stopped.** Capture `git -C <integ.workroot> diff --name-only --diff-filter=U`. Two failures look like conflicts and are not, and neither goes to a fixer:
+   - **`MERGE_HEAD` exists and no path is unmerged**: git merged, and a commit hook refused the commit. Stage the files the hook rewrote (tracked paths only) and commit once more. Refused again → ask via `AskUserQuestion` (header `Merge hook`), quoting the hook's output: `Fix what the hook reports (Recommended)` (it goes to the fixer as a red gate), `Commit with --no-verify`, `Abort this merge`.
+   - **No `MERGE_HEAD`**: git refused before merging (an untracked file in the way, a dirty tree). Show git's message and ask (header `Merge`): `Save the tree to a ref, clean it and retry (Recommended)` (the [lane recycle](#recycling-a-lane-for-its-next-phase)'s save-then-reset steps, run in the integration worktree), `Stop`.
+2. **Spawn a fixer** subagent (the project's `fixer` agent type, at the `agent_models.fixer` model) inside the integration worktree. Its prompt carries: the conflicted paths (or the red gate's output, for a clean merge that broke), both phases' bodies from the plan, both phases' `phase-{id}.md` summaries, any earlier fix between the same two phases recorded in `waves/wave-*.md`, and the instruction to resolve for **both** intents — never to `--ours` / `--theirs` a conflict away. It also carries these rules:
+   - **Deletions are intent.** What one side removed since the merge base stays removed unless the other side's code still needs it. "Keep both sides" on a block one phase deleted brings back the code that phase was written to get rid of.
+   - **Generated files are regenerated, not merged.** A conflicted generated file takes either side, then its generator runs and its output is staged. This is the one place a side is taken whole.
+   - **A clean merge can still be broken.** Two migrations added on the same parent by two phases need a merge migration; two registrations of one name need one removed. Look for these even where git reported nothing.
+   - **Check what git merged by itself.** Syntax-check every file git auto-merged that both sides touched (`python -m py_compile <file>` for Python, the project's type check for the rest). A clean auto-merge of a list both sides appended to has left two openers that never close.
+   - **Fix the cause, not the gate.** Read the gate's output before the code. Never weaken, skip or delete a test, or loosen a check, to turn it green.
+   - **A stale environment is not a merge problem.** When the merged tree's failures are missing or extra columns or tables that no model in the tree defines, the integration worktree's test database belongs to another branch. The fixer changes no code and reports `ENVIRONMENT_STALE`; you recreate the test database there and run the gate again, without counting the round.
+   - **Stage by name.** Only tracked or conflicted paths, plus a file it created on purpose (a merge migration) added by its own path. Never `git add -A` or `git add .`: tool caches and test databases sit untracked in this tree.
+   - **Verify narrowly, one command at a time.** Type-check or test only the files it touched. The conductor runs the full gate next.
+3. After the fixer returns, scan the conflicted paths for conflict markers, then run the [merged-tree gate](#gate-every-merged-tree) again. Red → loop back to step 2 with the failure, **handing the next round the tree this one left** rather than resetting it.
 
-A conflict that survives its fixer-round budget (default **two**) is a **plan defect**, not a code problem: two phases in the same wave own the same code. Stop and ask via `AskUserQuestion` (header `Wave merge`), naming both phases and the paths: `Serialize them (Recommended)` (add the edge, re-derive waves, re-run the loser), `I'll resolve it by hand`.
+   **Red on an unchanged tree.** When a round leaves `HEAD` and `git status --porcelain` exactly as they were and the same gate is still red, the fixer found nothing to fix. Clear the tool caches in the integration worktree (type-checker, test and linter caches), recreate the test database, and run the gate once more. Still red → ask now, as in step 5, instead of spending another round.
+4. Green → commit the merge, push the branch, and record in `waves/wave-{N}.md` the conflict, the resolution and any change the fixer made beyond the conflicted lines, so a later merge of the same two phases can be handed it.
+
+   **Flag reverted deletions.** For each conflicted path, compare the resolution against what each side deleted since the merge base (`git diff <merge-base> <side> -- <path>`). Lines a side deleted that the resolution still holds are listed — path, the phase that deleted them, how many — in `waves/wave-{N}.md`, in the user update and in the plan PR description. This flags; it does not block.
+5. **The budget.** A merge still red after its fixer-round budget (default **two**) stops. First show the first failing test and its error from the gate's log, and say whether the test database was recreated for that run; a stale database is ruled out before anything is called a plan defect. Then:
+   - **A wave build that fails is the wave's failure, not its phases'.** Each phase stays `done`, and its dependents keep running off their own bases; only a phase based on this `wave-{N}` waits. Ask via `AskUserQuestion` (header `Wave merge`), naming both phases and the paths: `Retry the merge from the fixer's tree (Recommended)` (one more budget, starting from what the last round left), `I'll finish it by hand` (the conductor waits, then runs the gate), `Serialize them` (add the edge, re-derive waves, re-run the later phase), `Skip this wave build` (the plan PR is not opened until it is built).
+   - **An `integ-{P.id}` base that fails** blocks `P` and its dependents. Ask the same question (header `Integ base`); `Skip this wave build` is not offered.
+
+   Two phases whose merge keeps failing usually own the same code, which is a plan defect rather than a code problem — say so when the paths support it, and recommend `Serialize them` instead.
 
 The budget is an **integration-level** setting, not either phase's `max_fix_rounds`. A conflict belongs to a *pair* of phases, so deriving it from one of them would make the answer depend on which phase happened to merge second.
 
@@ -132,7 +173,7 @@ The PR `base` written into the prs-context frontmatter is the phase's **computed
 Phase PRs are review units, and on their own they do not land the plan. Under a per-phase PR strategy the conductor also opens:
 
 - **An integration PR per `integ-{P.id}` branch**, into `<BASE_BRANCH>`, just before `P`'s own PR. Without it `P`'s PR targets a branch nothing targets, and nothing stacked on `P` can reach `<BASE_BRANCH>`.
-- **A plan PR at run end**, from the final `wave-{N}` branch into `<BASE_BRANCH>`. It is the only branch carrying the conflict resolutions made during wave merges, so it is merged last whichever way the plan lands. Its description lists every phase and integration PR in merge order.
+- **A plan PR at run end**, from the final `wave-{N}` branch into `<BASE_BRANCH>`. It is the only branch carrying the conflict resolutions made during wave merges, so **it is the one PR that lands the plan**: merge it, with a merge commit, and no other. Merging the phase PRs one by one instead re-resolves by hand every conflict the wave merges already resolved and gated. Its description lists every phase and integration PR, so a reviewer can read the plan one phase at a time.
 
 The commit strategy's PR-open timing says which files to write and when.
 <!-- block-end: LANE_TOPOLOGY -->
@@ -158,7 +199,7 @@ while PENDING or RUNNING:
         agent = claim_agent(p)                # the plan's member, a qualified peer, or None
         if agent is None: continue            # every hand at or above p's tier is busy
         lane = claim_idle_lane()
-        reset_lane(lane, p)                   # checkout base + branch + DB reset
+        recycle_lane(lane, p)                 # save, reset, clean, branch, DB reset, install
         dispatch(lane, p, agent)              # 1a → 1b → 1c, concurrently with other lanes
         RUNNING[lane] = p ; PENDING.remove(p)
 
@@ -177,14 +218,14 @@ while PENDING or RUNNING:
 `claim_agent(p)` is the staffing half of a dispatch, and it runs **before** the lane is taken. A lane is disk; who is holding it is what the phase costs and whether the result is any good.
 
 1. **The member the plan assigned, if they are free.** The common case, and the one the plan's cost estimate is written against.
-2. **Otherwise the cheapest free member at or above that member's tier.** A wave should not serialize behind one agent when a qualified peer is idle. Reach for the *cheapest* qualified one, not the best available — covering for a peer must not quietly promote the phase to the top tier, or a busy wave silently runs every Tier 2 phase on the Tier 4 member's model.
+2. **Otherwise the cheapest free member at that member's tier, or one tier above it — no higher.** A wave should not serialize behind one agent when a qualified peer is idle. But covering must not quietly promote the phase: an uncapped "at or above" lets a busy wave run every Tier 2 phase on the Tier 4 member's model, and one observed run moved 73 phases up a tier, 23 of them onto one member whose credits then ran out. **Don't borrow a member a pending phase is planned for** — taking them makes that phase wait in turn. A member no pending phase is planned for is fair to borrow.
 3. **Otherwise nobody, and the phase waits** — even with a lane free. This is the one place staffing costs throughput, and it is deliberate: a phase run below its tier does not fail cleanly. It produces plausible code that fails review two rounds later, by which point nothing points back at the staffing decision.
 
 An implementer is held for the **whole phase**, not one turn of it: answering the review's findings is the implementer continuing its own session, so handing the phase to someone else mid-flight would hand it to an agent with no session to continue. Release it when the phase settles.
 
 **The wait cannot deadlock.** The floor is the assigned member's own tier, so a waiting phase is always waiting on somebody who is *holding another phase* — never on a qualification nobody on the roster has. If you find yourself with every agent idle and a phase that cannot be staffed, the plan assigned it to a member the **Crew** table does not list; stop and ask.
 
-**Record every claim**, and record whether it was the plan's own assignment or a peer covering. A run where half the phases were covered by a dearer peer is a run that cost more than the plan said while every phase came back green — and that is invisible in the phase statuses.
+**Record every claim** with the phase's `planned_tier` and the tier it ran at, and whether it was the plan's own assignment or a peer covering. A run where half the phases were covered by a dearer peer is a run that cost more than the plan said while every phase came back green — and that is invisible in the phase statuses.
 
 **Deadlock check.** Loop exits with `PENDING` non-empty and nothing running → every remaining phase is blocked. Report each blocked phase with the failed upstream that blocks it.
 

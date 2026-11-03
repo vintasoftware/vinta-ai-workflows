@@ -26,9 +26,11 @@ A chain-shaped plan reproduces the classic stack exactly — each phase depends 
 | Integration | `plan/{plan-id-kebab}/integ-{phase.id}` | `<BASE_BRANCH>` | `integ-{phase.id}.md` (`kind: integration`) | just before the phase PR, only for a phase with two or more dependencies |
 | Plan | the final `plan/{plan-id-kebab}/wave-{N}` | `<BASE_BRANCH>` | `plan.md` (`kind: plan`) | once, at run end, after the final wave branch is built |
 
-The **integration PR** is based on `<BASE_BRANCH>` because the `integ-` branch has several parents and none of them is "below" it. Its diff starts as all of its dependencies and shrinks, as their PRs merge, to the merge commits and any conflict resolution the fixer made. Its description says: merge the dependencies' PRs first, then this one, then retarget the phase PR to `<BASE_BRANCH>`.
+The **integration PR** is based on `<BASE_BRANCH>` because the `integ-` branch has several parents and none of them is "below" it. Its diff is all of its dependencies plus the merge commits and any conflict resolution the fixer made; that last part is what a reviewer reads it for.
 
-The **plan PR** is the one branch known to hold the whole plan. Its description lists every phase and integration PR in an order that merges (wave by wave; inside a wave, plan order; each integration PR right before its phase PR) and offers two ways to land: merge the plan PR alone, or merge the listed PRs in order and the plan PR last — by then its diff is only what no other PR carries. Either way, **merge commits, not squash**: a squash makes every PR stacked above it repeat the changes below it.
+The **plan PR** is the one branch known to hold the whole plan, and **it is the one PR that lands it**: merge it, with a merge commit, and no other. It carries every conflict resolution the wave merges made, each one gated on the merged tree. Merging the phase PRs one by one instead re-resolves all of those by hand — one observed 36-PR landing did, and got two of them wrong. Its description lists every phase and integration PR (wave by wave; inside a wave, plan order; each integration PR right before its phase PR) as a reading order for review, not a merge order. Never squash it: a squash drops the merge commits that tell git the phase branches are already in.
+
+**Phase and integration PRs are for review.** Each one's description opens with a **Landing** section: this PR is reviewed here and lands through the plan PR (named once it exists), so don't merge it. A phase PR's section also names the phases its base does not contain yet — its CI runs without them, so a failure that one of them fixes is expected.
 <!-- block-end: BRANCH_NAMING -->
 
 <!-- block-begin: PER_PHASE_COMMIT -->
@@ -41,7 +43,7 @@ The **plan PR** is the one branch known to hold the whole plan. Its description 
 <!-- block-begin: PR_OPEN_TIMING -->
 One PR per phase — the [Open PR via context file](#open-pr-via-context-file) step runs after this phase passes review, writing `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md`.
 
-**When `<phase.base_branch>` is an `integ-` branch, run that step twice — integration PR first.** Push `plan/{plan-id-kebab}/integ-{phase.id}`, then write `.vinta-ai-workflows/prs-context/{feature-kebab}/integ-{phase.id}.md` with `kind: integration`, `branch: plan/{plan-id-kebab}/integ-{phase.id}`, `base: <BASE_BRANCH>`, a `# Title` of `Integrate <dep ids> for <phase title>`, and a `# Description` naming the dependencies and the merge order (dependencies' PRs → this PR → retarget the phase PR to `<BASE_BRANCH>`). Run `open-pr.sh` on it, then on the phase file. Skip the inline-comment pass for the integration file — its diff is other phases' work.
+**When `<phase.base_branch>` is an `integ-` branch, run that step twice — integration PR first.** Push `plan/{plan-id-kebab}/integ-{phase.id}`, then write `.vinta-ai-workflows/prs-context/{feature-kebab}/integ-{phase.id}.md` with `kind: integration`, `branch: plan/{plan-id-kebab}/integ-{phase.id}`, `base: <BASE_BRANCH>`, a `# Title` of `Integrate <dep ids> for <phase title>`, and a `# Description` that opens with the **Landing** section and then names the dependencies it merges and any conflict the fixer resolved. Run `open-pr.sh` on it, then on the phase file. Skip the inline-comment pass for the integration file — its diff is other phases' work.
 
 The **plan PR** is not this step's job — the conductor opens it at run end, once the final wave branch exists.
 <!-- block-end: PR_OPEN_TIMING -->
@@ -50,7 +52,8 @@ The **plan PR** is not this step's job — the conductor opens it at run end, on
 - [ ] Phase branch created from `<phase.base_branch>` (dependency-derived), not from plan order.
 - [ ] PR `base` in the prs-context frontmatter equals `<phase.base_branch>`.
 - [ ] Phase based on an `integ-` branch: the `integ-` branch pushed and its integration PR (`integ-{phase.id}.md`, `base: <BASE_BRANCH>`) opened before the phase PR.
-- [ ] Run end: plan PR (`plan.md`, final wave branch → `<BASE_BRANCH>`) opened, listing every phase and integration PR in merge order.
+- [ ] Every phase and integration PR description opens with a **Landing** section pointing at the plan PR.
+- [ ] Run end: plan PR (`plan.md`, final wave branch → `<BASE_BRANCH>`) opened as the one PR that lands the plan, listing every phase and integration PR, each already-in-base one marked.
 <!-- block-end: CHECKLIST -->
 
 <!-- Single-line values (derive-skills substitutes these into the shells directly):

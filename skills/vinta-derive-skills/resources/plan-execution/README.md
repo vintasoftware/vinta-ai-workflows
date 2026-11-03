@@ -72,7 +72,7 @@ A plan run by [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workf
 | Block | Consumed by | What it owns |
 |---|---|---|
 | `AMEND_LIVE_RUN` | `amend-plan` Step 0.5 | detecting a live run of the plan; editing the run's own workflow copy, committing on the plan branch, applying it with `amend`, handling a refusal |
-| `OPERATOR_RECIPES` | `amend-plan` | switching harness or model, switching the account a harness runs as, resuming with the same policy flags, moving the base forward |
+| `OPERATOR_RECIPES` | `amend-plan` | `switch-harness`, `node reassign` / `node interrupt`, harness profiles, `run --resume` (which reuses the run's policy), `propagate`, `sync-base` |
 
 ## The parallel-lanes seam (`partials/parallel-lanes.md`)
 
@@ -80,10 +80,10 @@ The plan gives every phase a `**Depends on**:` line. The conductor turns those i
 
 | Block | Consumed by | What it owns |
 |---|---|---|
-| `DAG_PARSE` | `implement-plan` Step 0 | graph build, wave derivation, cycle / unknown-id / file-overlap validation |
-| `LANE_WORKTREE_POOL` | `implement-plan` Step 0.5 | pool sizing + provisioning, lane reuse + DB reset, teardown; the hard refusal when worktrees are unavailable |
-| `LANE_TOPOLOGY` | `implement-plan` (linked, not included, from `integrate-phase`) | per-phase base branch from `depends_on`, `integ-{id}` merge bases, `wave-{N}` integration branches, merge-conflict handling |
-| `LANE_SCHEDULER` | `implement-plan` Step 1 | the dispatch loop, tie-breaking, failure containment, the pause gate under concurrency |
+| `DAG_PARSE` | `implement-plan` Step 0 | graph build, wave derivation, cycle / unknown-id / file-overlap validation (shared migration directories count as overlap) |
+| `LANE_WORKTREE_POOL` | `implement-plan` Step 0.5 | pool sizing + provisioning, re-orienting a reused member, the full lane recycle (save, reset, clean, branch, DB reset, install) and replacing a lane that will not recycle, teardown; the hard refusal when worktrees are unavailable |
+| `LANE_TOPOLOGY` | `implement-plan` (linked, not included, from `integrate-phase`) | per-phase base branch from `depends_on`, `integ-{id}` merge bases, `wave-{N}` integration branches, the full gate on every merged tree, merge-conflict and red-merge handling, the plan PR as the one PR that lands the plan |
+| `LANE_SCHEDULER` | `implement-plan` Step 1 | the dispatch loop, the crew claim (covering capped at one tier up), tie-breaking, failure containment, the pause gate under concurrency |
 | `TRACKING_DIR` | `implement-plan` | the `TRACKING_{plan-id}/` directory + its ownership rules |
 | `SIBLING_LANE_ISOLATION` | `worktree-seam.md#STRAY_WRITE_CHECK` → `implement-phase` (re-run by `review-phase` after each fix round) | the stray-write guard extended across sibling lanes |
 
