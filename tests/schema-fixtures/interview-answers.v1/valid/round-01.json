@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "round": 1,
+  "interview": "order-tags",
+  "submitted_at": "2026-10-05T10:00:00.000Z",
+  "answers": [
+    {
+      "decision_id": "A1",
+      "status": "answered",
+      "values": [
+        "ops"
+      ],
+      "note": "EU tenants first"
+    },
+    {
+      "decision_id": "A2",
+      "status": "answered",
+      "text": "A spreadsheet of order ids per campaign"
+    },
+    {
+      "decision_id": "D4",
+      "status": "waived"
+    },
+    {
+      "decision_id": "D5",
+      "status": "skipped"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-1",
+      "decision_id": "A1",
+      "body": "Can both be true?"
+    },
+    {
+      "id": "q-2",
+      "decision_id": null,
+      "body": "When does this ship?"
+    }
+  ],
+  "general_note": "Ship before Q3."
+}

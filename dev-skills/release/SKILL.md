@@ -1,21 +1,39 @@
 ---
 name: release
-description: Cut a release of `vinta-ai-workflows` — pick patch / minor / major / alpha bump, close the in-progress CHANGELOG section (stable only — alpha keeps it open), bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on `main`, fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Alpha releases use `--tag alpha` dist-tag. Use when the user says "release", "cut a release", "tag 0.1.4", "alpha release", "0.2.0-alpha1", "publish".
+description: Cut a release of `vinta-ai-workflows` — pick patch / minor / major / alpha bump, close the in-progress CHANGELOG section (stable only — alpha keeps it open), bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on the right release branch for the kind of release — `alpha` for pre-releases, `main` for stable — fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Pushing the tag is what publishes: `.github/workflows/publish.yml` ships both packages by npm trusted publishing (OIDC), dist-tag derived from the version (`latest` for a stable, `alpha` for a pre-release). Also cuts the GitHub release, marked pre-release for an alpha. Use when the user says "release", "cut a release", "tag 0.1.4", "alpha release", "0.2.0-alpha1", "publish".
 ---
 
 # Release
 
-This repo ships as a private npm package. Stable releases are: bump version + close CHANGELOG section + tag + push. Alpha pre-releases are: bump version (with `-alphaN` suffix) + tag + push, leaving the CHANGELOG section open so bullets accumulate across the alpha series until the stable graduates. No CI auto-publish today; the user runs `npm publish` (alpha: `npm publish --tag alpha`) once the tag is up.
+This repo ships **two** npm packages from one version number: `vinta-ai-workflows` (the root — the bootstrap CLI and the skills) and `vinta-ai-maestro` (`packages/vinta-ai-maestro` — the orchestrator daemon). They are bumped, tagged and published together; a consumer reading two different numbers for one release has no way to tell which is which.
+
+Stable releases are: bump version + close CHANGELOG section + tag + push + cut the GitHub release. Alpha pre-releases are the same, minus closing the CHANGELOG section — the placeholder stays open so bullets accumulate across the alpha series until the stable graduates — and the GitHub release is marked a pre-release.
+
+**Publishing is not a step anyone runs.** The tag push triggers `.github/workflows/publish.yml`, which packs with `pnpm` and publishes with `npm` under trusted publishing (OIDC): no token exists to leak, and the dist-tag is derived from the version so an alpha cannot land on `latest`. What this skill owns is everything *up to* the tag — and the tag is therefore the last reversible moment in a release.
+
+## Two release lines, two branches
+
+| Kind | Cut from | Why |
+|---|---|---|
+| `alpha` | **`alpha`** | Pre-release work lands on `alpha` first. Tagging it there is what makes the tag point at the code that was published. |
+| `patch` / `minor` / `major` | **`main`** | The stable line. |
+| `graduate` | **`main`** | It cuts a *stable* tag, so it belongs on the stable line — and the alpha series must already be merged into `main`, or the tag would claim work it does not contain. |
+
+**The branch is checked, never chosen for you.** This skill does not switch branches, merge, or push anything you did not ask for: it asserts you are standing on the right one for the release you asked for, and stops if you are not. Two mistakes it exists to catch: an alpha tagged on `main` (published as a pre-release from the stable line, where the code is not), and a stable tagged on `alpha` (a `latest` release from a branch nobody promised was stable).
+
+Substitute `<release-branch>` below with the branch the chosen kind requires — `alpha` for an alpha, `main` for everything else.
 
 ## Step 0 — Pre-flight checks (NON-NEGOTIABLE)
 
 Run all in parallel via `Bash`:
 
 1. `git status --porcelain` → empty (clean working tree). Non-empty → stop, ask user to commit / stash.
-2. `git rev-parse --abbrev-ref HEAD` → `main`. Otherwise → stop, ask user to switch.
-3. `git fetch origin` then `git rev-list --left-right --count origin/main...HEAD` → `0\t0`. Behind → stop, ask user to pull. Ahead → fine, those are the unreleased commits.
+2. `git rev-parse --abbrev-ref HEAD` → `main` **or** `alpha`. Anything else → stop, ask user to switch. Record it; Step 1 checks the chosen kind against it. (Do not pick the kind from the branch — an alpha cut from `main` and a stable cut from `alpha` are both mistakes worth *naming*, not silently reinterpreting.)
+3. `git fetch origin` then `git rev-list --left-right --count origin/<release-branch>...HEAD` → `0\t0`, where `<release-branch>` is the branch from check 2. Behind → stop, ask user to pull. Ahead → fine, those are the unreleased commits.
 4. `python3 -c "import json; print(json.load(open('package.json'))['version'])"` → record current version.
-5. `git tag --sort=-v:refname | head -5` → recent tags (alpha + stable). Compare top tag against `package.json` — they should match (= last release). Mismatch is a sign someone bumped without tagging; surface before continuing. Note whether the top tag is **stable** (`X.Y.Z`) or **alpha** (`X.Y.Z-alphaN`) — Step 1 branches on this.
+5. `git tag --list '[0-9]*' --sort=-v:refname | head -5` → recent release tags (alpha + stable). Compare top tag against `package.json` — they should match (= last release). Mismatch is a sign someone bumped without tagging; surface before continuing. Note whether the top tag is **stable** (`X.Y.Z`) or **alpha** (`X.Y.Z-alphaN`) — Step 1 branches on this.
+
+   **The `'[0-9]*'` filter is load-bearing.** The repo also carries per-package tags — `vinta-dag-editor@1.2.3`, `vinta-design-system@0.4.0` — which publish those components on their own schedule. Unfiltered, `-v:refname` sorts a letter above every digit, so the newest release would be whichever component was tagged last and this check would report a mismatch on every release from here on.
 6. `git log <last-tag>..HEAD --oneline` → list of commits since last release. Show to user.
 
 Any check failing = stop. Don't try to "fix" the working tree from inside this skill.
@@ -29,6 +47,21 @@ Read the unreleased CHANGELOG section + the commit list from Step 0.6. Use `AskU
 - **major** — removed skill, breaking schema change (new `<N+1>` schema file), CLI flag rename without alias, default-behavior flip.
 - **alpha** — pre-release for an upcoming stable. Tag format `X.Y.Z-alphaN`. Use when shipping work-in-progress to early consumers before locking the stable. Does NOT close the CHANGELOG section.
 - **graduate** — only if last tag is `X.Y.Z-alphaN`: cut the stable `X.Y.Z` that the alpha series targeted. Behaves like a normal stable release (closes CHANGELOG section).
+
+### The kind and the branch must agree
+
+Check the chosen kind against the branch recorded in Step 0.2, and **stop on a mismatch** rather than switching branches:
+
+- On **`alpha`**, only `alpha` is allowed. A stable or `graduate` request → stop: *"you are on `alpha`; stable releases are cut from `main` — switch and re-run."*
+- On **`main`**, only `patch` / `minor` / `major` / `graduate` are allowed. An `alpha` request → stop: *"alpha pre-releases are cut from `alpha`; switch and re-run."*
+
+**`graduate` has one extra pre-condition**: the alpha series it graduates must already be in this branch.
+
+```bash
+git rev-list --count HEAD..origin/alpha
+```
+
+Non-zero → stop. `origin/alpha` holds commits `main` does not, so the stable tag would claim to graduate an alpha series whose code it does not contain. Ask the user to merge `alpha` into `main` first; do not merge for them.
 
 Read the rule from `AGENTS.md` `## CHANGELOG + version policy` if uncertain — quote it back to the user.
 
@@ -81,7 +114,9 @@ Surface the new version to user via `AskUserQuestion`: `Confirm v<X.Y.Z[-alphaN]
 
 In a single change set:
 
-1. Edit [package.json](../../package.json): `"version": "<new>"`. For alpha, `<new>` includes the `-alphaN` suffix.
+1. Edit **both** manifests to `"version": "<new>"` — [package.json](../../package.json) and [packages/vinta-ai-maestro/package.json](../../packages/vinta-ai-maestro/package.json). For alpha, `<new>` includes the `-alphaN` suffix.
+
+   Both, every time. The workspace package was `0.0.0` and `private` while it was internal; it is published now, and a manifest left behind is what makes a released tarball unreproducible from the tag that claims it.
 2. Edit [CHANGELOG.md](../../CHANGELOG.md):
    - **stable / graduate**: change the in-progress section header to `## [<new>] — <today's ISO date>`. Today = `date -u +%Y-%m-%d` UTC.
    - **alpha**: do NOT close the placeholder. Leave header as `## [<next-stable>] — YYYY-MM-DD`. Bullets stay where they are — they accumulate across alphas and ship under the eventual stable. Optionally add a one-line note under the section recording the alpha tag (`<!-- pre-release: <new> on <date> -->`) so reviewers can correlate tags ↔ bullets; omit if the team prefers a clean CHANGELOG.
@@ -92,7 +127,7 @@ In a single change set:
 Use a HEREDOC commit message. No co-author trailer on release commits unless the user opts in (releases are typically authored by humans even when an agent prepared the bump).
 
 ```bash
-git add package.json CHANGELOG.md
+git add package.json packages/vinta-ai-maestro/package.json CHANGELOG.md
 git commit -m "$(cat <<'EOF'
 chore(release): v<new>
 
@@ -104,74 +139,92 @@ git tag -a "<new>" -m "Release <new>"
 
 Confirm with the user before pushing.
 
-## Step 6 — Push
+## Step 6 — Push, which is also the publish
 
 ```bash
-git push origin main
+git push origin <release-branch>
 git push origin "<new>"
 ```
 
+`<release-branch>` is the branch from Step 0.2 — `alpha` for an alpha, `main` for a stable or a graduate. Pushing a release to the other one is how a pre-release ends up on the stable line.
+
+**The tag push is what publishes.** `.github/workflows/publish.yml` triggers on any tag starting with a digit, and publishes `vinta-ai-workflows` and `vinta-ai-maestro` together by npm trusted publishing (OIDC) — no token, no local `npm publish`, nothing for the user to run. It reads the dist-tag out of the version: `0.7.0` goes to `latest`, `0.7.0-alpha5` to `alpha`.
+
+Two consequences worth holding onto:
+
+- **The tag is the only instruction the registry gets.** The workflow refuses to publish if the tag and either manifest disagree, which is why Step 4 bumps both — but a tag pushed against the wrong commit publishes that commit, and a version number on npm is permanent.
+- **Do not publish by hand afterwards.** The version is already there; a second attempt fails, and a *first* one racing the workflow is how two different tarballs end up claiming one version.
+
 If the team uses signed tags + a tag-protection rule, surface the failure and ask the user to push manually with their key.
 
-## Step 7 — Surface publish command
+## Step 7 — Cut the GitHub release
 
-Print but do **NOT** run. Stable / graduate releases publish under the default `latest` dist-tag; alpha releases MUST use `--tag alpha` so they don't override `latest` for consumers running `npm install vinta-ai-workflows`.
+The tag is a pointer; the release is the announcement, and it is what a consumer lands on from a changelog link or a dependabot PR.
 
-**Stable / graduate:**
+Right after the push, on the tag that was just pushed:
 
-```
-Release v<new> committed + tagged + pushed.
+**Stable / graduate** — the CHANGELOG section that was just closed *is* the notes. Extract it (from `## [<new>]` to the next `## [`) and pass it:
 
-To publish to the registry:
-  npm publish
-
-To publish from a fresh clone (no node_modules side-effects):
-  npm pack
-  npm publish vinta-ai-workflows-<new>.tgz
-
-The user owns this step. Don't auto-publish.
+```bash
+gh release create "<new>" --title "<new>" --notes-file <extracted-section>
 ```
 
-**Alpha:**
+**Alpha** — there is no closed section to quote, because the placeholder stays open across the whole series (Step 4). Let GitHub write the notes from the commits and PRs instead, and mark it a pre-release so it does not become the repo's "latest release":
+
+```bash
+gh release create "<new>" --title "<new>" --prerelease --generate-notes
+```
+
+`--prerelease` is not cosmetic: without it, an alpha becomes what the repository's landing page offers, and the `/releases/latest` URL redirects to a pre-release.
+
+Then tell the user where to watch:
 
 ```
-Pre-release v<new> committed + tagged + pushed.
+Release v<new> committed, tagged and pushed.
 
-To publish under the alpha dist-tag (does NOT affect `latest`):
-  npm publish --tag alpha
+Publishing runs in GitHub Actions (`publish`), triggered by the tag:
+  gh run watch --exit-status $(gh run list --workflow=publish --limit=1 --json databaseId --jq '.[0].databaseId')
 
-Fresh-clone flow:
-  npm pack
-  npm publish vinta-ai-workflows-<new>.tgz --tag alpha
-
-Consumers opt in with:
-  npm install vinta-ai-workflows@alpha
-  # or pin exact: npm install vinta-ai-workflows@<new>
-
-The user owns this step. Don't auto-publish.
+Consumers:
+  npm install vinta-ai-workflows            # stable
+  npm install vinta-ai-workflows@alpha      # pre-release
+  npx vinta-ai-maestro@alpha serve
 ```
+
+If `latest` currently resolves to a pre-release — which it does on a package whose only published version is an alpha — point it back once a stable exists: `npm dist-tag add <pkg>@<stable> latest`.
+
+**The component packages are not part of this.** `vinta-dag-editor` and `vinta-design-system` publish from their own tags (`vinta-dag-editor@<version>`, `vinta-design-system@<version>`) through their own workflows, on their own schedule. They are not bumped, tagged or released here, and a release tag never publishes them.
 
 ## Verification
 
-1. `python3 -c "import json; print(json.load(open('package.json'))['version'])"` → matches the new version (incl. `-alphaN` suffix for alpha).
-2. `git tag --sort=-v:refname | head -1` → `<new>`.
+1. `python3 -c "import json; print(json.load(open('package.json'))['version'], json.load(open('packages/vinta-ai-maestro/package.json'))['version'])"` → **both** match the new version (incl. `-alphaN` suffix for alpha).
+2. `git tag --list '[0-9]*' --sort=-v:refname | head -1` → `<new>`.
 3. `git log -1 --oneline` → `chore(release): <new>`.
 4. `head -20 CHANGELOG.md`:
    - **stable / graduate**: top section header dated today, version matches `<new>`.
    - **alpha**: top section header still `## [<next-stable>] — YYYY-MM-DD` (placeholder intentionally open), bullets unchanged from pre-bump.
 5. `git status --porcelain` → empty.
-6. `git rev-list --left-right --count origin/main...HEAD` → `0\t0` (pushed).
+6. `git rev-list --left-right --count origin/<release-branch>...HEAD` → `0\t0` (pushed).
+7. `git branch --contains <new> | tr -d ' *'` → includes `<release-branch>`. Cheap, and it catches the one failure the count above cannot: a tag created while standing somewhere other than where it was pushed.
+8. `gh release view "<new>" --json isPrerelease,tagName` → exists, and `isPrerelease` is `true` for an alpha and `false` for a stable.
+9. `gh run list --workflow=publish --limit=1` → a run for this tag. **Watch it to completion** rather than assuming: the publish is the only step of a release that cannot be redone, so a failure needs to be read now, while the person who cut it is still here. A green run means both packages are on the registry under the right dist-tag; `npm view vinta-ai-workflows@<new> version` confirms it independently.
 
 ## Pitfalls
 
 - **Releasing a section that wasn't actually authored.** If commits landed without CHANGELOG updates (someone forgot), you'll release a "Added: " entry that doesn't reflect the diff. Cross-check `git log <last-tag>..HEAD` against the section's bullets before bumping.
 - **Patch-bumping a minor change.** A new schema field is minor, not patch — even if it looks small. The schema is a public contract.
-- **Forgetting to push the tag.** `git push origin main` doesn't carry tags; need the explicit `git push origin <tag>` (or `git push --follow-tags`).
-- **Auto-publishing.** Don't. The user's npm credentials + 2FA flow are not your business; surface the command and stop.
+- **Forgetting to push the tag.** `git push origin <release-branch>` doesn't carry tags; need the explicit `git push origin <tag>` (or `git push --follow-tags`).
+- **Cutting an alpha from `main`.** The tag would point at the stable line, where the pre-release code is not — so `npm publish --tag alpha` would ship something other than what the alpha series contains. The branch check refuses it; do not work around it by merging `alpha` into `main` just to tag.
+- **Cutting a stable from `alpha`.** Publishes `latest` off the pre-release branch. Refused for the same reason, in the other direction.
+- **Graduating before merging `alpha` into `main`.** The stable tag names an `X.Y.Z` the alpha series was building toward, so a `main` that has not taken those commits produces a tag that claims work it does not have. `git rev-list --count HEAD..origin/alpha` must be `0`.
+- **Publishing by hand.** Don't. The tag push publishes; a manual `npm publish` either fails because the version already exists or races the workflow into two tarballs claiming one version. This used to say the opposite — the user ran `npm publish` themselves — and the reversal is the point: there are no credentials to hold now, because trusted publishing hands the workflow a short-lived identity bound to the repository and the workflow filename.
+- **Renaming a publish workflow file.** The npm trusted publisher is registered against `publish.yml` by name. Renaming it revokes its own publish rights, and the failure arrives at the one moment nobody wants to debug it.
 - **Dating the CHANGELOG with local time.** Use UTC ISO date — the team is distributed.
 - **Tagging without signing when the repo expects signed tags.** `git config tag.gpgsign` set to true → `git tag` without `-s` fails or warns. Detect via `git config --get tag.gpgsign` in pre-flight; if true, use `-s`.
 - **Releasing while another `release` skill run is in flight.** The pre-flight clean-working-tree check catches this incidentally.
-- **Publishing alpha without `--tag alpha`.** Default dist-tag is `latest` — an alpha published as `latest` becomes the install-by-default version and breaks every consumer doing `npm install vinta-ai-workflows`. Always `--tag alpha` for pre-releases.
+- **Packing `vinta-ai-maestro` with `npm` instead of `pnpm`.** Its `workspace:*` specifiers are a pnpm protocol, not something the registry understands; npm ships them verbatim and every install dies on `EUNSUPPORTEDPROTOCOL`. The workflow packs with `pnpm` — which rewrites them, and drops `prepack` from the packed manifest — and only then hands the tarball to `npm publish`, which is the half that speaks OIDC. Neither tool does both.
+- **Bumping only the root manifest.** Both packages carry the release version. A stale `packages/vinta-ai-maestro/package.json` publishes a tarball no tag in the repo describes.
+- **An alpha published as `latest`.** The default dist-tag is `latest`, and an alpha there becomes the install-by-default version for everyone running a plain `npm install`. The workflow derives the dist-tag from the version so this cannot be forgotten — which moves the risk to the version string: a tag spelled `0.7.0.alpha5`, with a dot instead of a hyphen, is not a pre-release to anyone and would publish as `latest`.
 - **Closing the CHANGELOG placeholder on an alpha.** Alpha is a pre-release; the section header stays open as `## [<next-stable>] — YYYY-MM-DD` so later alphas + the eventual stable / graduate all share the accumulating bullet list. Closing it early forces the stable release to invent a duplicate section.
 - **`alpha10` vs `alpha2` ordering.** The format `X.Y.Z-alphaN` (no dot) is one semver identifier; `alpha10 < alpha2` lexicographically. Fine for N=1..9; if a series exceeds 9, surface to user and switch to `-alpha.10` (with dot) — semver does numeric compare on dotted numeric identifiers. Do NOT silently mix formats.
 - **Bumping alpha when the placeholder target moved.** If last tag is `0.2.0-alpha2` but the placeholder now reads `## [0.3.0]`, the alpha series no longer aligns with what'll ship. Refuse and ask the user to either re-target alpha (`alpha` + switch to major/minor, reset to `-alpha1`) or revert the placeholder.

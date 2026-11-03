@@ -3,7 +3,7 @@ name: check-ai-models
 # Nightly freshness check for the plan-feature AI model tier table.
 # Queries each vendor's live model-list API; on drift, asks an LLM to propose an
 # updated ai-models.yaml and opens (or updates) a PR. Tier placement is reviewed
-# by a human on the PR — nothing lands on main automatically.
+# by a human on the PR — nothing lands on `alpha` automatically.
 
 on:
   schedule:
@@ -42,7 +42,9 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           branch: chore/refresh-ai-models
-          base: main
+          # Where PRs go. Targeting `main` would open it against the stable line,
+          # which is not where work lands and not what the next alpha ships from.
+          base: alpha
           commit-message: 'chore: refresh plan-feature AI model tier table'
           title: 'chore: refresh plan-feature AI model tier table'
           body: |

@@ -75,6 +75,11 @@
                   "note": {
                     "type": "string",
                     "description": "Optional caveat (fallback, variant, when-to-step-up)."
+                  },
+                  "fallback": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Model id, same vendor, to run instead once this model is out of quota or credits. Transcribed into a plan's workflow as `defaults.model_fallbacks`; the plan-execution skills apply it when a spawn on this model is refused for quota. A budget decision, not a tier placement: it may point outside this tier."
                   }
                 }
               }

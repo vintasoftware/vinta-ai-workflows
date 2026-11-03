@@ -5,6 +5,490 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — YYYY-MM-DD
+
+<!-- Graduates the 0.7.0-alpha1 … 0.7.0-alpha39 series (2026-09-11 to
+     2026-10-24). This section is the net change since 0.6.1. The
+     alpha-by-alpha record is in the GitHub pre-releases and in this file's
+     git history before the release commit. -->
+
+### Added
+
+- **`vinta-ai-maestro`: a `plan-feature` plan runs itself, phases in parallel,
+  with you steering from a terminal or a browser.** A new workspace package,
+  `packages/vinta-ai-maestro/`, published as its own npm package under the same
+  version number as `vinta-ai-workflows` and run with `npx vinta-ai-maestro`
+  (Node ≥ 22). It is not part of the `vinta-ai-workflows` tarball: what reaches
+  the skills package is the generated schemas below and the skill changes that
+  produce and consume them. [SPEC.md](packages/vinta-ai-maestro/SPEC.md) is the
+  authority and the package README is the operator's manual.
+  - **A run.** `run <workflow.json>` starts the plan's `.workflow.json` as a
+    background job and returns; closing the terminal changes nothing
+    (`--foreground` keeps it in the process, for CI). The run works on a plan
+    branch, `plan/<workflow-id>/base`, cut from `base_branch`. Each phase gets a
+    crew member, a lane — a git worktree with its own copy of the dependency
+    dirs, forked `dev` / `test` databases, an isolated compose project, a
+    namespace in each shared service, the declared `env_files` and a
+    `setup_cmd` — and the `standard-phase` pipeline: implement, gates, review,
+    polish chores, verify, integrate (merge, gates on the merged tree, push,
+    PR), `after_pr` chores. A phase with one dependency branches from it, one
+    with several from an `integ-<id>` merge; each wave merges into
+    `plan/<id>/wave-<N>`, and the last wave opens the plan PR, the one PR that
+    lands the plan. `run --resume <run-id>` picks a paused, interrupted or
+    failed run back up with the policy it was started with. Policy flags:
+    `--on-failure retry|ask|stop` (default `retry`: one cold attempt, then a
+    question), `--retries`, `--retry-after <15m>` (an unanswered failure
+    question answers itself, backing off when attempts fail fast),
+    `--agent-answer-after` (how long an agent's own question waits before the
+    recommended options are taken), `--permission ask|auto|full|judged`
+    (default `auto`), `--harness-profile <name>` (a named binary and
+    environment — a second account, say — from
+    `~/.config/vinta-ai-maestro/profiles.yaml`), `--system-one <config.json>`,
+    `--no-coordinator` and `--coordinator-authority full`.
+  - **Harnesses.** claude-code, codex (`codex app-server`, codex-cli ≥ 0.147.0)
+    and opencode, behind one adapter contract: spawn, resume, inject a message
+    into a running turn, wait for background work, compact. A quota, rate-limit
+    or concurrency refusal parks the harness, not the phase, until the reset
+    time the vendor stated; `defaults.model_fallbacks` and
+    `defaults.harness_fallbacks` move the refused spawn to a fallback instead;
+    a provider outage re-runs the phase when the harness answers, charging
+    nothing to its attempts; a logged-out CLI asks you to log in. Sessions
+    start one at a time per harness, and the ceiling a run discovers is kept
+    for the next one.
+  - **The crew.** A plan staffs a team, the Crew table `plan-feature` writes:
+    one member per agent with a tier, a model and a harness, and every phase
+    assigned to one of them. A member keeps its worktree and its session across
+    the phases it takes, so what it learned in phase 1 is still there in
+    phase 4. A busy member is covered by the cheapest qualified free peer or by
+    a spare in its image (`defaults.max_spare_crew`, default 2); a phase is
+    never handed below its tier (`defaults.substitution`, default
+    `up_one_tier`); a phase its review keeps rejecting moves up a tier
+    (`defaults.escalate_after_rejections`, default 3); a merge conflict goes to
+    the most senior member who wrote one of its sides.
+  - **Gates.** A gate is a shell command, by type (`test`, `lint`, `typecheck`,
+    `e2e`, taking the project's `commands.*`) or by a project-wide id
+    (`maestro.gates.<id>`), or a judge question put to a System One classifier.
+    Phase gates run a `scoped_cmd` (`{changed_files}` / `{touches}`) until the
+    review approves; `verify` then runs the full `cmd` on the phase branch, and
+    the full suite runs on every merged base and wave (`verify_gates`,
+    `base_gates`, `wave_gates`, all full by default). Results are cached per
+    gate, command and tree. `fresh_cmd` and `fresh_when` run a gate from a
+    fresh test database when the tree moved under it; `cold_cmd` and
+    `scope_cache` cover a lane with no test cache; `timeout_s`,
+    `queue_timeout_s` and `tuning.allowed_flags` bound and retune a gate.
+    Resource pools (`resources`, `scope: run | host`) serialise the heavy ones
+    across lanes, and across every maestro run on the machine. Agents run a
+    gate with `vinta-ai-maestro gate <id>` and take a pool with
+    `vinta-ai-maestro with <resource> -- <cmd>`; on claude-code a `PreToolUse`
+    gate guard refuses the bare command, and `--permission judged` asks a
+    classifier about each shell call. `codegen` steps regenerate generated
+    files rather than merging them, `append_only` files merge as a union,
+    `post_merge` runs a formatter over what git merged, and `ci_only` records
+    the CI checks deliberately left to CI.
+  - **Review and chores.** Once a phase's gates are green, the implementer's
+    own session runs the `review` chore, `thermo-nuclear-review-loop`: one
+    reviewer sub-agent, each finding verified and fixed or rejected with
+    counter-evidence, until the reviewer explicitly approves. A phase's
+    decisions — answered questions, operator context, rejected findings — are
+    kept and carried into every later prompt, so nothing is asked twice.
+    `deslop` and the project's other `after_review` chores run before verify;
+    `after_pr` chores (a review canvas, say) run once the PR is open. A chore
+    reporting `Status: FAILURE` is recorded as failed. `max_fix_rounds` is
+    unset by default, which means no limit; set it to be asked.
+  - **Integration.** A conflict goes to a conflict fixer in the integration
+    worktree, with a time limit per round and its resolution gated by the union
+    of both phases' gates; what a round left is kept under
+    `refs/vinta-ai-maestro/` across attempts. A resolution that undoes a
+    phase's deletion is flagged. A merge git or a hook refuses goes to you.
+    Every phase and integration PR carries a **Landing** section pointing at
+    the plan PR; `land <run>` says how a finished run lands and closes the PRs
+    whose work is already in the base; `propagate <run> <phase>` carries a late
+    fix into every `integ-` and `wave-` branch; `sync-base <run>` brings a moved
+    `base_branch` into a live plan.
+  - **Steering.** `status`, `logs [-f]`, `logs --failures <gate-log>`, `pause`,
+    `stop`, `node context|redirect|pause|resume|abort|retry|fresh|answer`,
+    `node interrupt|reassign|step` (take a phase over at its step without
+    failing it), `switch-harness`, `fixer interrupt|reassign`, `workflow`,
+    `amend` (a live run takes an edited workflow, rebasing the done phases the
+    change reaches), `exec <run> <lane|integration> -- <cmd>` (a command with
+    the lane's environment, holding the integration worktree while it runs),
+    `gate-cache invalidate`, `purge [--lanes --branches]` (never the only copy
+    of work), `doctor` (every check a run depends on, from disk and servers to
+    env files, compose `-T`, gate scope and the CI jobs no gate covers),
+    `validate`, `simulate` and `judge calibrate`. Every acting request takes a
+    reason, journalled with what it explains.
+  - **The run coordinator.** One agent per run, woken when a phase fails, an
+    attempt errors, a phase waits on the integration worktree or a gate crosses
+    its cost threshold, at most 24 times a run. It reads the journal and the
+    repository and acts through the same API as you: steer, pause, retry,
+    answer the questions a timer could answer, amend the live run, run a
+    command. It may change how the run executes, never what it builds, and
+    never weakens a check. Everything decided without you — by it or by a
+    timer — is listed in `status`, the run view, the plan PR and the
+    post-mortem.
+  - **The browser UI.** `ui` serves every run in the project and hosts none,
+    so closing it interrupts nothing. A run view with the plan graph, the
+    roster, the integration worktree's record, resource pools, sessions and
+    cost, what was decided without you, a notifications inbox and the
+    coordinator as a sidebar; a phase view with the transcript rendered the way
+    the harnesses render it, the phase's running processes and gates, its
+    changes as a diff, its integration timeline, its PR, and steering as a chat
+    input; an analytics page while the run goes and the post-mortem as a report
+    after; a Logs view over the daemon's own log; a workflow editor that saves
+    only what you changed; Pause, Stop, Retry and Resume. Every page fits a
+    phone, in light and dark.
+  - **The record.** Everything lands under `.vinta-ai-maestro/` (gitignored):
+    the run's journal, each phase's transcript with the role that wrote each
+    line, gate logs, the daemon's own log (`logs/daemon.ndjson`, identifiers
+    only, enforced), and once the run ends a post-mortem (`postmortem.v1`):
+    dependencies declared but unused or discovered at gate time, conflicts,
+    the critical path, idle capacity, gate costs, failure causes, crew
+    substitutions, failed chores and unattended decisions. `plan-feature` reads
+    it before planning the next feature in the same repository.
+  - **Security.** The daemon binds loopback and every API request carries a
+    token. Agents hold a token of their own that reaches only their leases,
+    gates and hooks; the coordinator has one of its own; a run's job keeps its
+    token in a `0600` file that `ui` never prints. Nothing in the journal or
+    the log holds repository contents, and every token is redacted from both.
+    The only API key the package ever uses is the one a `--system-one`
+    classifier config names; the harnesses run on your logged-in CLIs.
+  - **Platforms.** macOS, Linux and Windows, each in CI.
+
+- **`vinta-design-system` and `vinta-dag-editor`**, two more workspace
+  packages maestro's UI is built on: oklch tokens in three layers, six
+  run-status tones (waiting is amber and failure is red, never the same hue),
+  shadcn/ui components on Tailwind CSS v4 and a light/dark/system theme; and
+  the framework-agnostic Web Component that draws and edits plan DAGs —
+  arrowed edges, dependencies drawn by dragging, phase ids on the cards, a
+  details strip, keyboard zoom, full screen. They publish on their own cadence
+  as dependencies of `vinta-ai-maestro`; nothing in either reaches
+  `npx vinta-ai-workflows install`.
+
+- **Plan review: a page for a plan before it runs, and a chat with the agent
+  that wrote it.** `vinta-ai-maestro review open <workflow.json>` serves the
+  plan's graph with every phase's real prompts, the plan's markdown, a phase ×
+  gate matrix, the projected schedule and what `validate` reports. You comment
+  on the plan, a phase, a prompt or a gate and send the batch; the agent answers
+  through `review wait` and `review reply`, edits the plan, and **Approve plan**
+  ends the loop. The review is committed beside the plan as
+  `ai-plans/<id>.review.json` (`plan-review.v1`, see
+  [packages/vinta-ai-maestro/SPEC.md § 19](packages/vinta-ai-maestro/SPEC.md)).
+  When maestro is installed, `plan-feature` runs `validate --json` on every
+  workflow it writes and asks whether to review on the page, in chat, or later.
+
+- **The browser interview.** A decision-heavy interview — `create-spec`'s
+  Step 0 first — can run as a full-screen browser form instead of a chat
+  exchange: one decision per screen with the context the agent already knows,
+  Markdown, Mermaid or HTML explainers, option cards that state each option's
+  consequences with the recommended default marked, and a question panel for
+  asking the agent. Round-based and file-based, so it works the same under
+  every harness: the agent writes
+  `.vinta-ai-workflows/interviews/<slug>/rounds/round-NN.json`
+  (`interview-round.v1`), blocks on `vinta-ai-maestro interview wait`, and
+  resumes when the page submits `answers/round-NN.json`
+  (`interview-answers.v1`). The page is maestro's
+  (`interview start|wait|status|stop --dir <dir>`,
+  [SPEC.md § 20](packages/vinta-ai-maestro/SPEC.md)), rendered with the design
+  system; the server binds loopback, carries a token in the printed URL,
+  serves documents only from the interview's `docs/` and accepts a round's
+  answers once. Opt in with the new `interview-ui` foundation skill (bootstrap
+  **Optional foundation skills** question 7, `foundation_skills.interview-ui`
+  in the config schema); it ships `SKILL.md` and an example round, and needs
+  `vinta-ai-maestro` runnable from the project (`npx --no-install
+  vinta-ai-maestro` when it is a devDependency, `npx vinta-ai-maestro`
+  otherwise). `create-spec` asks once per interview whether to decide in the
+  browser or in chat; projects without the skill see no change.
+
+- **`thermo-nuclear-review-loop` foundation skill.** A review-and-fix loop
+  over a change: the agent running it spawns one reviewer sub-agent, checks
+  each finding against the code, fixes the justified ones and answers the rest,
+  until the reviewer explicitly approves under a strict code-quality standard.
+  Questions only a person can settle — unreachable scenarios, requirement
+  ambiguity, destructive operations — go to them instead of being assumed.
+  Always shipped (`foundation_skills.thermo-nuclear-review-loop`), because
+  `review-phase` runs it and every maestro workflow names it in its `review`
+  chore; also invokable on its own.
+
+- **`plan-feature` emits an executable workflow and staffs a crew.**
+  `ai-plans/YYYY-MM-DD-<feature-kebab>.workflow.json` lands beside every plan,
+  unconditionally — a project with no orchestrator carries a file nothing
+  reads, and one that adopts maestro later finds its plans already executable.
+  It is the same phase graph in the form a run loads: one node per phase,
+  `depends_on` from each phase's `**Depends on**:` line, its Touch List, gates,
+  pools and crew member, validated by `workflow.v1`. The plan opens **Phased
+  Rollout** with a **Crew** table and an **Execution graph** table, and every
+  phase carries `**Assigned to**:` and `**Depends on**:` lines; they replace
+  `**Suggested AI model**:`, which old plans may keep. The skill asks what a
+  phase lane needs its own copy of and writes the workflow's `project` block,
+  emits the codegen steps and append-only files it detects in the project,
+  writes the crew's model fallbacks, puts a contract test for any interface two
+  parallel phases share into the foundation phase, and reads the post-mortems
+  of earlier runs before drawing the next graph.
+
+- **`implement-plan` runs independent phases in parallel** on the skills path
+  too, with no maestro. The plan carries a dependency graph and the conductor
+  schedules against it: a phase starts as soon as every phase it depends on is
+  green and a worktree lane is free. A chain-shaped plan behaves exactly as
+  before. Lanes are a pool of worktrees, branches base on their dependencies
+  (`integ-<id>` for several, `plan/<id>/wave-<N>` per wave), tracking is a
+  directory with one file per phase so wave merges never conflict on it, a
+  sibling-lane write guard covers the pool, and `modular-commits` keeps its
+  atomic units on lane branches. Two new config fields:
+  `run_options.implement-plan.parallel_phases` (default `true`) and
+  `max_parallel_lanes` (default `3`). The skill refuses rather than degrading
+  when parallel execution is asked for and worktrees are unavailable.
+
+- **Provision worktrees with your own script instead of the `prepare-worktree`
+  skill.** Set `commands.worktree_prepare` (and optionally
+  `commands.worktree_teardown`) in `.vinta-ai-workflows.yaml`; `implement-plan`
+  and maestro run that command for every lane and the integration worktree,
+  with `VINTA_WORKTREE_NAME`, `_PATH`, `_BRANCH`, `_BASE_REF`, `_KIND`,
+  `VINTA_MAIN_CHECKOUT`, `VINTA_PLAN_PATH` and `VINTA_WORKTREE_SUMMARY` set,
+  and check the result with git rather than trusting the exit code. The
+  bootstrap offers existing worktree scripts `vinta-analyze-codebase` found,
+  and can write the scripts for you — `prepare.sh`, `teardown.sh` and `lib.sh`
+  under `scripts/worktree/`, from templates that carry the contract, dry runs,
+  rollback, compose isolation and a teardown that refuses a dirty worktree.
+
+- **Agents stop for input with clickable questions instead of prose.** Every
+  skill and sub-agent asks through the harness's structured question tool
+  (Claude Code's `AskUserQuestion`, OpenCode's `question`, Codex's
+  `request_user_input`, Cursor's `AskQuestion`, Copilot's `askQuestions`,
+  Gemini CLI's `ask_user`): 2–4 options with descriptions, the recommended one
+  first. `AGENTS.md` gains an **Asking the human** section, copied verbatim
+  from
+  [`vinta-write-agents-md/resources/asking-the-human.md`](skills/vinta-write-agents-md/resources/asking-the-human.md).
+  Sub-agents, which cannot ask, return `status: NEEDS_INPUT` with the question
+  in the tool's shape, and the new `plan-execution/partials/relay-questions.md`
+  turns it into a question, records the answer and continues the same agent.
+  Every prose stop point across the plan-execution unit, the foundation skills
+  and the bootstrap skills became such a question. `vinta-sync-ai-tools` adds
+  a one-time migration for existing projects.
+
+- **PR Review Canvas integration (`integrations.pr-review-canvas`).** The
+  bootstrap offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
+  as its first *integration*: an external tool that installs its own skill,
+  nothing of which is bundled here. A new optional top-level `integrations`
+  object in the config schema records the opt-in (interview group D.2, asked
+  when `code_host` is GitHub or GitLab and `pr_creation` is `agents-create`).
+  When enabled, `vinta-install-ai-tools-setup` runs `pr-review install-skill`
+  (the CLI is never auto-installed; the install command is printed), the
+  `integrate-phase` PR step runs `/pr-review-canvas <n>` after `open-pr.sh`
+  publishes, and `plan-feature` adds an `after_pr` `review-canvas` chore to the
+  workflow it writes. The analysis, derive and update skills treat an
+  integration-owned skill as the tool's and never edit it.
+
+- **Model fallbacks for models that run out of quota.** `ai-models.yaml`
+  entries take `fallback:` (the shipped table sets
+  `claude-fable-5-1 → claude-opus-5-5` and `gpt-6-astra → gpt-5.6-sol`),
+  `ai-models.v1.schema.json` gains the optional field, the nightly
+  `check-ai-models` job checks fallback ids for staleness, `plan-feature`
+  writes the map into each workflow's `defaults.model_fallbacks`, and the
+  plan-execution skills follow the same rule when maestro is not running them.
+
+- **Five generated JSON Schemas, and the schemas are checked.**
+  [`workflow.v1`](schemas/workflow.v1.schema.json) (the executable plan),
+  [`postmortem.v1`](schemas/postmortem.v1.schema.json),
+  [`plan-review.v1`](schemas/plan-review.v1.schema.json),
+  [`interview-round.v1`](schemas/interview-round.v1.schema.json) and
+  [`interview-answers.v1`](schemas/interview-answers.v1.schema.json) are
+  generated from zod sources in `vinta-ai-maestro` and byte-compared in its
+  tests; see [`schemas/README.md`](schemas/README.md). `npm run
+  validate-schemas` (part of `npm test`) compiles every schema under `schemas/`
+  with Ajv in strict Draft 2020-12 mode and checks the fixtures in
+  `tests/schema-fixtures/`: `valid/` must pass, `invalid/` must fail.
+
+- **Config schema (`vinta-ai-workflows-config.v1`), all additive.** A `maestro`
+  section holding what every plan used to repeat — gates by type and by id,
+  resources (with `scope`), chores, `defaults` (gates, harness, pipeline,
+  `gate_scope`, `verify_gates`, `base_gates`, `wave_gates`,
+  `pull_requests: phase | plan`, `max_spare_crew`, `substitution`,
+  `escalate_after_rejections`, `model_fallbacks`, `harness_fallbacks`), the
+  `project` block (databases, services, `env_files`, `setup_cmd`,
+  `prepare_cmd`, `reset_cmd`, `recycle_keep`, `hooks`, `lane_seed`), `codegen`,
+  `append_only`, `ci_only` and `post_merge` — which maestro layers each plan
+  over (`commands.*`, then `maestro.*`, then the plan, then the run's own
+  amendments). Also `integrations`, `foundation_skills.interview-ui`,
+  `foundation_skills.thermo-nuclear-review-loop`, `commands.worktree_prepare`
+  / `worktree_teardown`, `commands.worktree_candidates`, `commands.lint_scoped`
+  and `run_options.implement-plan.parallel_phases` / `max_parallel_lanes`. The
+  bootstrap interview asks for each (maestro defaults are group C.11, with
+  follow-ups on `env_files`, the test gate in lanes, a fresh-database form,
+  when the full suite runs, CI checks with no gate, and test-tool caches
+  missing from `.gitignore`), and `vinta-sync-ai-tools` offers them to
+  existing projects. `prs-context-frontmatter.v1` gains an optional `kind`
+  (`phase | integration | plan`).
+
+### Changed
+
+- **`plan-feature`: plans have fewer, longer phases.** The phase size ceiling
+  rises from 1500 to 4000 LoC, tests included, and the sub-phase trigger moves
+  to that same ceiling; the Step 0 **Phase granularity** default flips to
+  bundling closely-related use-cases into one phase, with one use-case per
+  phase as the opt-in answer. A phase of a few hundred lines has to justify
+  standing alone. A plan drawn before the change is still valid as written.
+  The skill also tells the author to read the CI config and give every locally
+  runnable CI job a gate (and to record the rest under `ci_only`), treats two
+  parallel phases adding migrations to the same app as file overlap, treats a
+  rename of a shared symbol as an interface change, names the enum for
+  same-named choice fields two phases expose, lists the usual append-only
+  registries, tells authors to declare the gitignored files a lane needs under
+  `project.env_files`, and states that `gates: []` means *none*. Its AI model
+  tiers cite the latest OpenAI, Anthropic and Google releases
+  (`claude-sonnet-5-5`, `gpt-6.1-sol`, `gemini-3.1-pro-preview`); tier
+  placement is unchanged. Re-derive the skill to pick these up.
+
+- **`implement-plan` and its sub-skills follow what maestro learned from real
+  runs.** Implementers commit when a gate stays red and report `FAILURE`
+  naming the gate; an uncommitted file does not exist as far as the run is
+  concerned. They run every command in the foreground, never hand-edit a
+  generated file, and list every gate they ran and its result; the conductor
+  reviews only a `SUCCESS` report whose gates are all green. Every spawn of a
+  phase carries the decisions already made in it, and a resumed implementer
+  checks the branch for committed work first. Every merged tree runs the full
+  gate, whatever the `full_test_suite` answer is, and the Quick test scope
+  means scoped tests until the review approves and the full suite once before
+  integration. The merge fixer keeps what a side deleted, stages by name,
+  verifies narrowly, and confirms a resolution by scanning the files for
+  markers, never by asking git; a merge refused by a hook or by git goes to
+  the human. A member moved to its next phase is told first that its objective
+  changed; a continuation that fails is retried cold with the full brief; an
+  outage or an expired login asks `Wait and retry` / `Switch model` / `Stop
+  the run` rather than escalating the tier. Lanes are recycled fully between
+  phases, leftovers saved to a `refs/wip/` ref first. A dispatched phase agent
+  does the work itself: every composed implementer prompt and a guard at the
+  top of each conductor refuse to hand a phase to a sub-agent. The plan PR is
+  the one PR that lands the plan, and every phase and integration PR says so.
+  Re-derive the skills to pick this up; plans and tracking directories written
+  before the change still work.
+
+- **`review-phase` runs the thermo-nuclear review loop.** Each phase is
+  reviewed by `thermo-nuclear-review-loop`, hosted by the conductor because a
+  sub-agent cannot spawn sub-agents of its own: one reviewer one tier above the
+  phase's implementer (a Tier 4 phase is reviewed at Tier 4), each round of
+  findings handed to the phase's own implementer, which verifies, fixes or
+  rejects with counter-evidence and commits the round. A reviewer pass with no
+  verdict is continued once and never counts as approval; a finding re-raised
+  without new evidence is rejected on the spot; after 3 rejecting passes a
+  fresh implementer one tier up takes over; after 20 passes that still return
+  blockers the conductor asks whether to continue, stop the phase unapproved,
+  **Accept as is** (integrated with its open blockers recorded) or amend the
+  plan. After approval the implementer runs `deslop-comments` over the
+  comments the phase added.
+
+- **`amend-plan` cascades along the dependency graph, and amends a live
+  maestro run.** A rewrite touches the amended phase's dependent closure
+  instead of "every phase with a higher number", rebases in topological order,
+  rebuilds `integ-` bases first, refuses to run while a phase is in flight, and
+  gains a `dependency-change` amendment kind. When a maestro run of the plan is
+  running, paused, interrupted or failed, the skill asks whether to amend it,
+  edits the plan and the run's own workflow copy, commits both on the plan
+  branch and applies them with `vinta-ai-maestro amend`; it also carries the
+  operator recipes for a live run (`switch-harness`, `node reassign`, `node
+  interrupt`, `--harness-profile`, `propagate`, `sync-base`).
+
+- **`prepare-worktree`: worktrees get their own copy of the dependency dirs,
+  never a symlink.** A symlinked `node_modules` / `vendor/` / `venv/` sent
+  writes back into the main checkout and made parallel worktrees race on one
+  tree. The skill copies every dependency dir with a copy-on-write clone
+  (`cp -ac` on macOS, `cp -a --reflink=auto` on Linux) and reinstalls
+  virtualenvs and yarn PnP; `skills.prepare-worktree.deps_strategy` now
+  defaults to `copy`. The skill also documents provisioning a pool of lanes for
+  one plan with a `reset_cmd` per forked database, and its summary's `|`
+  alternatives are closed sets read by machine. **Consumers:** re-sync to pick
+  up the new body; worktrees that already exist keep their links until they
+  are re-provisioned.
+
+- **`create-spec` offers a browser surface for its Step 0 interview** when
+  `ai-tools/skills/interview-ui/` exists (see **The browser interview** above).
+  The question bank, clarity loop, read-back and exit conditions are
+  unchanged.
+
+- **`write-unit-test`: time-independent tests and deterministic generated
+  output.** Rule 8 requires a frozen clock and an explicit timezone on any test
+  touching dates, and host-independent schema or client generation. The Django
+  pack and stack notes spell out `freezegun` / `time-machine` with
+  `override_settings(TIME_ZONE=...)` and `tzdata`-sourced timezone choices.
+
+- **Django stack notes** cover database reuse and testmon in lanes, keeping
+  the virtual environment out of a bind-mounted worktree, registries every
+  phase appends to, drf-spectacular `ENUM_NAME_OVERRIDES` for new choice
+  fields, and the CI-mirroring checks a plan's gates should carry
+  (`manage.py check --deploy --fail-level WARNING`, `makemigrations --check`,
+  a regenerate-and-diff gate for a schema or client).
+
+- **The bootstrap and sync skills.** `vinta-bootstrap-ai-tools` asks the new
+  questions listed under **Config schema** above, no longer offers `symlink`
+  for dependency dirs, and no longer asks for a reviewer tier; the **Optional
+  foundation skills** group grows to eight questions (`interview-ui` is 7,
+  `handoff-to-client` moves to 8). `vinta-analyze-codebase` records existing
+  worktree scripts and integration-owned skills. `vinta-sync-ai-tools` carries
+  the asking-the-human migration, offers the PR Review Canvas integration to
+  existing projects as an `opt-in-offer`, and re-renders the plan-execution
+  skills together. Every generated skill now carries
+  `disable-model-invocation: true`.
+
+- **`agent_models.fixer` now sets only the merge-conflict fixer's tier.** The
+  phase's own implementer fixes review findings at its own tier, so a project
+  that set `fixer` cheap to save money is saving it on fewer rounds.
+
+### Deprecated
+
+- **`agent_models.reviewer` is ignored.** The review runs one tier above the
+  phase's implementer, so no configured tier is read. The key stays in the v1
+  config schema so existing configs still validate; drop it at your next edit.
+
+- **`skills.prepare-worktree.deps_strategy: symlink`** stays in the schema
+  enum so existing configs validate, but is deprecated and read as `copy`.
+  Change it to `copy` (or `reinstall`) in `.vinta-ai-workflows.yaml` to stop
+  the interview default from being re-emitted.
+
+### Removed
+
+- **The three-layer phase review.** `review-phase` no longer runs the
+  mechanical checks (including the review-time secret scan, dependency-license
+  check and co-author trailer check), the plan-compliance walkthrough
+  (including the comment-hygiene check), the crew reviewer, or a separate
+  fixer per finding; the thermo-nuclear review loop replaces them. The
+  implementer's own install-time license check and co-author rules are
+  unchanged.
+
+- **Reviewers on the plan.** `plan-feature`'s Crew table has no `Role` column
+  and no reviewer rows, and phases have no `**Review models**:` line.
+  **Migration:** plans written with them still run; `implement-plan` ignores
+  them.
+
+### Fixed
+
+- **`open-pr.sh` posts inline comments on macOS and reports why a comment
+  failed.** Four bugs in the `open-pr-from-context` script, all seen while
+  publishing a stacked plan from a Mac: a GNU-only `sed` idiom that BSD `sed`
+  rejected, so trailing blank lines were never trimmed; a lowercase
+  `side: right` that GitHub answered with "422 Validation Failed", now
+  upper-cased; `gh api` and `glab api` stderr thrown away, so a failed comment
+  gave no reason; and a multi-line `awk -v` that BSD `awk` rejected when
+  adding to a `## Publish log` section. Projects that patched their own copy
+  can re-sync with `vinta-sync-ai-tools`.
+
+- **`check-ai-models` no longer mistakes sibling models for snapshots of a
+  cited id.** The matcher used substrings, so `claude-sonnet-5` matched
+  `claude-sonnet-5-5` and hid the newer release, and `gemini-3-pro` matched
+  `gemini-3-pro-image` so a retired model still looked available. It accepts
+  only exact ids, dated or `-vN` snapshot suffixes, and provider prefixes.
+
+- **`implement-plan`'s final report no longer suggests `docker compose down -v`
+  to tear down a lane.** `down -v` also deletes the compose volumes a worktree
+  deliberately shares with the main checkout. The report prints the sequence
+  `prepare-worktree` documents: `docker compose -p <project> down`, then
+  `docker volume rm` for each forked volume, then removal of the generated
+  compose override.
+
+- **`prepare-worktree` serialises `git worktree add`, not only the database
+  template.** Git rewrites `.git/worktrees/` metadata on every add, and
+  concurrent adds against one repository clobber each other's entries.
+  Worktrees are added one at a time; the per-lane work around them still
+  overlaps.
+
 ## [0.6.1] — 2026-08-17
 
 ### Fixed
@@ -366,7 +850,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Consumers**: re-sync to pick up the opt-in questions. E2E-disabled projects
   are unaffected (the e2e regions strip out as before).
 
-
 <!-- pre-release: 0.2.0-alpha6 on 2026-07-13 -->
 
 ### Changed
@@ -402,7 +885,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- pre-release: 0.2.0-alpha5 on 2026-07-13 -->
 
 ### Added
-
 
 - **`handoff` foundation skill — session-continuation handoff docs between
   agents.** Write mode captures the current task (goal, verified-vs-unverified

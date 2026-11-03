@@ -1,0 +1,1558 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "title": "vinta-ai-maestro workflow",
+  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Layered over the project’s own configuration (`.vinta-ai-workflows.yaml`) when it is loaded. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-ai-maestro`. GENERATED from packages/vinta-ai-maestro/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional URL of this schema, for editor validation. Ignored at runtime.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Stable identifier for this workflow. Used in branch names."
+    },
+    "plan_ref": {
+      "description": "The human-readable plan this was emitted alongside.",
+      "type": "string"
+    },
+    "plan_context_refs": {
+      "default": [],
+      "description": "Sections of the plan that bound every phase rather than any one of them — its Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the same resolver and handed to the implementer verbatim, marked as plan-level. Empty — the default — means the prompts carry the phase brief alone.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "base_branch": {
+      "description": "What dependency-free nodes branch from, and what the plan PR targets. Absent takes `project.default_branch` from `.vinta-ai-workflows.yaml`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "migrate_cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The project’s own migrate command. Run once per template database — never per lane, which is what makes the Nth lane cost a copy rather than a provision."
+        },
+        "databases": {
+          "default": {},
+          "description": "Roles a lane forks. An undeclared role means the lane has no database of its own.",
+          "type": "object",
+          "properties": {
+            "dev": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "sqlite"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Env var the project reads its connection string from, set per lane."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "path",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "postgres"
+                    },
+                    "delivery": {
+                      "type": "string",
+                      "enum": [
+                        "external",
+                        "compose"
+                      ],
+                      "description": "`external` forks a database on an already-running server — the cheap mode, and the one to prefer for pooling. `compose` boots the lane its own server on its own forked volume, which has no template to clone from and therefore no reset: such a lane is single-use and is re-provisioned rather than reset."
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The main checkout’s database name. Lane names derive from it."
+                    },
+                    "server_url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The server, without the database path segment, e.g. `postgres://localhost:5432`."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "createdb_cmd": {
+                      "description": "Replaces the `createdb` binary name (default `createdb`) in every command that creates a lane database. A trusted command prefix, unquoted, like `migrate_cmd`; the `-h`/`-p`/`-U` flags derived from `server_url` still follow it. Only meaningful for `external`. For a Postgres in a container whose password the host cannot supply: `docker compose exec -T db createdb` — the official image trusts connections made from inside the container, so no password is needed there.",
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dropdb_cmd": {
+                      "description": "Replaces the `dropdb` binary name (default `dropdb`), exactly as `createdb_cmd` does for `createdb`. Set both together: `docker compose exec -T db dropdb`.",
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "delivery",
+                    "name",
+                    "server_url",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "One forked database a lane gets its own copy of."
+            },
+            "test": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "sqlite"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Env var the project reads its connection string from, set per lane."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "path",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "postgres"
+                    },
+                    "delivery": {
+                      "type": "string",
+                      "enum": [
+                        "external",
+                        "compose"
+                      ],
+                      "description": "`external` forks a database on an already-running server — the cheap mode, and the one to prefer for pooling. `compose` boots the lane its own server on its own forked volume, which has no template to clone from and therefore no reset: such a lane is single-use and is re-provisioned rather than reset."
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The main checkout’s database name. Lane names derive from it."
+                    },
+                    "server_url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The server, without the database path segment, e.g. `postgres://localhost:5432`."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "createdb_cmd": {
+                      "description": "Replaces the `createdb` binary name (default `createdb`) in every command that creates a lane database. A trusted command prefix, unquoted, like `migrate_cmd`; the `-h`/`-p`/`-U` flags derived from `server_url` still follow it. Only meaningful for `external`. For a Postgres in a container whose password the host cannot supply: `docker compose exec -T db createdb` — the official image trusts connections made from inside the container, so no password is needed there.",
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dropdb_cmd": {
+                      "description": "Replaces the `dropdb` binary name (default `dropdb`), exactly as `createdb_cmd` does for `createdb`. Set both together: `docker compose exec -T db dropdb`.",
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "delivery",
+                    "name",
+                    "server_url",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "One forked database a lane gets its own copy of."
+            }
+          },
+          "additionalProperties": false
+        },
+        "env_files": {
+          "default": [],
+          "description": "Repo-relative ignored files every lane needs its own COPY of — `.env`, `.env.docker`, `.envrc`. Copied, never symlinked: lane provisioning appends to them (a connection string, a compose override path), and a symlink would write those lane-specific lines back into the main checkout. A declared file that is missing fails provisioning rather than producing a lane whose stack cannot boot.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "commands": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "lint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "typecheck": {
+              "type": "string",
+              "minLength": 1
+            },
+            "test": {
+              "description": "The whole suite.",
+              "type": "string",
+              "minLength": 1
+            },
+            "test_one": {
+              "description": "A single test or a subtree. The agent appends the target, so end it accordingly.",
+              "type": "string",
+              "minLength": 1
+            },
+            "migrate": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "description": "The project’s own command lines, handed to every agent verbatim. A fixed vocabulary rather than free-form, because the prompt has to be able to say which one step 3 of the working instructions means. Declaring these is how an agent stops guessing: a project whose suite only runs inside a container, or only against a lane-specific database, has no way of telling one otherwise, and `pytest` is a plausible guess that is wrong in exactly that project."
+        },
+        "hooks": {
+          "default": "run",
+          "description": "Whether the repository’s git hooks run on commits made inside a lane. `run` is the default and is what a developer’s own checkout does. `skip` points the lane at an empty `core.hooksPath`, for the case this exists for: a `language: system` pre-commit chain that, in a worktree that has never been committed in, builds a virtualenv per lane before it will let a commit through — observed as four failed commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. The gates still run; this only stops each lane paying a whole-environment install to make a commit. The integration worktree follows the same setting: the merge commits maestro makes there — a resolved conflict, a wave — run the hooks under `run` and skip them under `skip`, exactly as a lane’s commits do. A hook that refuses one of those commits is asked about (commit, commit --no-verify, abort) rather than left mid-merge; a hook that needs a gitignored file needs that file in `env_files`.",
+          "type": "string",
+          "enum": [
+            "run",
+            "skip"
+          ]
+        },
+        "services": {
+          "default": {},
+          "description": "Shared servers each lane gets its own namespace inside, by id. One postgres, one redis, one rabbit on the machine, with a database / db index / vhost per lane — which is the difference between six lanes being viable on a laptop and not. The alternative a project falls into without this is booting a server per lane, or sharing one with no isolation at all.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "enum": [
+                  "index",
+                  "name"
+                ],
+                "description": "How this lane’s namespace inside the shared server is derived. `index` is a small integer, for a server with a fixed number of slots — redis’s sixteen databases are the case it exists for. `name` is a token derived from the lane, for a server that names things freely: a vhost, a bucket prefix, a schema."
+              },
+              "url": {
+                "description": "The shared server, without the per-lane segment — `redis://localhost:6379`. Omit it where the namespace *is* the value: an object-storage prefix has no URL to hang off, and the variable then carries the bare token.",
+                "type": "string",
+                "minLength": 1
+              },
+              "url_var": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Env var the lane reads this service’s address from."
+              },
+              "capacity": {
+                "default": 16,
+                "description": "How many distinct namespaces the server has. Only meaningful for `index`, where a pool larger than this is refused before anything is created — two lanes on one redis database is the bug this exists to prevent, and reaching it by arithmetic is no better than reaching it by neglect.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "create_cmd": {
+                "description": "Run once per lane, in the lane. `{namespace}`, `{url}` and `{lane}` are substituted. Declaring a vhost is a `rabbitmqadmin` invocation this package has no business knowing; a project that needs none declares none.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reset_cmd": {
+                "description": "Empties this lane’s namespace when the lane is handed to the next phase. Same substitutions. A service without one keeps whatever the last phase left in it, which for a cache is usually right and for a queue usually is not — declaring this is how a project says which of those it has.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "namespace",
+              "url_var"
+            ],
+            "additionalProperties": false,
+            "description": "A shared server each lane gets its own namespace inside."
+          }
+        },
+        "compose": {
+          "default": {
+            "enabled": true,
+            "publish": [],
+            "shared_volumes": []
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Whether lane provisioning generates a compose override. On by default, and it does nothing at all in a project with no compose file. Where there is one and docker cannot answer, provisioning fails rather than quietly producing lanes that share a data volume — set this to false to say that is genuinely what you want.",
+              "type": "boolean"
+            },
+            "publish": {
+              "default": [],
+              "description": "Services that must keep a reachable host port, republished on one this lane was granted instead of the one the project pinned. Empty is the default and is usually right outright: where the project’s own test command runs inside compose, services reach each other by container DNS on the lane’s own network and a published port buys nothing but a collision. The granted port reaches the lane as `LANE_PORT_<SERVICE>_<CONTAINER_PORT>`.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "shared_volumes": {
+              "default": [],
+              "description": "Volume keys that leak past the project name and are to be left leaking. The escape hatch for the one decision this cannot make for you: re-pinning a shared dependency volume is correct, and it costs every lane the install that sharing it was avoiding. A read-only cache with no dependency churn in the plan is safe here. A data volume never is — that is two servers on one data directory, which is the bug this exists to prevent.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false,
+          "description": "How a lane’s compose stack is isolated past `COMPOSE_PROJECT_NAME`."
+        },
+        "prepare_cmd": {
+          "description": "Run in the repository root **before anything else a run does** — before the preflight, before the template databases, before the first worktree. Its job is to make the shared servers this project’s lanes connect to reachable: `docker compose up -d --wait db redis` for a stack in the root checkout, `brew services start postgresql` for a host install, nothing at all for a project whose lanes boot their own. `setup_cmd` cannot do this — it runs per lane, long after the template database has been created on a server that had to be up already. MUST be idempotent: it runs again before every lane recycle, which is what restores a server that died mid-run. Note that `--wait` only waits for services that declare a `healthcheck`; without one it returns as soon as the container is started, and `createdb` races the server.",
+          "type": "string",
+          "minLength": 1
+        },
+        "setup_cmd": {
+          "description": "The project’s own lane-setup command, run inside each freshly provisioned lane with that lane’s environment applied. The escape hatch for whatever a project needs that no field here describes. It MUST be idempotent: it runs again every time the lane is recycled for another phase.",
+          "type": "string",
+          "minLength": 1
+        },
+        "reset_cmd": {
+          "description": "Run inside a lane when it is recycled for another phase, and only then — never on a freshly provisioned lane. Runs with the lane’s environment applied, after maestro has reset the worktree, the env files, the databases and the services, and before `setup_cmd`. For what a phase leaves behind that the clean does not reach: a cache outside the worktree, a `recycle_keep` directory that needs pruning rather than deleting.",
+          "type": "string",
+          "minLength": 1
+        },
+        "lane_seed": {
+          "default": [],
+          "description": "Ignored cache files a lane is given when it is handed to a phase and lacks them, relative to the lane (`apps/api/.testmondata`): copied from the lane of the phase’s first dependency, else the integration worktree, else the main checkout, whichever has it first. Only paths git ignores are copied, and never over one the lane has. For a scope cache (`gates.<id>.scope_cache`) that is expensive to build from nothing.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "recycle_keep": {
+          "default": [],
+          "description": "Ignored paths a recycled lane keeps. A recycle removes every untracked and ignored file the previous phase left — caches such as `.mypy_cache` and `__pycache__` included, which once kept a deleted package importable and failed a type check on clean code — except the copied dependency tree, the `env_files` and what is listed here. Each entry is a gitignore pattern handed to `git clean -e`: `.venv` keeps one at any depth, `/apps/api/.venv` only that one. For what is expensive to rebuild; anything not listed is rebuilt by `setup_cmd`, which runs on every recycle.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "migrate_cmd"
+      ],
+      "additionalProperties": false,
+      "description": "What a lane needs to be a working checkout of this project. Optional: with no project block a lane is a worktree and nothing else."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "harness": {
+          "default": "claude-code",
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex",
+            "opencode"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pipeline": {
+          "default": "standard-phase",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "gates": {
+          "description": "The gates every phase must pass unless it names its own. Resolved into each node when the workflow is loaded, with the same override rule as `chores`: a node’s own list — `[]` included — replaces this one.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "allow_ungated_phases": {
+          "default": false,
+          "description": "Whether a phase that resolves to no gates at all is acceptable. Off — the default — `validate` refuses the workflow and `doctor` warns, because a phase with no gates passes its gate step vacuously: an observed run finished twelve phases without a single check because every node carried `gates: []` where its author meant \"the project’s\". Set it only for a plan whose phases genuinely have nothing to check.",
+          "type": "boolean"
+        },
+        "gate_scope": {
+          "default": "scoped",
+          "description": "`scoped` — the default — runs a gate’s `scoped_cmd` on a phase’s gates up to and during its review, and its full `cmd` once the review approves (`verify`) and on every merged tree in the integration worktree. `full` runs `cmd` everywhere.",
+          "type": "string",
+          "enum": [
+            "scoped",
+            "full"
+          ]
+        },
+        "substitution": {
+          "default": "up_one_tier",
+          "description": "How far above the member the plan named a phase may be moved when that member is busy or another holds a warm session. `same_tier` — only a peer at the same tier; a phase waits rather than run dearer. `up_one_tier` — the default — also the next tier up the roster has, when nobody at the planned tier is free; a warm session never moves a phase up. `any` — any tier above, and a warm session above the plan may take it to avoid a cold start. One observed run moved 23 phases from Tier 3 to a Tier 4 member whose credits then ran out, and nothing showed it.",
+          "type": "string",
+          "enum": [
+            "same_tier",
+            "up_one_tier",
+            "any"
+          ]
+        },
+        "escalate_after_rejections": {
+          "default": 3,
+          "description": "Review rejections a phase may take on one desk before it moves up a crew tier. Every review that does not approve counts, across attempts; at the Nth the scheduler amends the run, moving the phase to the cheapest member of the next tier up, journalled as a `workflow_amended` row by `scheduler` with the reason and the count. The new desk takes the phase from its next attempt, and the count starts again there. Nothing happens at the top tier, or in a workflow with no roster. `0` turns it off. One observed run left a Tier 1 phase rejected 16 times over six hours before a person moved it.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pull_requests": {
+          "default": "phase",
+          "description": "Which pull requests a run opens. `phase` — the default — one per phase, one per integration branch, and the plan PR that lands them all: the phase PRs are review units stacked in merge order. `plan` opens the plan PR alone, from the last wave branch, which already holds every phase and every conflict resolution; review happens there. One observed ten-phase refactor opened fifteen PRs that nobody was going to merge. Under `plan` a phase has no PR of its own, so its `after_pr` chores are skipped.",
+          "type": "string",
+          "enum": [
+            "phase",
+            "plan"
+          ]
+        },
+        "max_spare_crew": {
+          "default": 2,
+          "description": "Crew members a run may take on beyond the roster. When the member a phase was planned for is busy, the phase does not borrow a member another pending phase is planned for, and does not wait: it gets a new member at the planned member’s tier and model, with a worktree of its own provisioned there and then. A member nobody plans for is borrowed as before. The spare stays on the roster for the rest of the run, is never planned for, and covers later phases at its tier. `retry with <member>` takes a spare in that member’s image the same way when the member is needed elsewhere. A worktree, its databases and its compose stack each, so this is bounded; `0` keeps the roster to the plan’s and restores waiting and covering. One observed run left a phase on the critical path idle for 17 minutes while a retry held the member it was planned for.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "verify_gates": {
+          "default": "full",
+          "description": "What `standard-phase`’s `verify` runs once the review approves. `full` — the default — runs every gate’s whole `cmd` on the phase branch, so a PR never carries a suite only a scoped run saw; a red full run goes back to a fixer and the review. `scoped` keeps the scoped form there too, for a suite too slow to run once per phase — the merged-tree gates are then the first full run. No effect under `gate_scope: full`.",
+          "type": "string",
+          "enum": [
+            "full",
+            "scoped"
+          ]
+        },
+        "base_gates": {
+          "default": "full",
+          "description": "Whether a multi-dependency phase’s base (`integ-<id>`, its dependencies merged) is gated before the phase starts on it. `full` — the default — runs every command gate its dependencies declare, whole `cmd`, on the merged base, cached on its tree; red fails the phase’s setup. `off` starts the phase on the merged base unchecked.",
+          "type": "string",
+          "enum": [
+            "full",
+            "off"
+          ]
+        },
+        "wave_gates": {
+          "default": "every",
+          "description": "When the phases’ gates run in full on a merged wave, in the integration worktree. Each phase passes its gates on its own branch, and two parallel phases can each be green and disagree with each other — a sender and a receiver of one signal, say — which only a merged tree shows. `every` — the default — runs the wave’s phases’ gates on every wave, so the next wave builds on a passing tree and a disagreement is caught at the wave that introduced it, and every gate of the plan once on the last wave before the plan PR opens. It costs one full suite per wave. `final` runs the last wave’s and any wave whose merge needed a conflict resolution only. `off` runs none of these. Under `gate_scope: scoped` the full form of a narrowed gate still runs on each wave whatever this says: that is where the suite the phases skipped is paid back.",
+          "type": "string",
+          "enum": [
+            "off",
+            "final",
+            "every"
+          ]
+        },
+        "chores": {
+          "default": [],
+          "description": "The chores every phase runs unless it names its own. Most chores are run-wide — a comment pass, a changelog entry — and repeating them on every node is how one phase ends up quietly missing one.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "model_fallbacks": {
+          "default": {},
+          "description": "Model id → the model to run instead once the first is out of quota (§6.1). A `quota` refusal on a model listed here does not park the harness: the spawn is retried at once on the fallback, and every later spawn of that model on the same harness goes straight to the fallback until the vendor’s stated reset, or for the rest of the run when it stated none. Chains are followed; a fallback refused for quota too means the account is out, not the model, and the harness parks as it would have.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "harness_fallbacks": {
+          "default": {},
+          "description": "Harness id → where the run moves once that harness is out of quota and has no model fallback left (§6.1). Instead of parking every phase on it until the window resets, the run switches: the turn that was refused runs again at once on the fallback, at the same pipeline step, and every later turn that would have run on the harness runs there — phases in a turn move when it ends. A moved phase starts a fresh session with a handoff (the previous agent’s last report, its work in the lane, the red gate). One switch per harness; a fallback that runs out too parks as it would have. One observed run moved five phases off an account out of credits by aborting and retrying each by hand.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "harness": {
+                "type": "string",
+                "enum": [
+                  "claude-code",
+                  "codex",
+                  "opencode"
+                ],
+                "description": "The harness the run moves to."
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The model every moved turn runs on there."
+              }
+            },
+            "required": [
+              "harness",
+              "model"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "max_session_turns": {
+          "default": 12,
+          "description": "Turns one reused session slot may take before the next spawn starts fresh (§15.5). A shared session only ever grows; without a ceiling a long node eventually dies on a context-window error that reads as a broken harness.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "crew": {
+      "default": {},
+      "description": "The agents this plan is staffed with, by id. Empty — the default — means the workflow is unstaffed and every node falls back to `model` / `defaults.model`, which is how workflows written before rosters existed keep running.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "tier": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4,
+            "description": "Difficulty tier this member is staffed at, per the plan skill’s rubric. It is a floor on what they may be handed, and the ordering the scheduler substitutes along."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The model this tier resolves to for this run."
+          },
+          "harness": {
+            "description": "Overrides defaults.harness for this member.",
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "description": {
+            "description": "Why the plan staffed this tier.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tier",
+          "model"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "resources": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Maximum concurrent holders. A starting hint for `lane` — see admission control."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "worktree",
+              "semaphore"
+            ],
+            "description": "`worktree` pools are provisioned lanes; `semaphore` pools are pure counters."
+          },
+          "scope": {
+            "description": "`run` — the default — counts only this run’s holders. `host` also counts every other run on this machine holding a pool of the same name, through lock files under `~/.vinta-ai-maestro/host-leases/` (`VINTA_AI_MAESTRO_HOST_LEASES` moves them), so two runs on one laptop take turns at the full suite instead of running two at once. Only meaningful on a `semaphore` pool.",
+            "type": "string",
+            "enum": [
+              "run",
+              "host"
+            ]
+          },
+          "match": {
+            "description": "Command patterns that need this pool — `pytest*`, `pnpm test*`. `*` matches any run of characters and the rest is literal, compared against the whole command line with whitespace collapsed. On a harness that can enforce it, an agent running a matching command without `vinta-ai-maestro with <pool> --` in front of it is refused and told to take the lease. A guardrail against habit, not a sandbox: `bash -c` or a script that runs the same suite is not seen. Only meaningful on a `semaphore` pool.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capacity",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Named capacity pools. `lane` is required."
+    },
+    "gates": {
+      "default": {},
+      "description": "Gates by id. A command gate with a `type` may omit `cmd` and inherit it from the project. Gates the project configures by type (`maestro.gates.<type>`, or a `commands.*` line) are also available under the type’s name without being declared here, and so is every custom gate the project declares (`maestro.gates.<id>`) under its id. An entry here of the same id replaces the project’s whole.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "description": "What kind of check this is. A typed gate takes any field it does not set — `cmd`, `scoped_cmd`, `requires`, `timeout_s` — from the project: `maestro.gates.<type>` in `.vinta-ai-workflows.yaml`, then the matching `commands.*` line there (`test` → `test_unit`, `lint` → `lint`, `typecheck` → `build`, `e2e` → `e2e`). A field set here wins over both.",
+                "type": "string",
+                "enum": [
+                  "test",
+                  "lint",
+                  "typecheck",
+                  "e2e"
+                ]
+              },
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shell command run in the node’s lane. Not an agent. The full check."
+              },
+              "scoped_cmd": {
+                "description": "The same check narrowed to what the phase changed, run by a phase gate under `defaults.gate_scope: scoped`. `{changed_files}` is the files the lane changed against the phase’s base and `{touches}` the node’s Touch List, each substituted shell-quoted and space-separated. The command must accept any path it is given — `vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}` — because a source file with no tests is a normal member of the list. When a placeholder would substitute nothing, `cmd` runs instead.",
+                "type": "string",
+                "minLength": 1
+              },
+              "cold_cmd": {
+                "description": "What a phase gate runs in place of `scoped_cmd` when the lane has no scope cache yet (`scope_cache`): `make test` (the suite in parallel) instead of a `--testmon` run that, without `.testmondata`, runs every test serially. Defaults to `cmd`. It must check at least what `scoped_cmd` does.",
+                "type": "string",
+                "minLength": 1
+              },
+              "scope_cache": {
+                "description": "Files `scoped_cmd` narrows by, relative to the lane (`apps/api/.testmondata`). When any is missing, the scoped form would run everything slowly, so a phase gate runs `cold_cmd` (or `cmd`) instead, and journals why. `project.lane_seed` can copy them into new lanes.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "fresh_cmd": {
+                "description": "The same check run from fresh state — the test database recreated (`pytest --create-db`, `make test_reset test`) — run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward since the gate last ran there, the gate has not run there in this process, its red output reads as a stale schema (missing or extra columns or relations), or a conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.",
+                "type": "string",
+                "minLength": 1
+              },
+              "fresh_when": {
+                "description": "Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is built from — the migrations, typically (`apps/*/migrations/*.py`). When a file that matched at the gate’s last run in the integration worktree is gone or different now, the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a migration that was rewritten or renamed under it. Files added since do not count. Ignored without `fresh_cmd`.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "requires": {
+                "default": [],
+                "description": "Resource pool ids acquired before the gate runs, in canonical order.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                }
+              },
+              "timeout_s": {
+                "default": 1800,
+                "description": "How long the command may run, counted from when it starts — never the time it queued for `requires`.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "queue_timeout_s": {
+                "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them and for how long. Absent, it waits as long as it takes.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "tuning": {
+                "type": "object",
+                "properties": {
+                  "allowed_flags": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not `--reuse-db-and-more`, and not a flag that merely starts the same way. A flag taking a separate value (`-n auto`) is written as the two tokens it is. Removing or rewriting an existing token is never permitted, whatever is listed here: the proposed command must be this one’s tokens, in order, plus additions."
+                  }
+                },
+                "required": [
+                  "allowed_flags"
+                ],
+                "additionalProperties": false,
+                "description": "What an autonomous retune of this gate may do. Absent — the default — means the command is not the monitor’s to touch."
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "judge": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "description": "The question, inline. Exactly one of `question` and `question_ref` is required.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "question_ref": {
+                    "description": "Where the question lives, in `prompt_ref` form (`ai-plans/PLAN.md#no-phi-in-logs`), resolved off the lane like a phase brief.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "labels": {
+                    "default": [
+                      "yes",
+                      "no"
+                    ],
+                    "description": "The closed set the classifier chooses among. The default makes it a yes/no question.",
+                    "minItems": 2,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "fail_on": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "The labels that fail the gate. Their combined score is compared against `threshold`, so `[\"architectural\", \"schema\"]` fails on the two together and not on either alone."
+                  },
+                  "threshold": {
+                    "default": 0.5,
+                    "description": "The gate fails when the `fail_on` labels together score at least this much.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "input": {
+                    "default": "diff",
+                    "description": "What is judged. `diff` is the lane against the phase’s base, uncommitted work included.",
+                    "type": "string",
+                    "enum": [
+                      "diff"
+                    ]
+                  },
+                  "max_input_bytes": {
+                    "default": 204800,
+                    "description": "A larger input is not sent. The gate then counts as unavailable — a truncated diff would be judged on the part that happened to fit.",
+                    "type": "integer",
+                    "minimum": 1024,
+                    "maximum": 9007199254740991
+                  },
+                  "on_unavailable": {
+                    "default": "pass",
+                    "description": "What a question nobody answered means: no classifier configured, unreachable, or an oversized input. `pass` — the default — keeps a judge gate advisory; `fail` is for a check the phase must not merge without.",
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail"
+                    ]
+                  }
+                },
+                "required": [
+                  "fail_on"
+                ],
+                "additionalProperties": false
+              },
+              "requires": {
+                "default": [],
+                "description": "Resource pool ids acquired before the gate runs. Rarely needed: a judge holds no lane resource.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                }
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "judge"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "chores": {
+      "default": {},
+      "description": "Agent turns a phase runs beside its gates, by id. A gate judges and a chore changes the tree, so they are separate registries — see ChoreSchema.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "description": "The instruction, inline. Exactly one of `prompt` and `prompt_ref` is required.",
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt_ref": {
+            "description": "Where the instruction lives, in `prompt_ref` form (`ai-plans/PLAN.md#deslop`), resolved by the same resolver as a phase brief. Prefer it over `prompt` for anything longer than a sentence: it keeps the text reviewable in the plan rather than in a JSON string.",
+            "type": "string",
+            "minLength": 1
+          },
+          "skill": {
+            "description": "A skill the agent should use, named in the prompt rather than passed as a harness flag — codex and opencode have no skills, and a chore that only works on one harness is a chore that silently does nothing on the other two.",
+            "type": "string",
+            "minLength": 1
+          },
+          "session": {
+            "default": "main",
+            "description": "The session slot this turn continues (§15). `main` — the default — is the implementer’s: the agent that wrote the phase already holds the brief, the diff and its own reasons, and that is most of what makes a chore cheap. A slot no other effect names starts a fresh session every time and pays for a cold context.",
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "description": "Overrides the model the phase’s implementer would otherwise run at. A mechanical pass does not need the tier the phase was staffed at.",
+            "type": "string",
+            "minLength": 1
+          },
+          "when": {
+            "default": "after_review",
+            "description": "When the chore runs. `review` runs it once the phase’s gates are green, as the phase’s code review: the turn ends with a `VERDICT: pass` or `VERDICT: fail` line, and the phase moves on only when every review chore passed. `after_review` — the default — runs it once the review approved, before the gates run again on the final tree. `after_pr` runs it once the phase is merged, pushed and its pull request is open, for work about the PR rather than the diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be `on_failure: fail`.",
+            "type": "string",
+            "enum": [
+              "review",
+              "after_review",
+              "after_pr"
+            ]
+          },
+          "background": {
+            "description": "`false` tells this chore’s turns to run every command in the foreground and wait for it, even on a harness that keeps a session alive for background work. For a review whose turns keep ending on \"waiting on the tests\" with no verdict. Absent, the harness decides.",
+            "type": "boolean"
+          },
+          "on_failure": {
+            "default": "continue",
+            "description": "`continue` — the default — journals a failed chore and moves on. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without. A `review` chore ignores it: a review that did not approve, for any reason, is put to the operator.",
+            "type": "string",
+            "enum": [
+              "continue",
+              "fail"
+            ]
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "codegen": {
+      "default": {},
+      "description": "Deterministic commands that write declared files, by id — see CodegenStepSchema. They run in every lane before its gates and in the integration worktree around every merge, in `after` order. A failing step is a red gate.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Shell command, run in the worktree with its environment — the lane’s or the integration worktree’s. Must be deterministic: the same inputs produce byte-identical outputs (`doctor --codegen` checks). A `format` step’s command takes `{changed_files}`."
+          },
+          "outputs": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The files the command writes, as git glob pathspecs relative to the repository root (`schema.yml`, `frontend/src/api-client/**`, `**/*.gen.ts`). What it changes among them is committed; anything else it changes is left alone. Agents are told these are not to be edited by hand, and a merge conflict confined to them is settled by running the step instead of by a fixer."
+          },
+          "inputs": {
+            "default": [],
+            "description": "The files the outputs are a function of, as git glob pathspecs. When the step last ran on exactly these contents and its outputs are still what it wrote, it is skipped, as a gate is on a tree the cache has seen. Empty — the default — runs it every time.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "after": {
+            "default": [],
+            "description": "Steps that run before this one: the schema before the client generated from it, the client before whatever reads it.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "requires": {
+            "default": [],
+            "description": "Resource pool ids held while the step runs, as a gate’s are. Never `lane`.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "timeout_s": {
+            "default": 600,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "format": {
+            "default": false,
+            "description": "A formatter rather than a generator. `{changed_files}` in `cmd` is the files the phase changed that match `outputs`, shell-quoted; with none, the step is skipped. Formatting the whole repository makes diffs in files the phase never touched. A format step’s outputs are ordinary source, so they are not listed as hand-edit-free and a conflict in them still goes to the fixer.",
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cmd",
+          "outputs"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "post_merge": {
+      "description": "A normalizing command for files a clean merge combined — see PostMergeSchema.",
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command run in the integration worktree after git merges a branch by itself, with `{files}` replaced by the files both sides changed (shell-quoted): `python -m py_compile {files} && ruff check --fix --select I,F811,F401 {files} && ruff format {files}`. What it changes is committed on top of the merge; a non-zero exit is journalled and the merged tree’s gates judge it."
+        },
+        "timeout_s": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "ci_only": {
+      "default": [],
+      "description": "CI checks deliberately left to CI, each with its reason. `doctor` warns about every CI command no gate runs; one listed here is reported as a decision instead of a gap.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The CI command, as CI runs it (wrappers like `uv run` are ignored when matching)."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why no gate runs it: it needs credentials, a deploy, a hosted service."
+          }
+        },
+        "required": [
+          "command",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "append_only": {
+      "default": [],
+      "description": "Files every phase only appends to — a DI container, a URL route list, a registry of notification kinds, a beat schedule — as gitattributes patterns. Merged in the integration worktree with git’s `union` driver, which keeps both sides’ lines, so two phases each adding an entry is not a conflict. The merged tree is gated as any other is; a union that reads wrong (a duplicate key, a missing comma) is a red gate there, not a silent pass.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "nodes": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "depends_on": {
+            "default": [],
+            "description": "Empty means the node branches from base_branch and may start immediately.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The upstream node id."
+                },
+                "artifact": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "What this node needs from the upstream one — a model, a symbol, a migration, an endpoint. Required: it is what the implementer prompt uses to explain what the phase builds on, and a bare id with no reason is usually a plan smell."
+                }
+              },
+              "required": [
+                "node",
+                "artifact"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "prompt_ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where the phase brief lives, e.g. `plan.md#phase-1`."
+          },
+          "touches": {
+            "default": [],
+            "description": "Touch List. Same-wave overlap is warned about, never refused.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pipeline": {
+            "description": "Overrides defaults.pipeline.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "gates": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "chores": {
+            "description": "The chores this phase runs, in order. Optional rather than defaulted, and that is the whole of its override rule: absent takes `defaults.chores`, and a list — `[]` included — replaces it. Merging instead would leave no way to skip a run-wide chore on the one phase it makes no sense for.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "harness": {
+            "description": "Overrides defaults.harness.",
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "model": {
+            "description": "Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.",
+            "type": "string"
+          },
+          "crew": {
+            "description": "The member this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free member at that tier or above, never below.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "deferred": {
+            "description": "Why this phase must not start on its own — \"deferred until the flag has soaked two weeks at 100% in production\". A deferred phase is not dispatched when its dependencies are done: it parks on a question naming this reason, and the operator answers `start` (now) or `stop` (fail it, blocking what depends on it). Without it the scheduler would run a soak-gated flag removal the moment its dependencies merged.",
+            "type": "string",
+            "minLength": 1
+          },
+          "max_fix_rounds": {
+            "description": "Fix rounds a phase may spend on red gates, and unsuccessful iterations each review turn may run, before the operator is asked whether to keep going (§16). Absent — the default — sets no limit: the fixer works until the gates are green and the review loop until the reviewer approves. A fix round is a fixer turn; a review iteration is one pass of the review loop that returned blockers. When a set budget runs out the shipped pipeline asks rather than fails: `continue` grants the same budget again, `stop` fails the phase and hands it to `--on-failure`.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prompt_ref"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pipelines": {
+      "default": {},
+      "description": "Pipelines this workflow authors. Optional: `defaults.pipeline` may name one the package ships (see BUILT_IN_PIPELINES), and a declared id shadows a built-in of the same name. A pipeline is machinery, not plan data — requiring every emitted workflow to carry a verbatim copy would duplicate it into every plan, and a fix to the shipped one would never reach a plan already written.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "states": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "position": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Canvas position."
+                },
+                "onEnter": {
+                  "default": [],
+                  "description": "Effects run on entering the state.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "run_chore",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify",
+                          "grant_fix_rounds"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "onLeave": {
+                  "default": [],
+                  "description": "Effects run on leaving the state.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "run_chore",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify",
+                          "grant_fix_rounds"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "color": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "position"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "transitions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "Source state id."
+                },
+                "to": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "Target state id."
+                },
+                "trigger": {
+                  "description": "Event name that fires this transition.",
+                  "type": "string"
+                },
+                "guard": {
+                  "description": "Opaque boolean expression over the documented guard context (review.verdict, gate.exit_code, human.answer, fix_rounds, node.*, run.*). Evaluated by a restricted evaluator with no host access.",
+                  "type": "string"
+                },
+                "effects": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "run_chore",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify",
+                          "grant_fix_rounds"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "data": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                }
+              },
+              "required": [
+                "id",
+                "from",
+                "to"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "initialStateIds": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "finalStateIds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "data": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+          }
+        },
+        "required": [
+          "states",
+          "initialStateIds"
+        ],
+        "additionalProperties": false,
+        "description": "A per-phase pipeline, authored in vinta-state-machine-editor."
+      }
+    },
+    "data": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {},
+      "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "defaults",
+    "resources",
+    "nodes"
+  ],
+  "additionalProperties": false
+}

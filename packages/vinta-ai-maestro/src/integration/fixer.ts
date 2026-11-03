@@ -1,0 +1,404 @@
+/**
+ * The conflict fixer seam.
+ *
+ * The orchestrator never edits code — not a phase's code, and not a merge
+ * conflict either. A conflict is a coding task, and coding tasks go to an
+ * agent. What the orchestrator owns is where that agent runs (the dedicated
+ * integration worktree, never a lane that is still working), how many rounds
+ * it gets, and what happens when it runs out.
+ *
+ * The request carries **identifiers only** — node ids, branch names, conflicted
+ * paths and the plan references where the two phase briefs live. It never
+ * carries a hunk: the agent is standing in the worktree and can read the
+ * conflict itself, and putting file contents in a request is how they end up
+ * in a log.
+ */
+import type { AgentTask, HarnessAdapter, SpawnRefusalKind, TurnRefusal } from '../harness/adapter.ts'
+import { type ModelFallbacks, spawnWithFallbacks } from '../harness/fallback.ts'
+import {
+  attribute,
+  CONFLICT_FIXER_ROLE,
+  type Attribution,
+  type TranscriptEntry,
+} from '../journal/transcript.ts'
+import { composeConflictPrompt, type RedGate } from '../prompts/index.ts'
+
+export interface ConflictRequest {
+  /** The integration worktree. The fixer runs here and nowhere else. */
+  readonly cwd: string
+  /** The branch being merged into. */
+  readonly into: string
+  /** The branch whose merge conflicted. */
+  readonly incoming: string
+  /** The node that branch belongs to. */
+  readonly nodeId: string
+  /** Every node that changed a conflicted path — the incoming one included. */
+  readonly nodes: readonly string[]
+  readonly paths: readonly string[]
+  /** Where each involved node's phase brief lives, for the fixer to read. */
+  readonly promptRefs: readonly string[]
+  /** 1-based. Exhausting the rounds hands the conflict to a person, not to a harder retry. */
+  readonly round: number
+  /** The gate the merged tree failed after the previous round, or before any round. */
+  readonly redGate?: RedGate
+  /**
+   * Where an earlier round of this same merge, stopped before it finished, is
+   * kept (`refs/vinta-ai-maestro/abandoned/…`). A ref name: the fixer reads
+   * the files from it, the request never carries them.
+   */
+  readonly previousAttempt?: string
+  /**
+   * The codegen steps' output patterns: files the integrator regenerates after
+   * the fixer stops, so the fixer is told to leave them alone.
+   */
+  readonly generated?: readonly string[]
+  /**
+   * The node whose turn this merge is — the phase being based, or the one
+   * building the wave. Not `nodeId` whenever an earlier phase's branch is the
+   * one coming in, and it is the phase the operator is watching.
+   */
+  readonly forNode?: string
+}
+
+/**
+ * The fixer's harness would not start it (§6.1).
+ *
+ * Thrown rather than returned because `fix` has no outcome to carry it in,
+ * and typed rather than a bare `Error` because the two things that read it
+ * need different facts from it. The scheduler reads `refusal`: a capacity
+ * kind — a plan window, a rate limit, an account out of credits — is
+ * backpressure, and it parks the phase on the harness's wait exactly as a
+ * refused implementer spawn would, instead of failing the phase and burning
+ * its retries against a window that ends by itself. The journal reads the
+ * message: harness, model, kind and the adapter's own identifiers-only line.
+ *
+ * Before this the refusal was a plain `Error('conflict fixer spawn refused:
+ * quota')`, which `failureReason` flattened to the word `Error` and the retry
+ * policy retried on a timer, for as long as the window lasted.
+ */
+export class ConflictFixerRefused extends Error {
+  constructor(
+    readonly harness: string,
+    readonly model: string,
+    readonly kind: SpawnRefusalKind,
+    readonly retryAfter: Date | undefined,
+    detail: string,
+  ) {
+    super(`conflict fixer spawn refused: ${kind} on ${harness} (${model}): ${detail}`)
+    this.name = 'ConflictFixerRefused'
+  }
+
+  /** The refusal as admission control takes it, or null for a kind that does not wait. */
+  get refusal(): TurnRefusal | null {
+    if (this.kind === 'fatal' || this.kind === 'stale_session' || this.kind === 'unauthenticated') {
+      return null
+    }
+    return {
+      kind: this.kind,
+      reason: 'conflict-fixer-refused',
+      ...(this.retryAfter === undefined ? {} : { retryAfter: this.retryAfter }),
+    }
+  }
+}
+
+/**
+ * A fix round that outlived its time limit and was stopped.
+ *
+ * A fixer is an agent in a loop with the conflicted files and whatever
+ * commands it chooses to run, and nothing bounded that loop: the observed
+ * round spent hours re-running a test suite that could not reach its
+ * database, holding the one integration worktree while three phases queued
+ * behind it. The merge is abandoned (the integrator does that for any throw)
+ * and the phase fails with this message, which is identifiers and a number.
+ */
+export class ConflictFixerTimeout extends Error {
+  constructor(
+    readonly nodeId: string,
+    readonly round: number,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `conflict fixer round ${round} for ${nodeId} exceeded its ${Math.round(timeoutMs / 60_000)} minute ` +
+        'limit and was stopped',
+    )
+    this.name = 'ConflictFixerTimeout'
+  }
+}
+
+/**
+ * A fix round ended from outside — the run was interrupted. Distinct from a
+ * round that finished, so the integrator abandons the merge rather than
+ * reading the half-done resolution as a round spent.
+ */
+export class ConflictFixerInterrupted extends Error {
+  constructor(readonly nodeId: string, readonly round: number) {
+    super(`conflict fixer round ${round} for ${nodeId} was interrupted`)
+    this.name = 'ConflictFixerInterrupted'
+  }
+}
+
+/** The default time one fix round may take. */
+export const DEFAULT_FIXER_TIMEOUT_MS = 20 * 60_000
+
+/** One method, so the scheduler can inject a real agent and a test a spy. */
+/**
+ * What a fixer may say about a round besides the worktree, which answers the
+ * rest. `environment_stale`: the merged tree's failures are the environment's
+ * — a test database left by another tree, with columns or relations no model
+ * here defines — and the fixer changed no code. The integrator then runs the
+ * gates once from fresh state (`integration/fresh.ts`) without charging the
+ * round.
+ */
+export type FixVerdict = 'environment_stale'
+
+/** The token a fixer ends its turn on to report `environment_stale` (its prompt says so). */
+export const ENVIRONMENT_STALE = 'ENVIRONMENT_STALE'
+
+/** The verdict a fixer's last words carry, if any: the token alone on a line. */
+export function fixVerdict(lastText: string | null): FixVerdict | null {
+  if (lastText === null) return null
+  return /^\W*ENVIRONMENT_STALE\W*$/m.test(lastText) ? 'environment_stale' : null
+}
+
+export interface ConflictFixer {
+  fix(request: ConflictRequest): Promise<FixVerdict | void>
+  /**
+   * Ends the round in progress, if any — the run is being torn down. Optional
+   * because a spy has nothing to end.
+   */
+  interrupt?(): Promise<void>
+  /**
+   * Ends the round in progress now, as a round spent rather than a teardown:
+   * what the agent left in the worktree stays, and the integrator reads it as
+   * it reads any finished round — resolved, or the next round goes on from it.
+   * True when a round was running. An operator's or the coordinator's
+   * `fixer interrupt`, and the first half of `fixer reassign`.
+   */
+  endRound?(): Promise<boolean>
+  /**
+   * Who fixes every round from now on, over the staffing; null hands rounds
+   * back to it. The round in progress is not touched — `endRound` for that.
+   */
+  reassign?(agent: FixerAgent | null): void
+  /** Rounds that would run on harness `from` run on `to` instead (a run's harness switch). */
+  reroute?(from: string, to: FixerAgent): void
+  /** The round in progress — its harness and model — or null when none is. */
+  running?(): { readonly harness: string; readonly model: string } | null
+}
+
+/** One conflict's staffing: the capability to spawn with, never a session. */
+export interface FixerAgent {
+  readonly adapter: HarnessAdapter
+  readonly model: string
+  /** Which of the conflicting nodes this agent's member implemented. */
+  readonly implemented?: readonly string[]
+}
+
+export interface AgentConflictFixerOptions {
+  /** Used when `staff` is absent or declines — `defaults`, in a composed run. */
+  readonly adapter: HarnessAdapter
+  readonly model: string
+  /**
+   * The integration worktree's environment, for the agent about to run in it.
+   *
+   * The integration worktree is a lane in every way that costs a port or a
+   * volume, and `AgentTask.env` says what happens to an agent that runs without
+   * its lane's: with the daemon's bare environment `COMPOSE_PROJECT_NAME` is
+   * unset, docker falls back to naming the project after the directory, and the
+   * stack comes up under a name nothing else in the run reserved. That is not
+   * hypothetical — a fix round brought a second stack up in the integration
+   * worktree and published 5432, 6379, 4566, 1025 and 8025 on the host, because
+   * `compose.publish: []` is delivered through the `COMPOSE_FILE` override that
+   * only this environment carries. It collided with the developer's own stack
+   * and outlived the run.
+   *
+   * Absent means "no project isolation to deliver" — an injected fixer in a
+   * test, or a workflow with no `project` block — never "run bare on purpose".
+   */
+  readonly env?: Readonly<Record<string, string>>
+  /**
+   * Who this particular conflict goes to, resolved per call because staffing
+   * depends on *which* nodes are in the conflict and that is only known once
+   * the merge has failed (`integration/staffing.ts`). Returning null keeps the
+   * `adapter`/`model` above, which is the pre-roster path.
+   */
+  readonly staff?: (request: ConflictRequest) => FixerAgent | null
+  /** `defaults.model_fallbacks`, for a staffed model that is out of quota. */
+  readonly fallbacks?: ModelFallbacks
+  /**
+   * Where the fix round's turn is written down.
+   *
+   * The stream below has always been drained — an unread one never ends — and
+   * until now every event was dropped on the floor. So the one agent turn in a
+   * run that nobody could watch was also the one nobody could read afterwards:
+   * a phase spent minutes resolving a merge and left a resolved commit, a
+   * `node_conflict` row saying it took two rounds, and no record of what was
+   * actually decided or why.
+   *
+   * A callback rather than a `Journal`, because this module knows about
+   * adapters and prompts and deliberately not about storage — the comment in
+   * the drain loop has said persistence belongs to the caller since it was
+   * written, and this is the seam that finally lets the caller do it.
+   */
+  readonly record?: (nodeId: string, entry: TranscriptEntry) => void
+  /** How long one round may run before it is stopped. `DEFAULT_FIXER_TIMEOUT_MS` when absent. */
+  readonly timeoutMs?: number
+}
+
+/**
+ * The real fixer: a `conflict-fixer` agent spawned in the integration worktree.
+ *
+ * `cwd` comes from the request rather than from configuration, because the one
+ * invariant worth enforcing here is that the fixer runs where the merge is —
+ * an agent pointed at a lane would resolve a conflict in a tree the merge
+ * cannot see, and the lane's own phase would inherit the edit.
+ *
+ * *Which* agent is `staff`'s answer, one conflict at a time, because the nodes
+ * in a conflict are what decide it (`integration/staffing.ts`). It supplies a
+ * model, a harness and the node ids the member implemented — never a session
+ * id; the reason that distinction is load-bearing is written down there.
+ */
+export function createAgentConflictFixer(options: AgentConflictFixerOptions): ConflictFixer {
+  /** The round's session while it runs, so a teardown can end it. */
+  let live: { kill(): Promise<void> } | null = null
+  let liveAgent: { readonly harness: string; readonly model: string } | null = null
+  let interrupted = false
+  let ended = false
+  /** `reassign`'s pick, over the staffing for every later round. */
+  let assigned: FixerAgent | null = null
+  /** Harnesses the run switched away from, and where to. */
+  const reroutes = new Map<string, FixerAgent>()
+  const timeoutMs = options.timeoutMs ?? DEFAULT_FIXER_TIMEOUT_MS
+  /** The staffed agent with the run's reroutes applied, followed as a chain. */
+  const routed = (agent: FixerAgent): FixerAgent => {
+    let current = agent
+    const seen = new Set<string>()
+    for (
+      let next = reroutes.get(current.adapter.id);
+      next !== undefined && !seen.has(current.adapter.id);
+      next = reroutes.get(current.adapter.id)
+    ) {
+      seen.add(current.adapter.id)
+      current = next
+    }
+    return current
+  }
+  return {
+    async interrupt(): Promise<void> {
+      if (live === null) return
+      interrupted = true
+      await live.kill().catch(() => {})
+    },
+    async endRound(): Promise<boolean> {
+      if (live === null) return false
+      ended = true
+      await live.kill().catch(() => {})
+      return true
+    },
+    reassign(agent: FixerAgent | null): void {
+      assigned = agent
+    },
+    reroute(from: string, to: FixerAgent): void {
+      reroutes.set(from, to)
+    },
+    running() {
+      return liveAgent
+    },
+    async fix(request: ConflictRequest): Promise<FixVerdict | void> {
+      const staffing = options.staff?.(request) ?? null
+      const chosen = routed(assigned ?? staffing ?? { adapter: options.adapter, model: options.model })
+      // The member's implemented list stays the staffing's: it is about whose
+      // work is in the conflict, not about who resolves it.
+      const staffed: FixerAgent = {
+        ...chosen,
+        ...(staffing?.implemented === undefined ? {} : { implemented: staffing.implemented }),
+      }
+      const context =
+        staffed?.implemented === undefined
+          ? request
+          : { ...request, implemented: staffed.implemented }
+      const task: AgentTask = {
+        nodeId: request.nodeId,
+        cwd: request.cwd,
+        // The same composer every other role's prompt comes from, so a change
+        // to what an agent is told stays one edit (`src/prompts`).
+        prompt: composeConflictPrompt(context),
+        model: staffed?.model ?? options.model,
+        // Options, not `staff`: the environment belongs to the *worktree*, and
+        // every conflict in a run is fixed in the same one. Which member is
+        // holding the keyboard changes nothing about which compose project the
+        // commands they run must resolve to.
+        ...(options.env === undefined ? {} : { env: options.env }),
+        // No `resumeSessionId`, deliberately, even when the staffed member has
+        // a live session from the phase they just implemented. That session ran
+        // in their lane; this runs in the integration worktree, where the files
+        // in dispute are half-merged and unlike anything the session saw. §15.2
+        // would refuse the resume anyway — `lane_changed` is its first rule —
+        // and asking for one here would only encode the wrong intent for
+        // whoever reads this next.
+      }
+      const adapter = staffed?.adapter ?? options.adapter
+      const { outcome, model } = await spawnWithFallbacks(adapter, task, options.fallbacks)
+      if (!outcome.ok) {
+        throw new ConflictFixerRefused(adapter.id, model, outcome.kind, outcome.retryAfter, outcome.message)
+      }
+
+      // Draining is mandatory — an unread stream never ends — and the outcome
+      // is deliberately not inspected: whether the conflict is actually
+      // resolved is answered by the worktree, not by what the agent said. A
+      // fixer that gave up costs a round rather than failing the run.
+      //
+      // Filed against the incoming node, which is the phase whose merge hit the
+      // conflict and the one an operator is looking at. Under its own role, so
+      // a phase transcript that already interleaves an implementer, a reviewer
+      // and review fixers does not quietly gain a fourth voice indistinguishable
+      // from the third: a conflict fixer works in the integration worktree on a
+      // merge, not in the lane on the phase, and reading it as the review fixer
+      // would be reading it as the wrong job.
+      const by: Attribution = { role: CONFLICT_FIXER_ROLE }
+      live = outcome.session
+      liveAgent = { harness: adapter.id, model }
+      // The drain, against the clock. A timer firing kills the session, which
+      // ends the stream; the timeout is then the round's result rather than
+      // whatever the stream said last.
+      let timedOut = false
+      let lastText: string | null = null
+      const timer = setTimeout(() => {
+        timedOut = true
+        void outcome.session.kill().catch(() => {})
+      }, timeoutMs)
+      try {
+        for await (const event of outcome.session.events) {
+          // `attribute` for §7's reason: the operator's steering arrives on this
+          // same stream, echoed back by the adapter, and must not be filed as the
+          // agent's words.
+          const entry = { ...event, by: attribute(event, by) }
+          if (event.type === 'assistant_text') lastText = event.text
+          options.record?.(request.nodeId, entry)
+          // And under the phase whose turn the merge is, when that is another:
+          // a base merge for p5 resolving p3's branch was written only to p3,
+          // finished long ago, while p5 — the phase being watched — showed
+          // nothing at all.
+          if (request.forNode !== undefined && request.forNode !== request.nodeId) {
+            options.record?.(request.forNode, entry)
+          }
+        }
+      } finally {
+        clearTimeout(timer)
+        live = null
+        liveAgent = null
+      }
+      if (interrupted) {
+        interrupted = false
+        throw new ConflictFixerInterrupted(request.nodeId, request.round)
+      }
+      // Ended by hand: the round is over, and the worktree says how it went.
+      if (ended) {
+        ended = false
+        return
+      }
+      if (timedOut) throw new ConflictFixerTimeout(request.nodeId, request.round, timeoutMs)
+      return fixVerdict(lastText) ?? undefined
+    },
+  }
+}

@@ -144,7 +144,7 @@ Stack-specific runtimes can swap the remote sink (Vercel Blob, GCS, Azure Blob, 
 
 ### Step 1 — Interrogate the user (NON-NEGOTIABLE)
 
-Use `AskUserQuestion` for the closed-form questions; iterate plain prose for the open ones.
+Use `AskUserQuestion` for the closed-form questions, and for open ones whenever you can propose candidates (model names, table names found in code) — the free-text field covers the rest. Iterate plain prose only when there is nothing to propose.
 
 1. **What does the script do, in one paragraph?** Open prose. The output is the `describe()` body.
 2. **Target rows — what's the SELECT?** Concrete: table, filter predicate, ordering. The agent translates this into the `iter_targets()` body. If the user can't write the SELECT confidently, push back — they don't have a clear enough picture to safely run the script yet.

@@ -77,12 +77,12 @@ Report the file path. Note that `.vinta-ai-workflows/` is typically gitignored �
 
 ## Resume mode
 
-1. **Read the handoff doc** in full. If the user didn't name one, list `.vinta-ai-workflows/handoffs/` and pick the most recent that isn't superseded; confirm the pick with the user if more than one task is plausible.
+1. **Read the handoff doc** in full. If the user didn't name one, list `.vinta-ai-workflows/handoffs/` and pick the most recent that isn't superseded. When more than one task is plausible, ask via `AskUserQuestion`, one option per candidate (title + date), most recent first.
 2. **Verify its claims against the repo before trusting them.** The repo may have moved since the handoff was written:
-   - Named branch exists and you're on it (or switch after confirming with the user).
+   - Named branch exists and you're on it (or switch after an `AskUserQuestion`: `Switch to <branch> (Recommended)`, `Stay on <current>`).
    - Cited commits exist (`git log`), cited files exist, `git status` matches the described uncommitted state.
    - Re-run the cheapest verification command from the **Verification** section to confirm the "done" claims still hold.
-3. **On mismatch, stop and reconcile** — tell the user what the handoff claims vs. what the repo shows. Never continue from stale premises.
+3. **On mismatch, stop and reconcile** — show what the handoff claims vs. what the repo shows, then ask via `AskUserQuestion`: `Trust the repo, update the plan (Recommended)`, `Investigate the gap first`, `Stop`. Never continue from stale premises.
 4. **Adopt the decisions.** Treat **Decisions made** as settled unless the user reopens one; do not re-explore rejected alternatives.
 5. **Continue from Next step.** When the work later stops again unfinished, write a fresh handoff (write mode) superseding this one.
 

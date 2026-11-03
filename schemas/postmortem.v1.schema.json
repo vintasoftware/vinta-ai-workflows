@@ -1,0 +1,1184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/postmortem.v1.schema.json",
+  "title": "vinta-ai-maestro plan post-mortem",
+  "description": "What one finished `vinta-ai-maestro` run learned about the plan that produced it: dependencies that were never used, dependencies discovered missing, same-wave phases that conflicted, phases whose duration diverged from their wave, what each gate cost, and changes the run made to its own plan while it ran. Ids, waves, paths, durations and counts only. Lives at `.vinta-ai-maestro/runs/<run-id>/postmortem.json` in a target project, emitted by `vinta-ai-maestro` after a run ends and read by `plan-feature` when planning the next feature in the same repo. GENERATED from packages/vinta-ai-maestro/src/postmortem/postmortem.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional URL of this schema, for editor validation. Ignored at runtime.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes."
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "The workflow this run executed."
+    },
+    "plan_ref": {
+      "description": "The human-readable plan the workflow was emitted alongside, if it named one.",
+      "type": "string"
+    },
+    "run": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "done",
+            "failed"
+          ]
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "ended_at_ms": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "node_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "wave_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "status",
+        "started_at_ms",
+        "ended_at_ms",
+        "elapsed_ms",
+        "node_count",
+        "wave_count"
+      ],
+      "additionalProperties": false,
+      "description": "The run this describes. Always finished — an unfinished run has no post-mortem."
+    },
+    "findings": {
+      "type": "object",
+      "properties": {
+        "unused_dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The dependent phase."
+              },
+              "depends_on": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The upstream phase the edge names."
+              }
+            },
+            "required": [
+              "node",
+              "depends_on"
+            ],
+            "additionalProperties": false,
+            "description": "One dependency edge, by id. The plan’s own `artifact` prose is deliberately not carried: the reader has the plan, and this file must stay free of repository text."
+          },
+          "description": "Edges whose artifact the dependent never needed. Empty on every run today: nothing observes dependency use, and the schedule cannot substitute. See `gaps`."
+        },
+        "missing_dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The phase that failed and later passed."
+              },
+              "depends_on": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The undeclared phase that landed in between."
+              },
+              "failed_at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the phase first failed."
+              },
+              "landed_at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the undeclared phase reached `done`."
+              },
+              "passed_at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the phase finally reached `done`."
+              },
+              "gate": {
+                "description": "The gate whose recorded result is the evidence: it failed at `failed_at_ms` and passed at `passed_at_ms`. Absent when the run recorded no gate result for the phase and the window came from its status transitions instead — a weaker signal, flagged in `gaps`.",
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              }
+            },
+            "required": [
+              "node",
+              "depends_on",
+              "failed_at_ms",
+              "landed_at_ms",
+              "passed_at_ms"
+            ],
+            "additionalProperties": false,
+            "description": "A dependency the run discovered and the plan did not declare: the phase failed, an undeclared phase landed, and only then did it pass. The evidence is still ordering — a recorded gate result narrows the window to one gate and rules out an unrelated failure, but it does not prove the undeclared phase is what fixed it. Confirm the edge against the plan before adding it."
+          }
+        },
+        "wave_conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "wave": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "The wave whose merge produced the conflict."
+              },
+              "where": {
+                "description": "`wave`: the wave merge. `base`: building a phase’s `integ-` base out of its dependencies, a wave earlier. Absent on post-mortems written before base conflicts were counted.",
+                "type": "string",
+                "enum": [
+                  "base",
+                  "wave"
+                ]
+              },
+              "nodes": {
+                "minItems": 2,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "description": "The phases that both own the contested paths."
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Repository paths that conflicted. Paths, never hunks."
+              },
+              "fix_rounds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Conflict-fixer rounds the resolution took. High is a strong split signal."
+              },
+              "reverted_deletions": {
+                "description": "Paths where the resolution kept lines one side had deleted — a fixer keeping “both sides”, or the `append_only` union driver. Flagged, not refused: check each deletion reached the branch. Absent when there were none.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "node": {
+                      "type": "string",
+                      "maxLength": 200,
+                      "description": "The phase whose deletion was reverted, or the branch standing in when no phase on that side touched the path."
+                    },
+                    "lines": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Lines that side deleted and the resolution kept. A count, never the lines."
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "node",
+                    "lines"
+                  ],
+                  "additionalProperties": false,
+                  "description": "A deletion a merge resolution undid. Identifiers and a count only."
+                }
+              }
+            },
+            "required": [
+              "wave",
+              "nodes",
+              "paths",
+              "fix_rounds"
+            ],
+            "additionalProperties": false,
+            "description": "Two same-wave phases that actually fought over the same code at integration."
+          }
+        },
+        "gate_costs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "runs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Verdicts recorded for this gate, over every phase and every fix round."
+              },
+              "cached_runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Of those, the ones the result cache served. They cost this run nothing."
+              },
+              "ran_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Summed runtime of the verdicts the run actually paid for — the runner’s own measurement, not the distance between two journal rows. Cache hits are excluded."
+              },
+              "slowest_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "The slowest single paid run. What a `timeout_s` is set against."
+              },
+              "cache_saved_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Summed runtime of the cache hits: what those gates cost the last time they really ran. An estimate of time saved, never additive with `ran_ms`."
+              },
+              "failed_runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Verdicts that came back red."
+              },
+              "timed_out_runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Verdicts killed at `timeout_s`. The most expensive kind of run there is."
+              }
+            },
+            "required": [
+              "gate",
+              "runs",
+              "cached_runs",
+              "ran_ms",
+              "slowest_ms",
+              "cache_saved_ms",
+              "failed_runs",
+              "timed_out_runs"
+            ],
+            "additionalProperties": false,
+            "description": "What one gate cost the run. A plan is sized against this: the gate that dominates `ran_ms` is the one whose pool capacity decides the wall clock, and a gate whose `runs` far exceeds its phases is a fix loop re-paying for the same suite."
+          }
+        },
+        "duration_divergences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "wave": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "span_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Dispatch to final settle, including fix rounds."
+              },
+              "wave_baseline_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Median span of the *other* dispatched phases in the same wave."
+              },
+              "ratio": {
+                "type": "number",
+                "description": "`span_ms / wave_baseline_ms`, rounded to two decimals."
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "longer",
+                  "shorter"
+                ],
+                "description": "`longer`: the phase set the wave’s wall clock on its own."
+              }
+            },
+            "required": [
+              "node",
+              "wave",
+              "span_ms",
+              "wave_baseline_ms",
+              "ratio",
+              "direction"
+            ],
+            "additionalProperties": false,
+            "description": "A phase whose real duration was wildly out of line with its wave placement — which is exactly what makes the next plan’s parallelism estimate wrong."
+          }
+        },
+        "critical_path": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "nodes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$"
+                      },
+                      "wave": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "span_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "node",
+                      "wave",
+                      "span_ms"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "The chain in the order it ran, each with the time it was running."
+                },
+                "span_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "The chain’s total. The floor this graph could reach."
+                },
+                "share_of_elapsed": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "How much of the run’s wall clock this one chain accounts for."
+                }
+              },
+              "required": [
+                "nodes",
+                "span_ms",
+                "share_of_elapsed"
+              ],
+              "additionalProperties": false,
+              "description": "The dependency chain that decided how long the run took. A plan is re-drawn against this: shortening any other phase changes nothing, and the only way to a faster run is a shallower graph or a cheaper phase on this list."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idle_capacity": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "lane_capacity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991,
+                  "description": "Lanes the plan asked to be provisioned."
+                },
+                "peak_concurrency": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "The most phases that were ever running at once. The width the graph reached."
+                },
+                "lane_ms_provisioned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "lane_ms_used": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Summed phase spans — one lane each, while running."
+                },
+                "idle_share": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Provisioned lane time no phase occupied."
+                }
+              },
+              "required": [
+                "lane_capacity",
+                "peak_concurrency",
+                "lane_ms_provisioned",
+                "lane_ms_used",
+                "idle_share"
+              ],
+              "additionalProperties": false,
+              "description": "What the run paid for and did not use. A lane is a worktree, a forked database and a desk for a crew member, and a plan that is never as wide as its lane count bought all three for nothing — which is a fact about the graph, not about the machine."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interventions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "amendment": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "The amendment ordinal, matching the run’s `workflow_amended` history."
+              },
+              "at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the run amended itself."
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What it changed, as the ledger keys it — `gate:<id>` or `node:<id>`."
+              },
+              "effect": {
+                "type": "string",
+                "enum": [
+                  "cheaper",
+                  "dearer",
+                  "unchanged",
+                  "unmeasured"
+                ],
+                "description": "`cheaper` / `dearer` / `unchanged` compare the gate’s mean uncached duration before and after. `unmeasured` means the journal cannot answer — a phase-level change, or a gate with no runs on one side of the amendment."
+              },
+              "before_ms": {
+                "description": "Mean uncached duration of this gate before the amendment. Absent when unmeasured.",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "after_ms": {
+                "description": "The same, after. Absent when unmeasured.",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "runs_before": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "runs_after": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "record_ref": {
+                "type": "string",
+                "description": "Where the run coordinator’s own account of this change lives, relative to the run directory: its conversation. The reasoning, the evidence and the commands are prose about a repository and stay there; this artifact carries what can be counted."
+              }
+            },
+            "required": [
+              "amendment",
+              "at_ms",
+              "target",
+              "effect",
+              "record_ref"
+            ],
+            "additionalProperties": false,
+            "description": "One amendment a run made to itself, and what happened to the thing it changed. The effect is a comparison of measured durations, not a claim of cause: a gate that got cheaper across an amendment did so while other things were also changing."
+          },
+          "description": "Amendments the run made to itself (§9.2), oldest first. Empty means it made none, which is a fact rather than a gap: `workflow_amended` rows say who wrote them. Changes a person made are in `operations`."
+        },
+        "failure_causes": {
+          "description": "Failed attempts grouped by cause, most expensive first.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "The scheduler’s recorded reason, verbatim up to 300 characters."
+              },
+              "setup": {
+                "type": "boolean",
+                "description": "Whether these attempts failed before any agent ran — provisioning, a base merge, a checkout. The machinery’s failure rather than the work’s, and the kind a plan cannot fix but a project configuration can."
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Attempts that failed with this reason, across every phase."
+              },
+              "nodes": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "description": "The phases it hit."
+              }
+            },
+            "required": [
+              "reason",
+              "setup",
+              "attempts",
+              "nodes"
+            ],
+            "additionalProperties": false,
+            "description": "One cause of failed attempts, and what it cost: the run’s retries, grouped."
+          }
+        },
+        "crew_substitutions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "planned": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The member the plan named."
+              },
+              "planned_tier": {
+                "description": "Their tier. Absent on rows written before it was recorded.",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Who ran it instead."
+              },
+              "tier": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "model": {
+                "description": "The model that member ran on, from the roster.",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "peer_busy",
+                  "warm_session",
+                  "spare_crew"
+                ],
+                "description": "`peer_busy`: the planned member was working. `warm_session`: promoted to reuse an open session. `spare_crew`: the planned member was working, and a spare was taken on in their image."
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Attempts this member took the phase for."
+              },
+              "above_plan": {
+                "type": "boolean",
+                "description": "Whether this ran at a higher tier than the plan named — dearer than budgeted."
+              },
+              "node_cost_usd": {
+                "description": "What the whole phase cost, every attempt and member included, when its harness reported cost.",
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "node",
+              "planned",
+              "member",
+              "tier",
+              "reason",
+              "attempts",
+              "above_plan"
+            ],
+            "additionalProperties": false,
+            "description": "A phase run by somebody other than the member its plan named."
+          }
+        },
+        "operations": {
+          "type": "object",
+          "properties": {
+            "amendments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "amendment": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "author": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "monitor",
+                      "coordinator",
+                      "config",
+                      "scheduler"
+                    ]
+                  }
+                },
+                "required": [
+                  "amendment",
+                  "at_ms",
+                  "author"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Every change to the run’s definition while it ran, whoever made it."
+            },
+            "node_operations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  },
+                  "op": {
+                    "type": "string",
+                    "enum": [
+                      "add_context",
+                      "redirect",
+                      "pause",
+                      "resume",
+                      "abort",
+                      "fresh",
+                      "interrupt",
+                      "reassign",
+                      "step",
+                      "retry"
+                    ]
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "coordinator"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "node",
+                  "op",
+                  "by",
+                  "count"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Steering, pauses, aborts and dropped sessions, per phase."
+            },
+            "questions": {
+              "type": "object",
+              "properties": {
+                "asked": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "by_operator": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unattended": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Answered by a `--retry-after` timer."
+                },
+                "by_coordinator": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unanswered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "asked",
+                "by_operator",
+                "unattended",
+                "by_coordinator",
+                "unanswered"
+              ],
+              "additionalProperties": false,
+              "description": "Every question a phase was parked on, and who answered it."
+            },
+            "exec_runs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "coordinator"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "failed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "target",
+                  "by",
+                  "count",
+                  "failed"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Commands run by hand in a lane or the integration worktree (`vinta-ai-maestro exec`)."
+            }
+          },
+          "required": [
+            "amendments",
+            "node_operations",
+            "questions",
+            "exec_runs"
+          ],
+          "additionalProperties": false,
+          "description": "What was done to the run while it ran, by a person or its coordinator. Repairs made outside maestro — a wave branch rebuilt in another checkout — leave no record and are not counted."
+        },
+        "cross_phase_failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "wave": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "members": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "description": "The phases merged in that wave."
+              },
+              "at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "wave",
+              "gate",
+              "members",
+              "at_ms",
+              "exit_code"
+            ],
+            "additionalProperties": false,
+            "description": "A gate that every phase passed on its own branch and that failed on the merged wave: two of `members` (or one of them and an earlier wave) disagree. The evidence of a missing dependency or a missing contract test that `missing_dependencies`’ ordering cannot see."
+          }
+        },
+        "unattended_decisions": {
+          "type": "object",
+          "properties": {
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  },
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "retry",
+                      "agent_question",
+                      "plan_question",
+                      "merge_commit",
+                      "other"
+                    ],
+                    "description": "`retry`: a failed attempt retried or stopped. `agent_question`: a design question the agent stopped to ask, given its recommended options. `plan_question`: a pipeline question such as an exhausted review budget, given the plan’s `unattended_answer`. `merge_commit`: a merge commit git refused."
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "unattended",
+                      "coordinator"
+                    ]
+                  },
+                  "answer": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The answer’s value: a choice, or an agent question’s picked option indices as JSON."
+                  },
+                  "waited_ms": {
+                    "description": "How long the question stood unanswered.",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "node",
+                  "at_ms",
+                  "category",
+                  "by",
+                  "answer"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Questions a `--retry-after` timer or the run coordinator answered, oldest first."
+            },
+            "coordinator_actions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "add_context",
+                      "redirect",
+                      "pause",
+                      "abort",
+                      "fresh",
+                      "amend",
+                      "exec",
+                      "gate_cache_invalidate",
+                      "interrupt",
+                      "reassign",
+                      "retry",
+                      "step"
+                    ]
+                  },
+                  "target": {
+                    "description": "An amendment’s targets, an `exec` target or a gate id.",
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "at_ms",
+                  "action"
+                ],
+                "additionalProperties": false
+              },
+              "description": "What the coordinator did on its own, oldest first. Its reasons are in its conversation and, for steering, in the phase’s decisions — not here."
+            },
+            "reverted_deletions": {
+              "description": "Merge resolutions that kept lines a phase deliberately deleted, oldest first: flagged, not refused. Unused code breaks no gate, so check each deletion reached the branch. Absent when there were none, and on post-mortems written before it was checked.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "node": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "The phase whose deletion was reverted, or the branch standing in when no phase on that side touched the path."
+                  },
+                  "path": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "lines": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Lines that side deleted and the resolution kept. A count, never the lines."
+                  },
+                  "branch": {
+                    "type": "string",
+                    "description": "The branch the merge was made on."
+                  },
+                  "fix_rounds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "description": "Conflict-fixer rounds the resolution took; 0 is git’s own merge, the `append_only` union driver."
+                  }
+                },
+                "required": [
+                  "at_ms",
+                  "node",
+                  "path",
+                  "lines",
+                  "branch",
+                  "fix_rounds"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "answers",
+            "coordinator_actions"
+          ],
+          "additionalProperties": false,
+          "description": "Every decision made with nobody watching. A plan whose run decided much on its own left those choices to chance: a design question answered unattended belonged in the plan."
+        },
+        "failed_chores": {
+          "description": "Chores that did not do their job, oldest first. Empty means every chore that ran succeeded.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "chore": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When its last turn on that phase failed."
+              }
+            },
+            "required": [
+              "node",
+              "chore",
+              "at_ms"
+            ],
+            "additionalProperties": false,
+            "description": "A chore whose last turn on a phase failed — the turn broke, or its report said `Status: FAILURE`. The phase is merged regardless (`on_failure: continue`), so whatever the chore was meant to leave, a review canvas or a PR comment, is missing from it."
+          }
+        }
+      },
+      "required": [
+        "unused_dependencies",
+        "missing_dependencies",
+        "wave_conflicts",
+        "gate_costs",
+        "duration_divergences",
+        "critical_path",
+        "idle_capacity",
+        "interventions"
+      ],
+      "additionalProperties": false
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "blocking_cause_unrecorded",
+              "dependency_use_unrecorded",
+              "gate_result_unrecorded",
+              "gate_durations_unrecorded",
+              "integration_record_unavailable",
+              "intervention_effect_unmeasured"
+            ]
+          },
+          "needs": {
+            "type": "string",
+            "description": "What would have to be recorded for the finding to exist."
+          },
+          "edges": {
+            "description": "The edges the gap applies to.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The dependent phase."
+                },
+                "depends_on": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The upstream phase the edge names."
+                }
+              },
+              "required": [
+                "node",
+                "depends_on"
+              ],
+              "additionalProperties": false,
+              "description": "One dependency edge, by id. The plan’s own `artifact` prose is deliberately not carried: the reader has the plan, and this file must stay free of repository text."
+            }
+          },
+          "nodes": {
+            "description": "The phases the gap applies to.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "gates": {
+            "description": "The gates the gap applies to.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "needs"
+        ],
+        "additionalProperties": false,
+        "description": "A finding this run could not produce, and why. Carried in the artifact rather than thrown or defaulted to an empty list: a reader that treats an empty finding as “nothing happened” has to reach past an explicit statement that nothing was recorded."
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "workflow_id",
+    "run",
+    "findings",
+    "gaps"
+  ],
+  "additionalProperties": false
+}

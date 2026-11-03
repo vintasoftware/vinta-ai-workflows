@@ -1,0 +1,837 @@
+/**
+ * The host composition: lanes, the integrator, and the executor over both.
+ *
+ * Split out of `cli/run.ts` when a run stopped being a thing a terminal owns.
+ * Everything here is the *inside* of a run — the worktrees it works in, the
+ * integration worktree its waves merge on, the adapters its phases dispatch to
+ * — and none of it knows whether the process that built it is a CLI awaiting a
+ * report or a daemon that will outlive the request that asked for the run.
+ *
+ * That ignorance is the point. `run` and `POST /api/runs` compose the identical
+ * thing through `startRun`, so a run submitted to a daemon cannot drift into
+ * being a second, subtly different kind of run.
+ */
+import { shellQuote } from '../platform/platform.ts'
+import { guardHookCommand } from '../guard/hook.ts'
+import { dirname, join } from 'node:path'
+
+import type { AmendRunner } from '../amend/amend.ts'
+import { createRebaser } from '../amend/rebase.ts'
+import type { AgentGatePort, GateCachePort } from '../daemon/index.ts'
+import { referencedHarnesses } from '../doctor/index.ts'
+import { createRunExecutor } from '../executor/index.ts'
+import { CodegenCache, codegenLogName } from '../codegen/codegen.ts'
+import { createIntegrationCodegen } from '../codegen/integration.ts'
+import { GateCache } from '../gates/cache.ts'
+import { executeGate, TIMEOUT_EXIT } from '../gates/runner.ts'
+import type { HarnessAdapter } from '../harness/adapter.ts'
+import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
+import { CodexAdapter } from '../harness/codex.ts'
+import { OpencodeAdapter } from '../harness/opencode.ts'
+import type { AgentPermission } from '../harness/permissions.ts'
+import type { ConflictFixer } from '../integration/fixer.ts'
+import { type FreshReason, IntegrationFreshness, looksStale } from '../integration/fresh.ts'
+import { gitLines } from '../integration/git.ts'
+import {
+  type CommitDecision,
+  type CommitFailure,
+  Integrator,
+  type VerifyProgress,
+  type WaveResult,
+} from '../integration/integrator.ts'
+import { createCrewConflictFixer } from '../integration/staffing.ts'
+import type { StoredEvent } from '../journal/events.ts'
+import type { TranscriptEntry } from '../journal/transcript.ts'
+import type { Journal } from '../journal/journal.ts'
+import { describeWorktrees, laneNames, shrinkRemedy, spareHeadroom, worktreeCount } from '../lanes/count.ts'
+import { DiskProbeError } from '../lanes/disk.ts'
+import { DatabaseCommandError } from '../lanes/db-command.ts'
+import { seedLane } from '../lanes/seed.ts'
+import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError, type StackStop } from '../lanes/pool.ts'
+import { errorKind, sanitize } from '../log/index.ts'
+import type { EffectExecutor } from '../pipeline/effects.ts'
+import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
+import type { ResourcePools } from '../resources/pools.ts'
+import { AgentGateBroker, type AgentGateBrokerOptions } from '../resources/agent-gates.ts'
+import { roster } from '../scheduler/crew.ts'
+import { isJudgeGate, type Workflow } from '../types.ts'
+import type { SystemOne } from '../system-one/config.ts'
+import { judgeHookCommand } from '../system-one/hook.ts'
+import { storeFor } from '../cli/paths.ts'
+import { projectSpec } from '../cli/project.ts'
+import type { RedGate } from '../prompts/index.ts'
+
+/**
+ * Where a merge gate's log is filed.
+ *
+ * Its own pseudo-node rather than the incoming phase's, so a gate run against
+ * the *merge* never overwrites that phase's own log for the same gate id — two
+ * different trees, two different answers, and the phase's is the one its review
+ * was based on. Leading underscore for `MONITOR_NODE`'s reason: it must not
+ * collide with a node id a workflow could declare, and it must be a legal path
+ * segment on Windows.
+ */
+const INTEGRATION_NODE = '_integration'
+
+/** What the run needs from whoever owns the lanes — this file, or `RunDeps`. */
+export interface HostWiring {
+  readonly executor: EffectExecutor
+  /** Read after `run_ended`. Absent for an injected executor, which owns its own. */
+  readonly waveResults?: () => readonly IntegrationWaveRecord[]
+  /** The conflict fixer, for the operator's and the coordinator's hands on a running round. */
+  readonly fixer?: ConflictFixer
+  /** `DaemonRun.amend`'s rebase. Absent means an amendment that needs one is refused. */
+  readonly rebase?: NonNullable<AmendRunner['rebase']>
+  /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
+  readonly recycleLane?: (name: string) => Promise<void>
+  /**
+   * A new lane, provisioned mid-run for a spare crew member. Absent for a host
+   * that owns its lanes, which keeps the roster to the plan's.
+   */
+  readonly addLane?: (name: string) => Promise<void>
+  /** `project.lane_seed` into a lane, from lanes named, the integration worktree or the checkout. */
+  readonly seedLane?: (
+    lane: string,
+    from: readonly string[],
+  ) => Promise<readonly { readonly path: string; readonly from: string }[]>
+  /** One lane's environment, for the agent about to run in it. */
+  readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
+  /**
+   * A lane by name, or the integration worktree (`integration`), as a place to
+   * run a command by hand: its path and its environment. Null for a name the
+   * pool does not have.
+   */
+  readonly workspace?: (
+    target: string,
+  ) => { readonly path: string; readonly env: Readonly<Record<string, string>> } | null
+  /** Every lane's full name, for `exec` to resolve short names against and list. */
+  readonly laneNames?: () => readonly string[]
+  /** Stops every lane's compose stack, volumes kept (`LanePool.stopStacks`). */
+  readonly stopStacks?: () => Promise<readonly StackStop[]>
+  /** Who holds the integration worktree now, for `exec`'s "queued behind". */
+  readonly integrationHolder?: () => string | null
+  /** Runs `work` holding the integration worktree's queue, as `label`. */
+  readonly holdIntegration?: <T>(label: string, work: () => Promise<T>, priority?: boolean) => Promise<T>
+  /**
+   * `sync-base`'s wave merge: `incoming` into the wave branch `into`, in the
+   * integration worktree, with the conflict fixer (`Integrator.mergeBranch`).
+   * Called holding the integration queue.
+   */
+  readonly mergeBranch?: (into: string, incoming: string, wave: number) => Promise<unknown>
+  readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
+  /**
+   * The `gate` verb's port, once the run's pools exist.
+   *
+   * A factory rather than a value because the two things it needs are owned on
+   * opposite sides of this seam: the lane pool and the gate cache are
+   * `provision`'s and stay private to it, and `ResourcePools` is built out
+   * there, after. Handing the pools in is cheaper than moving either of the
+   * others out, and it keeps the cache closed by the same `close` that opened
+   * it. Absent for an injected executor, which provisions no lanes to run a
+   * gate against.
+   */
+  readonly gatesFor?: (
+    pools: ResourcePools,
+    leases?: AgentGateBrokerOptions['leases'],
+  ) => AgentGatePort & Pick<AgentGateBroker, 'endTurn' | 'halt'>
+  /** The same cache, for forgetting a verdict by hand (§13.4). Absent with no cache. */
+  readonly gateCache?: GateCachePort
+  /**
+   * Hand an amended workflow (§9) to everything on this side of the seam.
+   *
+   * The scheduler has always taken one; nothing else did, and the run's
+   * definition is read by three objects rather than one. The executor resolves
+   * `gates[id].cmd` per gate run and the gate broker resolves it for a gate an
+   * agent asks for, so an amendment that stopped at the scheduler moved the
+   * snapshot, the journal and the pool reservations while leaving the command
+   * that actually runs exactly as it was.
+   *
+   * The integrator takes one too. It was left out at first on the argument
+   * that topology amendments are refused while the nodes they reach are in
+   * flight — which holds for those nodes and not for the *wave* they sit in, so
+   * a phase nobody depends on lands freely beside running wave-mates. See
+   * `Integrator.adopt`.
+   *
+   * Absent for an injected executor, which owns whatever definition it was
+   * built with.
+   */
+  readonly adopt?: (workflow: Workflow) => void
+  /**
+   * Binds who answers when git refuses to commit a resolved merge
+   * (`IntegratorOptions.onCommitFailure`).
+   *
+   * Late-bound, because the answer comes from the scheduler's node question
+   * and the scheduler is built after this seam, from what it returns. Until
+   * bound — and for an injected executor, which is never bound — the
+   * integrator aborts the merge, which is the one answer that keeps the
+   * shared worktree usable without a person.
+   */
+  readonly bindCommitDecision?: (decide: (failure: CommitFailure) => Promise<CommitDecision>) => void
+  /**
+   * Ends what the scheduler cannot: a conflict-fixer round in progress, and an
+   * unfinished merge of this run's left standing in the integration worktree
+   * (`Integrator.reclaim`). For a run interrupted by a signal, and for a stop
+   * whose drain outlived its deadline. Absent for an injected executor.
+   */
+  readonly interrupt?: () => Promise<void>
+  /**
+   * Handles this process opened. Never the lanes: §8 leaves worktrees, branches
+   * and databases in place for the human who has to read what happened — and,
+   * since runs became resumable, for the attempt that picks the run back up.
+   */
+  close(): void
+}
+
+/**
+ * The `Integrator` the run uses, keeping what `mergeWave` returns.
+ *
+ * A wave's `ConflictRecord`s exist for the duration of that call and reach no
+ * event, so §13.6's `wave_conflicts` is either captured at the one moment it
+ * passes through or reported as unrecorded. Subclassed rather than wrapped
+ * because `Integrator` calls its own methods on `this`.
+ */
+class RecordingIntegrator extends Integrator {
+  readonly records: IntegrationWaveRecord[] = []
+
+  // `members` is passed through: dropping it here made every production merge
+  // fall back to the integrator's own reading of the wave, which is the window
+  // `mergeWave`'s note says an amendment can land in.
+  override async mergeWave(
+    wave: number,
+    members?: readonly string[],
+    forNode?: string,
+  ): Promise<WaveResult> {
+    const result = await super.mergeWave(wave, members, forNode)
+    // Identifiers only, as `ConflictRecord` already is: node ids, paths, rounds.
+    this.records.push({ wave: result.wave, conflicts: result.conflicts })
+    return result
+  }
+}
+
+export interface ProvisionOptions {
+  readonly workflow: Workflow
+  readonly runId: string
+  readonly journal: Journal
+  readonly repoPath: string
+  readonly laneRoot: string
+  readonly adapters: Readonly<Record<string, HarnessAdapter>>
+  readonly agentEnv: Readonly<Record<string, string>>
+  readonly perLaneBytes?: number
+  /** Told what provisioning is doing, one line per step. See `PoolOptions.progress`. */
+  readonly progress?: (message: string) => void
+  /**
+   * Reuse the lane worktrees already on disk instead of creating them.
+   *
+   * Set on a resume, and only there. The worktrees an interrupted run left
+   * behind hold the one thing the journal does not: whatever its agents had
+   * written and not committed. Provisioning over them is what `reap` exists to
+   * make possible *deliberately*, and doing it implicitly on every resume would
+   * silently eat the work the resume was meant to save.
+   */
+  readonly adopt?: boolean
+  /** The operator's classifier (§17), for judge gates and gate triage. */
+  readonly systemOne?: SystemOne
+  /**
+   * The run's plan branch. Lanes and the integration worktree are cut from it
+   * and reset to it, and it is the wave spine's start. Absent: `base_branch`.
+   */
+  readonly planBranch?: string
+}
+
+/**
+ * Provisions the pool and builds the production executor over it.
+ *
+ * The order is the one §8 requires: the pool's disk probe runs first and
+ * throws before a single worktree exists, so a refusal costs nothing to
+ * recover from. Everything after it is pure wiring.
+ */
+export async function provision(options: ProvisionOptions): Promise<HostWiring> {
+  const { workflow, runId, journal, repoPath, laneRoot, adapters } = options
+
+  // A staffed run gives every member its own worktree for the whole run — the
+  // thing that lets a member's session outlive a phase, because a session is
+  // about a directory. The names are derived from the roster here and in the scheduler, from the
+  // same function, so neither can drift from the other.
+  const staffed = roster(workflow.crew).length > 0
+  const lanes = laneNames(workflow, runId)
+
+  const pool = await LanePool.provision({
+    repoPath,
+    poolRoot: laneRoot,
+    runId,
+    // The scheduler names its lane slots the same way, so a node's assigned
+    // lane is one of these worktrees rather than a directory nobody made.
+    laneCount: lanes.length,
+    ...(staffed ? { laneNames: lanes } : {}),
+    // The desks `addLane` below may add mid-run, weighed now with the rest.
+    spareHeadroom: spareHeadroom(workflow),
+    baseRef: options.planBranch ?? workflow.base_branch,
+    // With no `project` block a lane is a worktree and nothing else, and
+    // `migrateCmd` is never reached — templates are built per declared role.
+    project: projectSpec(workflow.project),
+    ...(options.adopt === true ? { adopt: true } : {}),
+    ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
+    ...(options.progress === undefined ? {} : { progress: options.progress }),
+  })
+
+  // Read once, as one object, rather than through `pool.integration` twice.
+  // `laneEnv` below goes through the pool on every call because a *lane* slot
+  // can be handed back as a different `Lane` after a recycle re-provisions it —
+  // but nothing recycles the integration worktree. `LanePool.recycle` is
+  // reachable only through `HostWiring.recycleLane`, which the scheduler calls
+  // with a node's lane slot, never `${runId}-integ`. So the object is stable
+  // for the pool's life, and taking the path and the environment from the same
+  // read is what keeps them describing the same tree: a fixer pointed at one
+  // directory while carrying another one's compose project would be a worse
+  // failure than a stale pair, and harder to see.
+  const integration = pool.integration
+  const integrationPath = integration.path
+  // The definition as amended, for the one reader below that is a closure
+  // rather than an object with an `adopt`: `verify` captured the snapshot the
+  // run was provisioned with and kept gating merges on it.
+  let current = workflow
+  // Bound by `bindCommitDecision` once a scheduler exists to ask through.
+  let decideCommit: ((failure: CommitFailure) => Promise<CommitDecision>) | null = null
+  // Every fixer built, the start-time one and one per amendment: a teardown
+  // interrupts all of them, since a round already running when an amendment
+  // landed keeps the fixer it started with.
+  const fixers: ConflictFixer[] = []
+  const fixerFor = (definition: Workflow): ConflictFixer => {
+    const built = conflictFixer(
+      definition,
+      adapters,
+      // The same overlay every lane's agent gets. The fixer is an agent: it
+      // reports progress and asks for gates over the same `MAESTRO_URL` /
+      // `MAESTRO_TOKEN` / `MAESTRO_RUN` triple, and without it a fix round is
+      // the one agent turn in a run that cannot talk back to the daemon.
+      { ...integration.env, ...options.agentEnv },
+      () => journal.crewAssignments(runId),
+      // Into the incoming phase's own transcript, beside the implementer, fixer
+      // and chore turns that produced the branches now being merged — which is
+      // where somebody asking "why does the merge look like this" is already
+      // reading. Its `by.role` is what keeps it distinguishable from them.
+      (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
+    )
+    fixers.push(built)
+    return built
+  }
+  const fixer = fixerFor(workflow)
+  // Which tree the integration worktree's gate state belongs to, shared by
+  // `verify` here and the executor's base and wave gates (`integration/fresh.ts`).
+  const freshness = new IntegrationFreshness({
+    onFresh: (gate, reason) => journal.append({ runId, type: 'integration_fresh_state', payload: { gate, reason } }),
+  })
+  const codegenCache = CodegenCache.forProject(repoPath)
+  const integrator = new RecordingIntegrator({
+    // `Workflow` satisfies `IntegrationPlan` structurally.
+    plan: workflow,
+    // Codegen steps and the union driver, over the workflow as amended. Logs
+    // under the integration worktree's pseudo-node, beside its merge gates.
+    codegen: createIntegrationCodegen({
+      workflow: () => current,
+      env: { ...integration.env, ...options.agentEnv },
+      logPath: (id) => journal.gateLogPath(runId, INTEGRATION_NODE, codegenLogName(id)),
+      cache: codegenCache,
+      attributesFile: join(dirname(journal.gateLogPath(runId, INTEGRATION_NODE, 'merge')), 'merge-attributes'),
+      onResult: (forNode, run) => {
+        journal.append({
+          runId,
+          nodeId: forNode,
+          type: 'codegen_result',
+          payload: {
+            step: run.id,
+            where: 'integration',
+            status: run.status,
+            exit_code: run.exitCode,
+            duration_ms: run.durationMs,
+            ...(run.skipped === undefined ? {} : { skipped: run.skipped }),
+            ...(run.nondeterministic === true ? { nondeterministic: true } : {}),
+          },
+        })
+      },
+    }),
+    integrationPath,
+    ...(options.planBranch === undefined ? {} : { runBase: options.planBranch }),
+    fixer,
+    /**
+     * The gate a conflict resolution has to pass before it is committed.
+     *
+     * This seam has existed since the conflict loop did, documented as "a
+     * resolution that does not build is not a resolution" — and nothing ever
+     * supplied it. So every merge an agent resolved went in ungated: six of
+     * them in one observed run, all in the same two files, none of them run
+     * past a linter or a test before they became the base the next phase built
+     * on. The phases either side were gated to the hilt; the merge between them
+     * was not.
+     *
+     * Runs the *union* of the conflicting nodes' declared gates, in the
+     * integration worktree, with that worktree's own environment — the same
+     * environment the fixer agent gets, for the same reason: without it the
+     * commands resolve to the wrong compose project and the wrong database.
+     *
+     * Deliberately not cached. `GateCache` keys on the lane's tree hash, and a
+     * merge produces a tree nothing has ever gated, so a lookup could only ever
+     * miss — and asking would put an entry under the integration worktree's
+     * hash that no lane will ever match.
+     *
+     * A red gate returns false, which spends another fix round rather than
+     * failing the phase: the fixer gets told, and the round budget is what
+     * bounds it.
+     */
+    verify: async (cwd: string, force?: FreshReason, progress?: VerifyProgress): Promise<true | RedGate> => {
+      // Command gates only. A judge gate's question is about one phase's diff,
+      // and a conflict resolution is not any phase's — asking it of the merge
+      // would judge a diff the question was never written for.
+      const gates = [...new Set(current.nodes.flatMap((node) => node.gates))].flatMap((id) => {
+        const gate = current.gates[id]
+        return gate === undefined || isJudgeGate(gate) ? [] : [[id, gate] as const]
+      })
+      for (const [id, gate] of gates) {
+        const logPath = journal.gateLogPath(runId, INTEGRATION_NODE, id)
+        // Reported before it runs, with its log, so the step is on the record
+        // while the gate writes rather than once it has finished.
+        progress?.started(id, logPath)
+        const result = await freshness.run(
+          id,
+          gate,
+          cwd,
+          (chosen) =>
+            executeGate({
+              gateId: id,
+              gate: chosen,
+              cwd,
+              env: { ...integration.env, ...options.agentEnv },
+              // Filed under the integration worktree's own pseudo-node, so a merge
+              // gate's log never overwrites a phase's log for the same gate id.
+              logPath,
+            }),
+          force,
+        )
+        progress?.finished(id, result.exitCode === 0 ? 'ok' : 'failed')
+        // Named, with its log, so the next fix round reads why and the error
+        // the rounds end on says where the cause is.
+        if (result.exitCode !== 0) {
+          const stale = gate.fresh_cmd === undefined && (await looksStale(logPath))
+          return { gateId: id, logPath, exitCode: result.exitCode, ...(stale ? { staleSchema: true as const } : {}) }
+        }
+      }
+      return true
+    },
+    // `workflow.post_merge` on what a clean merge combined, under the
+    // integration worktree's pseudo-node beside its merge gates.
+    postMerge: async (cwd: string, files: readonly string[], forNode: string) => {
+      const hook = current.post_merge
+      if (hook === undefined) return { ok: true, changed: [] }
+      const quoted = files.map((file) => shellQuote(file)).join(' ')
+      const result = await executeGate({
+        gateId: 'post-merge',
+        gate: { cmd: hook.cmd.split('{files}').join(quoted), requires: [], timeout_s: hook.timeout_s },
+        cwd,
+        env: { ...integration.env, ...options.agentEnv },
+        logPath: journal.gateLogPath(runId, INTEGRATION_NODE, 'post-merge'),
+      })
+      const changed = await gitLines(cwd, ['diff', '--name-only'])
+      const ok = result.status === 'passed'
+      journal.append({
+        runId,
+        type: 'post_merge_result',
+        payload: {
+          node: forNode,
+          status: !ok ? 'failed' : changed.length > 0 ? 'changed' : 'clean',
+          files: files.length,
+          changed: changed.length,
+          exit_code: result.exitCode ?? TIMEOUT_EXIT,
+        },
+      })
+      return { ok, changed }
+    },
+    // Filed against the incoming node — the last of `nodes`, which is the one
+    // whose merge hit the conflict and the one an operator is watching. The
+    // other participants are in the payload, because a conflict is never one
+    // phase's alone and a report naming only the second arrival reads as a
+    // verdict on it.
+    // Routed to the scheduler's node question once one is bound; `abort`
+    // until then, for the reason `bindCommitDecision` gives.
+    onCommitFailure: (failure) =>
+      decideCommit === null ? Promise.resolve('abort' as const) : decideCommit(failure),
+    // Against the node whose turn the merge is: that is the phase the operator
+    // is watching sit in `running`.
+    onStep: (forNode, payload) => {
+      journal.append({ runId, nodeId: forNode, type: 'integration_step', payload })
+    },
+    onReclaimed: (merge) => {
+      journal.append({
+        runId,
+        type: 'integration_reclaimed',
+        payload: { into: merge.into, incoming: merge.incoming, kept: merge.kept },
+      })
+    },
+    onFixReplayed: (forNode, files) => {
+      journal.append({ runId, nodeId: forNode, type: 'integration_fix_replayed', payload: { files } })
+    },
+    onConflict: (conflict) => {
+      journal.append({
+        runId,
+        nodeId: conflict.nodes[conflict.nodes.length - 1] ?? conflict.branch,
+        type: 'node_conflict',
+        payload: {
+          where: conflict.where,
+          branch: conflict.branch,
+          nodes: conflict.nodes,
+          paths: conflict.paths,
+          rounds: conflict.rounds,
+          ...(conflict.revertedDeletions === undefined
+            ? {}
+            : {
+                reverted_deletions: conflict.revertedDeletions.map(({ path, node, lines }) => ({ path, node, lines })),
+              }),
+        },
+      })
+    },
+  })
+
+  // A resume picks up an integration worktree a pause, a stop or a kill may
+  // have caught mid-merge. The merge is redone by whichever phase needs the
+  // worktree next anyway; sweeping it now means none of them starts on it, and
+  // the journal says so before anything else happens. A merge this run did not
+  // start is left where it is, for that phase to refuse by name.
+  if (options.adopt === true) await integrator.reclaim().catch(() => null)
+
+  const cache = new GateCache(repoPath)
+  // Every gate broker `gatesFor` hands out, so `adopt` can reach all of them.
+  const brokers: AgentGateBroker[] = []
+  const executor = createRunExecutor({
+    workflow,
+    runId,
+    journal,
+    integrator,
+    integrationPath,
+    laneRoot,
+    lanes: pool.lanes.map(({ name, path, env }) => ({
+      name,
+      path,
+      env: { ...env, ...options.agentEnv },
+    })),
+    cache,
+    codegenCache,
+    integrationEnv: { ...integration.env, ...options.agentEnv },
+    integrationFreshness: freshness,
+    ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
+    onIntegrationWait: (nodeId, state, holder) => {
+      journal.append({
+        runId,
+        nodeId,
+        type: 'node_wait',
+        payload: { on: 'integration_worktree', state, holder },
+      })
+    },
+  })
+
+  const rebasePlan = createRebaser({
+    integrationPath,
+    ...(options.planBranch === undefined ? {} : { runBase: options.planBranch }),
+    // The base the run recorded, not the one the amended graph implies: it is
+    // the fork point the rebase replays from.
+    baseOf: (nodeId) =>
+      journal.nodes(runId).find((row) => row.node_id === nodeId)?.base_branch ?? null,
+    onRebased: (nodeId, base) => {
+      journal.append({
+        runId,
+        nodeId,
+        type: 'node_assigned',
+        payload: { branch: integrator.nodeBranch(nodeId), base_branch: base },
+      })
+    },
+  })
+
+  return {
+    executor,
+    // `fixer interrupt` / `fixer reassign`, and a harness switch reaching the
+    // one agent the scheduler does not spawn.
+    fixer,
+    waveResults: () => integrator.records,
+    // Through the executor's queue: the rebase and the wave merges write in
+    // the same worktree, and an amendment lands whenever the nodes it blocks
+    // are idle — which says nothing about whether another wave's merge is in
+    // flight in that directory.
+    rebase: async (request) => await executor.integration(() => rebasePlan(request)),
+    adopt: (amended: Workflow) => {
+      current = amended
+      executor.adopt(amended)
+      // With a fixer staffed from the amended crew: one built from the
+      // start-time workflow kept spawning on a harness the amendment had
+      // taken every desk off.
+      integrator.adopt(amended, fixerFor(amended))
+      // The pool too: a single-use lane re-provisioned after this point gets
+      // the amended `env_files`, not the ones the run started with.
+      pool.adoptProject(projectSpec(amended.project))
+      for (const broker of brokers) broker.adopt(amended)
+    },
+    recycleLane: async (name: string) => {
+      await pool.recycle(name)
+    },
+    // Into the executor as well as the pool: the executor resolves a node's
+    // lane by name from the list it was built with.
+    seedLane: async (name: string, from: readonly string[]) => {
+      const paths = current.project?.lane_seed ?? []
+      if (paths.length === 0) return []
+      const sources = [
+        ...from.flatMap((lane) => {
+          const found = pool.lanes.find((candidate) => candidate.name === lane)
+          return found === undefined ? [] : [{ name: lane, path: found.path }]
+        }),
+        { name: 'integration', path: integrationPath },
+        { name: 'checkout', path: repoPath },
+      ]
+      return seedLane(pool.lane(name).path, paths, sources)
+    },
+    addLane: async (name: string) => {
+      const lane = await pool.addLane(name)
+      executor.addLane({ name: lane.name, path: lane.path, env: { ...lane.env, ...options.agentEnv } })
+    },
+    bindCommitDecision: (decide) => {
+      decideCommit = decide
+    },
+    // The run is being torn down by a signal. The scheduler ends the turns it
+    // holds; this ends the one it does not — a fix round — and leaves the
+    // shared worktree with no merge in progress, which is the state every
+    // resume and every later phase needs it in.
+    //
+    // Only a merge this run started: one somebody else has standing there is
+    // theirs, and the next phase to need the worktree names it.
+    interrupt: async () => {
+      for (const built of fixers) await built.interrupt?.()
+      await integrator.reclaim().catch(() => null)
+    },
+    // Read through the pool rather than captured, because a recycle that had to
+    // re-provision hands back a different `Lane` object for the same slot.
+    laneEnv: (name: string) => ({ ...pool.lane(name).env, ...options.agentEnv }),
+    // Where `exec` runs a command by hand: a lane, or the integration worktree,
+    // with the same environment its agents and gates get — the lane's own
+    // database and compose project, which a shell in the main checkout does
+    // not have.
+    workspace: (target: string) => {
+      if (target === 'integration') return { path: integrationPath, env: { ...integration.env, ...options.agentEnv } }
+      const lane = pool.lanes.find((candidate) => candidate.name === target)
+      return lane === undefined ? null : { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
+    },
+    laneNames: () => pool.lanes.map((lane) => lane.name),
+    holdIntegration: (label, work, priority) => executor.integration(work, null, label, priority === true),
+    integrationHolder: () => executor.integrationHolder(),
+    mergeBranch: (into, incoming, wave) => {
+      const members: string[] = []
+      for (let at = 1; at <= wave; at += 1) members.push(...integrator.nodesAt(at))
+      return integrator.mergeBranch(into, incoming, members)
+    },
+    stopStacks: () => pool.stopStacks(),
+    // The same cache the executor was given, so a gate an agent ran is a hit
+    // for the `gate` node afterwards. Two caches over one project would be two
+    // databases in one file's place and the hits would land in whichever one
+    // nobody asked.
+    gatesFor: (pools, leases) => {
+      const broker = new AgentGateBroker({
+        workflow,
+        runId,
+        journal,
+        pools,
+        cache,
+        codegenCache,
+        // The lease broker's holder index, so a gate asked for from inside a
+        // `with` on its own pool is refused instead of waiting on itself.
+        ...(leases === undefined ? {} : { leases }),
+        // Through the pool for `laneEnv`'s reason, and with the same agent
+        // environment overlaid: a gate run from inside a turn must see the
+        // lane's forked database and compose project, exactly as the gate node's
+        // run of it will.
+        lane: (name: string) => {
+          const lane = pool.lane(name)
+          return { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
+        },
+      })
+      // Kept so an amendment reaches it. `gatesFor` is called once per run
+      // today, but a broker this function forgot would be a broker running
+      // last week's gate command with nothing anywhere saying so.
+      brokers.push(broker)
+      return broker
+    },
+    // What changed under a member while it was away: the files that differ
+    // between the phase it last worked on and what is checked out now. It is
+    // the whole safety argument for continuing a session across a phase, so a
+    // failure here is reported as "unknown" by the caller rather than swallowed
+    // into "nothing changed".
+    laneDelta: async (name: string, priorNodeId: string) => {
+      const lane = pool.lane(name)
+      return await gitLines(lane.path, [
+        'diff',
+        '--name-only',
+        integrator.nodeBranch(priorNodeId),
+        'HEAD',
+      ])
+    },
+    gateCache: {
+      invalidate: (gateId, treeHash) => cache.invalidate(gateId, treeHash),
+      forgetDatabases: (gateId) => {
+        const gate = current.gates[gateId]
+        return gate !== undefined && !isJudgeGate(gate) && freshness.forget(gateId, gate)
+      },
+    },
+    close: () => cache.close(),
+  }
+}
+
+/**
+ * The agent a conflicted merge is handed to, in the integration worktree.
+ *
+ * A run whose adapters were injected need not carry the default harness. The
+ * orchestrator never resolves a conflict itself, so with no agent to hand it
+ * to the merge exhausts its rounds and stops as the plan defect it is.
+ *
+ * On a staffed run the model comes off the roster rather than `defaults`, and
+ * the journal is read at conflict time to find whose work is in the conflict —
+ * both decided in `integration/staffing.ts`, which is also where the reason a
+ * member's *session* is left behind is written down.
+ *
+ * `env` is the integration worktree's own, agent overlay included, and it is
+ * not optional in practice: it was the one agent spawn in the run that did not
+ * get its tree's environment, and the missing `COMPOSE_PROJECT_NAME` and
+ * `COMPOSE_FILE` let a fix round publish the project's ports on the host under
+ * a compose project nobody had reserved. `AgentTask.env` describes the failure
+ * class; this was the last instance of it.
+ */
+function conflictFixer(
+  workflow: Workflow,
+  adapters: Readonly<Record<string, HarnessAdapter>>,
+  env: Readonly<Record<string, string>>,
+  crewAssignments: () => readonly StoredEvent[],
+  record: (nodeId: string, entry: TranscriptEntry) => void,
+): ConflictFixer {
+  return createCrewConflictFixer({
+    adapters,
+    defaults: { harness: workflow.defaults.harness, model: workflow.defaults.model },
+    crew: workflow.crew,
+    env,
+    crewAssignments,
+    record,
+    fallbacks: workflow.defaults.model_fallbacks,
+  })
+}
+
+/**
+ * How much of an unenumerated error's own message a refusal repeats. The bound
+ * `LaneSetupError` chose for a failing command's stderr, for its reason:
+ * enough to name a cause, not enough to become the log.
+ */
+const REFUSAL_DETAIL_CHARS = 500
+
+/**
+ * What an error says about itself, if anything, made safe to print.
+ *
+ * Through the log's own `sanitize`, so the sentence handed back is bounded and
+ * checked against the process's redaction set by exactly the rules the daemon
+ * log would apply to it afterwards — a refusal is printed to a terminal as well
+ * as logged, and a terminal has no sink to clean it on the way out.
+ */
+function detailOf(error: unknown): string | null {
+  const message = sanitize({ message: (error as { message?: unknown })?.message })['message']
+  if (typeof message !== 'string' || message.length === 0) return null
+  const bounded =
+    message.length <= REFUSAL_DETAIL_CHARS ? message : `${message.slice(0, REFUSAL_DETAIL_CHARS)}…`
+  return `${errorKind(error)}: ${bounded}`
+}
+
+/**
+ * Why the pool refused, in the one line the operator gets.
+ *
+ * Byte counts, paths, lane names — and, for an error this function does not
+ * enumerate, that error's own message, capped and redacted.
+ *
+ * That last part used to be excluded, on a §11 reading `LaneSetupError` had
+ * already revised for the same reason: §11 keeps repository *contents* out of
+ * the record — diffs, file bodies, gate output — and an error's own complaint
+ * about a lock file or a ref is not that. Excluded, a `git config` lock
+ * collision that made every resume of a `hooks: false` project impossible
+ * reached both the operator and `run.provision_failed` as "could not provision
+ * the lane pool under …", while the error itself had said `could not lock
+ * config file`. A line that names no cause can be read all afternoon without
+ * anything being learned from it.
+ */
+export function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
+  if (error instanceof DiskProbeError) {
+    const { requiredBytes, availableBytes } = error.probe
+    // The pool's own count when it gave one, which knows what a resume adopted.
+    const count = error.count ?? worktreeCount(workflow)
+    return (
+      `vinta-ai-maestro: refusing to provision ${describeWorktrees(count)} — ` +
+      `${requiredBytes} bytes needed for ${count.creating} new, ${availableBytes} available under ${laneRoot}. ` +
+      `Free space, or ${shrinkRemedy(workflow)}.`
+    )
+  }
+  // The pool's own errors already say which lane and what went wrong; a generic
+  // line over the top of them is what made a failing `setup_cmd` take an
+  // afternoon to identify. `LaneAdoptError` belongs here too: it names the
+  // directory and what is wrong with it, and prefixing it with a sentence about
+  // the pool buries the one decision the operator has to make.
+  if (
+    error instanceof LaneSetupError ||
+    error instanceof DatabaseCommandError ||
+    error instanceof LaneEnvFileError ||
+    error instanceof LaneAdoptError
+  ) {
+    return `vinta-ai-maestro: ${error.message}`
+  }
+  // Everything else: the generic line, plus whatever the error itself said.
+  // Nothing means nothing — a thrown non-error carries no sentence to repeat,
+  // and inventing one would be worse than the generic line.
+  const detail = detailOf(error)
+  return detail === null
+    ? `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
+    : `vinta-ai-maestro: could not provision the lane pool under ${laneRoot} — ${detail}`
+}
+
+/**
+ * One real adapter per harness the workflow could dispatch to, each carrying
+ * the operator's permission policy.
+ *
+ * The policy reaches the adapters here and nowhere else: it is an argument to
+ * the command, not a field in the plan. A committed document that could say
+ * "run agents without approvals" would say it on every machine that ever runs
+ * it, including ones whose owner never agreed to that.
+ *
+ * The repository root goes with it, as the directory every agent may read.
+ * Lanes are worktrees of a branch, so whatever the operator has not committed
+ * is in their checkout and not in any lane — and a phase that reaches for it
+ * is refused with a message that reads like a question nobody can answer.
+ * Writing there stays impossible; `claude-code.ts` pairs the grant with the
+ * deny list that keeps it to reading.
+ */
+export function defaultAdapters(
+  workflow: Workflow,
+  permission: AgentPermission,
+  repoPath: string,
+  systemOne?: SystemOne,
+): Record<string, HarnessAdapter> {
+  const adapters: Record<string, HarnessAdapter> = {}
+  // §17.6. Built only when the mode asks for it and the operator configured a
+  // judge; otherwise absent, and a `judged` claude-code spawn refuses itself.
+  const judge = permission === 'judged' ? systemOne?.judges.permission : undefined
+  for (const id of referencedHarnesses(workflow)) {
+    adapters[id] =
+      id === 'claude-code'
+        ? new ClaudeCodeAdapter({
+            permission,
+            readRoots: [repoPath],
+            settingsDir: join(storeFor(repoPath), 'harness'),
+            ...(judge === undefined
+              ? {}
+              : { judgeHook: { command: judgeHookCommand(), tools: judge.tools, timeoutS: 60 } }),
+            // The gate guard, in every mode (`src/guard/`). The run registers
+            // the daemon side in `startRun`; without it the hook allows.
+            guardHook: { command: guardHookCommand(), timeoutS: 10 },
+          })
+        : id === 'codex'
+          ? new CodexAdapter({ permission })
+          : new OpencodeAdapter()
+  }
+  return adapters
+}
+

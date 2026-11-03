@@ -1,0 +1,13 @@
+{
+  "$comment": "The published build. `rewriteRelativeImportExtensions` is the load-bearing option: the source imports with `.ts` extensions, which is what Node type stripping needs and what the repo reads, and emitted JS cannot keep them - so each relative specifier is rewritten to `.js` on the way out. Without it every import in dist/ points at a file that is not there. `tsconfig.json` stays noEmit for typecheck + vitest, which transpile in memory and never need output; this one is the only thing that writes dist/. Tests are excluded because a consumer installs a CLI, not a suite.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": false,
+    "sourceMap": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src"]
+}

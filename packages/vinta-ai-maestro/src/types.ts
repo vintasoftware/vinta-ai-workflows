@@ -1,0 +1,1356 @@
+/**
+ * Source of truth for the workflow document.
+ *
+ * `schemas/workflow.v1.schema.json` at the repo root is GENERATED from this
+ * file (`pnpm --filter vinta-ai-maestro schema:gen`) and drift-checked in CI. Edit
+ * here, never there.
+ *
+ * Shape-level rules live in these schemas. Cross-reference rules — a
+ * `depends_on` naming a node that exists, a graph without cycles — cannot be
+ * expressed in JSON Schema and live in `validate.ts`.
+ */
+import { z } from 'zod'
+
+export const HARNESS_IDS = ['claude-code', 'codex', 'opencode'] as const
+
+/** Side effects a pipeline transition may invoke. The host owns this catalog. */
+export const EFFECT_IDS = [
+  'spawn_agent',
+  'run_gate',
+  'run_chore',
+  'git_branch',
+  'git_merge',
+  'git_push',
+  'open_pr',
+  'write_tracking',
+  'await_human',
+  'notify',
+  'grant_fix_rounds',
+] as const
+
+export const AGENT_ROLES = ['implementer', 'fixer', 'chore', 'conflict-fixer'] as const
+
+/** Where in a phase a chore runs. `run_chore`'s `when` param selects one. */
+export const CHORE_TIMINGS = ['review', 'after_review', 'after_pr'] as const
+export type ChoreTiming = (typeof CHORE_TIMINGS)[number]
+
+const Id = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'must be lowercase kebab-case')
+  .min(1)
+
+const Passthrough = z
+  .record(z.string(), z.unknown())
+  .describe('Host-owned passthrough. Preserved verbatim and never interpreted.')
+
+// ---------------------------------------------------------------------------
+// Pipeline state machines — close to vinta-state-machine-editor's own shape,
+// but NOT identical: effects are one flat array here and ordered
+// {before, after} hooks there, `trigger` is a string here and an object there,
+// four of its fields are required and optional here, and its `from` is
+// nullable. `ui/src/editor-model.ts` owns that mapping. SPEC §5.2 originally
+// claimed there was no translation layer; there is one, and pretending
+// otherwise made it somebody's surprise instead of a designed seam.
+// ---------------------------------------------------------------------------
+
+export const SideEffectSchema = z.strictObject({
+  id: Id.describe('Unique within its containing state or transition.'),
+  definitionId: z.enum(EFFECT_IDS).describe('Which catalog verb this effect invokes.'),
+  name: z.string().optional().describe('Display label. Falls back to definitionId.'),
+  params: z.record(z.string(), z.unknown()).default({}).describe('Arguments for the verb.'),
+  enabled: z.boolean().default(true),
+  description: z.string().optional(),
+  data: Passthrough.optional(),
+})
+
+export const StateNodeSchema = z.strictObject({
+  id: Id,
+  name: z.string().min(1),
+  position: z.strictObject({ x: z.number(), y: z.number() }).describe('Canvas position.'),
+  onEnter: z.array(SideEffectSchema).default([]).describe('Effects run on entering the state.'),
+  onLeave: z.array(SideEffectSchema).default([]).describe('Effects run on leaving the state.'),
+  color: z.string().optional(),
+  description: z.string().optional(),
+  data: Passthrough.optional(),
+})
+
+export const TransitionSchema = z.strictObject({
+  id: Id,
+  name: z.string().optional(),
+  from: Id.describe('Source state id.'),
+  to: Id.describe('Target state id.'),
+  trigger: z.string().optional().describe('Event name that fires this transition.'),
+  guard: z
+    .string()
+    .optional()
+    .describe(
+      'Opaque boolean expression over the documented guard context ' +
+        '(review.verdict, gate.exit_code, human.answer, fix_rounds, node.*, run.*). ' +
+        'Evaluated by a restricted evaluator with no host access.',
+    ),
+  effects: z.array(SideEffectSchema).default([]),
+  data: Passthrough.optional(),
+})
+
+export const PipelineSchema = z
+  .strictObject({
+    states: z.array(StateNodeSchema).min(1),
+    transitions: z.array(TransitionSchema).default([]),
+    initialStateIds: z.array(Id).min(1),
+    finalStateIds: z.array(Id).default([]),
+    data: Passthrough.optional(),
+  })
+  .describe('A per-phase pipeline, authored in vinta-state-machine-editor.')
+
+// ---------------------------------------------------------------------------
+// The plan graph
+// ---------------------------------------------------------------------------
+
+export const ResourceSchema = z.strictObject({
+  capacity: z
+    .number()
+    .int()
+    .min(1)
+    .describe('Maximum concurrent holders. A starting hint for `lane` — see admission control.'),
+  kind: z
+    .enum(['worktree', 'semaphore'])
+    .describe('`worktree` pools are provisioned lanes; `semaphore` pools are pure counters.'),
+  scope: z
+    .enum(['run', 'host'])
+    .optional()
+    .describe(
+      '`run` — the default — counts only this run’s holders. `host` also counts every other ' +
+        'run on this machine holding a pool of the same name, through lock files under ' +
+        '`~/.vinta-ai-maestro/host-leases/` (`VINTA_AI_MAESTRO_HOST_LEASES` moves them), so two ' +
+        'runs on one laptop take turns at the full suite instead of running two at once. Only ' +
+        'meaningful on a `semaphore` pool.',
+    ),
+  match: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Command patterns that need this pool — `pytest*`, `pnpm test*`. `*` matches any run of ' +
+        'characters and the rest is literal, compared against the whole command line with ' +
+        'whitespace collapsed. On a harness that can enforce it, an agent running a matching ' +
+        'command without `vinta-ai-maestro with <pool> --` in front of it is refused and told ' +
+        'to take the lease. A guardrail against habit, not a sandbox: `bash -c` or a script ' +
+        'that runs the same suite is not seen. Only meaningful on a `semaphore` pool.',
+    ),
+  description: z.string().optional(),
+})
+
+// ---------------------------------------------------------------------------
+// Gates, and the one part of a gate a run may retune by itself
+//
+// The monitor can amend a live run (§9, `src/intervention/`), and a gate's
+// command is the field worth amending: a suite run without `--reuse-db`
+// re-creates its test database on every gate run, in every lane, for the whole
+// run. Nothing is broken in that run and nobody has to be woken up — it is
+// simply mis-tuned, and the evidence is in the gate log.
+//
+// The hazard is that `--reuse-db` and `-k slow` are one keystroke apart. A
+// timeout or a fix budget that is set wrongly costs time; a gate command that
+// is narrowed wrongly turns a red gate green and *looks like success in every
+// log there is*. So an autonomous edit of a command is not allowed by default
+// and is not bounded by the model's judgement. It is bounded by `tuning`: a
+// list of flags the plan's author wrote down, in the committed document, under
+// review, before the run started.
+//
+// A gate with no `tuning` block cannot be retuned at all. That is the default,
+// and it is the right one — the capability has to be granted deliberately, for
+// the same reason `harness/permissions.ts` gives for keeping the agent
+// permission level out of this document entirely: a file in a repository may
+// say which model writes a phase, and may not say how much of somebody else's
+// machine that model gets. What it may say, here, is a closed list of flags.
+// ---------------------------------------------------------------------------
+
+export const GateTuningSchema = z
+  .strictObject({
+    allowed_flags: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe(
+        'Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as ' +
+          'exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not ' +
+          '`--reuse-db-and-more`, and not a flag that merely starts the same way. A flag ' +
+          'taking a separate value (`-n auto`) is written as the two tokens it is. ' +
+          'Removing or rewriting an existing token is never permitted, whatever is listed ' +
+          'here: the proposed command must be this one’s tokens, in order, plus additions.',
+      ),
+  })
+  .describe(
+    'What an autonomous retune of this gate may do. Absent — the default — means the command ' +
+      'is not the monitor’s to touch.',
+  )
+
+/**
+ * What kind of check a gate is. A type is what lets a gate inherit its command
+ * from the project instead of every plan repeating it — `test` reads
+ * `commands.test_unit` out of `.vinta-ai-workflows.yaml`, the same line
+ * `implement-plan` runs — and what `maestro.gates.<type>` there overrides for
+ * maestro alone. See `src/config/`.
+ */
+export const GATE_TYPES = ['test', 'lint', 'typecheck', 'e2e'] as const
+export type GateType = (typeof GATE_TYPES)[number]
+
+/**
+ * Which of a gate's two commands a phase gate runs. `scoped` — the default —
+ * runs `scoped_cmd` where a gate has one, and the full `cmd` on the gate that
+ * re-runs after a wave merge, where the regressions between phases show up.
+ * `full` runs `cmd` everywhere.
+ */
+export const GATE_SCOPES = ['scoped', 'full'] as const
+export type GateScope = (typeof GATE_SCOPES)[number]
+
+/** How far above its planned tier a phase may be moved (`defaults.substitution`). */
+export const SUBSTITUTIONS = ['same_tier', 'up_one_tier', 'any'] as const
+export type Substitution = (typeof SUBSTITUTIONS)[number]
+
+/** When the project's gates run in full on a merged wave (`defaults.wave_gates`). */
+export const WAVE_GATES = ['off', 'final', 'every'] as const
+export type WaveGates = (typeof WAVE_GATES)[number]
+
+/** What a phase's `verify` runs once its review approves (`defaults.verify_gates`). */
+export const VERIFY_GATES = ['full', 'scoped'] as const
+export type VerifyGates = (typeof VERIFY_GATES)[number]
+
+/** Whether a multi-dependency phase's merged base is gated (`defaults.base_gates`). */
+export const BASE_GATES = ['full', 'off'] as const
+export type BaseGates = (typeof BASE_GATES)[number]
+
+/** What `scoped_cmd` may name. Substituted shell-quoted, space-separated. */
+export const SCOPE_PLACEHOLDERS = ['{changed_files}', '{touches}'] as const
+
+export const CommandGateSchema = z.strictObject({
+  type: z
+    .enum(GATE_TYPES)
+    .optional()
+    .describe(
+      'What kind of check this is. A typed gate takes any field it does not set — `cmd`, ' +
+        '`scoped_cmd`, `requires`, `timeout_s` — from the project: `maestro.gates.<type>` in ' +
+        '`.vinta-ai-workflows.yaml`, then the matching `commands.*` line there (`test` → ' +
+        '`test_unit`, `lint` → `lint`, `typecheck` → `build`, `e2e` → `e2e`). A field set here ' +
+        'wins over both.',
+    ),
+  cmd: z
+    .string()
+    .min(1)
+    .describe('Shell command run in the node’s lane. Not an agent. The full check.'),
+  scoped_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The same check narrowed to what the phase changed, run by a phase gate under ' +
+        '`defaults.gate_scope: scoped`. `{changed_files}` is the files the lane changed against ' +
+        'the phase’s base and `{touches}` the node’s Touch List, each substituted shell-quoted ' +
+        'and space-separated. The command must accept any path it is given — `vitest related ' +
+        '{changed_files} --run`, `jest --findRelatedTests {changed_files}` — because a source ' +
+        'file with no tests is a normal member of the list. When a placeholder would substitute ' +
+        'nothing, `cmd` runs instead.',
+    ),
+  cold_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'What a phase gate runs in place of `scoped_cmd` when the lane has no scope cache yet ' +
+        '(`scope_cache`): `make test` (the suite in parallel) instead of a `--testmon` run that, ' +
+        'without `.testmondata`, runs every test serially. Defaults to `cmd`. It must check at ' +
+        'least what `scoped_cmd` does.',
+    ),
+  scope_cache: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Files `scoped_cmd` narrows by, relative to the lane (`apps/api/.testmondata`). When any is ' +
+        'missing, the scoped form would run everything slowly, so a phase gate runs `cold_cmd` ' +
+        '(or `cmd`) instead, and journals why. `project.lane_seed` can copy them into new lanes.',
+    ),
+  fresh_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The same check run from fresh state — the test database recreated (`pytest --create-db`, ' +
+        '`make test_reset test`) — run in place of `cmd` in the integration worktree whenever ' +
+        'the state an earlier run left there may belong to another tree: the tree moved anywhere ' +
+        'but forward since the gate last ran there, the gate has not run there in this process, ' +
+        'its red output reads as a stale schema (missing or extra columns or relations), or a ' +
+        'conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.',
+    ),
+  fresh_when: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is ' +
+        'built from — the migrations, typically (`apps/*/migrations/*.py`). When a file that ' +
+        'matched at the gate’s last run in the integration worktree is gone or different now, ' +
+        'the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a ' +
+        'migration that was rewritten or renamed under it. Files added since do not count. ' +
+        'Ignored without `fresh_cmd`.',
+    ),
+  requires: z
+    .array(Id)
+    .default([])
+    .describe('Resource pool ids acquired before the gate runs, in canonical order.'),
+  timeout_s: z
+    .number()
+    .int()
+    .min(1)
+    .default(1800)
+    .describe('How long the command may run, counted from when it starts — never the time it queued for `requires`.'),
+  queue_timeout_s: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      'How long a phase gate may wait for its `requires` pools before the attempt fails, naming ' +
+        'who held them and for how long. Absent, it waits as long as it takes.',
+    ),
+  tuning: GateTuningSchema.optional(),
+  description: z.string().optional(),
+})
+
+// ---------------------------------------------------------------------------
+// Judge gates — a gate whose verdict is a System One classifier's (§17.4)
+//
+// A command gate asks the tree a question a program can answer. A judge gate
+// asks one a program cannot — "does this diff log a request body", "is this a
+// schema change" — of a fast classifier, and turns the answer into the same
+// exit code a command gate reports. That is the whole integration: the
+// pipeline, the fix loop and the fixer's prompt treat it as any other gate.
+//
+// **It can only make a phase redder.** A node's gates run in order and the
+// first red one is the answer, so a judge gate that passes changes nothing a
+// command gate decided. The asymmetry is structural rather than a rule anybody
+// has to remember: there is no field here that lets a classifier wave a
+// failing suite through.
+//
+// The question is the plan's, which is why this lives in the workflow and the
+// classifier does not. Whether a run may send its diff to one at all is the
+// operator's (`--system-one`), and a run started without one passes every
+// judge gate as unavailable — journalled, never silent.
+// ---------------------------------------------------------------------------
+
+export const JUDGE_INPUTS = ['diff'] as const
+
+export const JudgeSchema = z.strictObject({
+  question: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('The question, inline. Exactly one of `question` and `question_ref` is required.'),
+  question_ref: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Where the question lives, in `prompt_ref` form (`ai-plans/PLAN.md#no-phi-in-logs`), ' +
+        'resolved off the lane like a phase brief.',
+    ),
+  labels: z
+    .array(z.string().min(1))
+    .min(2)
+    .default(['yes', 'no'])
+    .describe('The closed set the classifier chooses among. The default makes it a yes/no question.'),
+  fail_on: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe(
+      'The labels that fail the gate. Their combined score is compared against `threshold`, ' +
+        'so `["architectural", "schema"]` fails on the two together and not on either alone.',
+    ),
+  threshold: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.5)
+    .describe('The gate fails when the `fail_on` labels together score at least this much.'),
+  input: z
+    .enum(JUDGE_INPUTS)
+    .default('diff')
+    .describe('What is judged. `diff` is the lane against the phase’s base, uncommitted work included.'),
+  max_input_bytes: z
+    .number()
+    .int()
+    .min(1024)
+    .default(200 * 1024)
+    .describe(
+      'A larger input is not sent. The gate then counts as unavailable — a truncated diff ' +
+        'would be judged on the part that happened to fit.',
+    ),
+  on_unavailable: z
+    .enum(['pass', 'fail'])
+    .default('pass')
+    .describe(
+      'What a question nobody answered means: no classifier configured, unreachable, or an ' +
+        'oversized input. `pass` — the default — keeps a judge gate advisory; `fail` is for a ' +
+        'check the phase must not merge without.',
+    ),
+})
+
+export const JudgeGateSchema = z.strictObject({
+  judge: JudgeSchema,
+  requires: z
+    .array(Id)
+    .default([])
+    .describe('Resource pool ids acquired before the gate runs. Rarely needed: a judge holds no lane resource.'),
+  description: z.string().optional(),
+})
+
+export const GateSchema = z
+  .union([CommandGateSchema, JudgeGateSchema])
+  .describe('A command gate (`cmd`) or a judge gate (`judge`).')
+
+// ---------------------------------------------------------------------------
+// Chores — a declared agent turn inside a phase, for work that is neither
+// implementing the brief nor judging it
+//
+// A gate is a shell command that says pass or fail. A chore is an agent that
+// *changes* the tree: rewrite the comments this phase wrote, add the changelog
+// entry, extract the strings that need translating. Both are per-phase
+// machinery, and that is where the resemblance stops — which is why this is a
+// separate registry rather than a second kind of gate.
+//
+// Three things would break if they shared one. A gate result is cached on the
+// lane's tree hash, and a step that edits the tree invalidates its own key by
+// running. A gate queues on a `test-suite`-style pool, while an agent turn
+// contends for a harness slot and a model quota, which admission control
+// already manages. And a gate is the thing standing between a phase and its
+// merge; a chore is not allowed to be, which is what `on_failure` defaults to
+// `continue` for.
+//
+// The chore says what to do; the prompt renderer says everything else — which
+// phase this is, the diff as the scope, the project's commands, the commit
+// protocol, and the one bound that keeps a general slot from turning into a
+// second implementer: do what the chore says and nothing more.
+// ---------------------------------------------------------------------------
+
+export const ChoreSchema = z.strictObject({
+  prompt: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('The instruction, inline. Exactly one of `prompt` and `prompt_ref` is required.'),
+  prompt_ref: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Where the instruction lives, in `prompt_ref` form (`ai-plans/PLAN.md#deslop`), resolved ' +
+        'by the same resolver as a phase brief. Prefer it over `prompt` for anything longer ' +
+        'than a sentence: it keeps the text reviewable in the plan rather than in a JSON string.',
+    ),
+  skill: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'A skill the agent should use, named in the prompt rather than passed as a harness flag — ' +
+        'codex and opencode have no skills, and a chore that only works on one harness is a ' +
+        'chore that silently does nothing on the other two.',
+    ),
+  session: z
+    .string()
+    .min(1)
+    .default('main')
+    .describe(
+      'The session slot this turn continues (§15). `main` — the default — is the implementer’s: ' +
+        'the agent that wrote the phase already holds the brief, the diff and its own reasons, ' +
+        'and that is most of what makes a chore cheap. A slot no other effect names starts a ' +
+        'fresh session every time and pays for a cold context.',
+    ),
+  model: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Overrides the model the phase’s implementer would otherwise run at. A mechanical pass ' +
+        'does not need the tier the phase was staffed at.',
+    ),
+  when: z
+    .enum(CHORE_TIMINGS)
+    .default('after_review')
+    .describe(
+      'When the chore runs. `review` runs it once the phase’s gates are green, as the phase’s ' +
+        'code review: the turn ends with a `VERDICT: pass` or `VERDICT: fail` line, and the ' +
+        'phase moves on only when every review chore passed. `after_review` — the default — ' +
+        'runs it once the review approved, before the gates run again on the final tree. ' +
+        '`after_pr` runs it once the phase is merged, pushed and its pull request is open, ' +
+        'for work about the PR rather than the diff (a review canvas, a PR comment). An ' +
+        '`after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be ' +
+        '`on_failure: fail`.',
+    ),
+  background: z
+    .boolean()
+    .optional()
+    .describe(
+      '`false` tells this chore’s turns to run every command in the foreground and wait for ' +
+        'it, even on a harness that keeps a session alive for background work. For a review ' +
+        'whose turns keep ending on "waiting on the tests" with no verdict. Absent, the ' +
+        'harness decides.',
+    ),
+  on_failure: z
+    .enum(['continue', 'fail'])
+    .default('continue')
+    .describe(
+      '`continue` — the default — journals a failed chore and moves on. A chore is polish, ' +
+        'and losing an implemented phase to one that timed out is the worse trade. `fail` is ' +
+        'for a chore whose output the phase is not correct without. A `review` chore ignores ' +
+        'it: a review that did not approve, for any reason, is put to the operator.',
+    ),
+  description: z.string().optional(),
+})
+
+// ---------------------------------------------------------------------------
+// Codegen steps — a deterministic command that writes declared files
+//
+// The third kind of step beside gates and chores. A gate judges and never
+// changes the tree; a chore is an agent changing code. A codegen step is a
+// shell command that rewrites files the plan names — an OpenAPI schema, the
+// client generated from it, a route tree, a formatter's output — committed as
+// it comes out, with no agent turn and no fix round.
+//
+// It exists because generated files were most of one run's merge conflicts:
+// two phases each regenerated `schema.yml` and the client behind it, and the
+// fixer was handed a 400-line reorder no person would resolve by hand. A file
+// that is a function of others is not merged; it is regenerated. So the steps
+// run after every implement or fix turn (before the gates), in integration
+// right after a merge — where a conflict confined to their outputs is settled
+// by taking either side and running them — and before every integration
+// commit, so a hook that would rewrite the same files finds nothing to do.
+// ---------------------------------------------------------------------------
+
+/**
+ * A command run on the files a clean merge combined (`workflow.post_merge`).
+ * Git merges two sides' edits to one file without a conflict and still
+ * leaves code that does not build: two list openers that never close, the
+ * same import twice, imports out of order.
+ */
+export const PostMergeSchema = z.strictObject({
+  cmd: z
+    .string()
+    .min(1)
+    .describe(
+      'Shell command run in the integration worktree after git merges a branch by itself, with ' +
+        '`{files}` replaced by the files both sides changed (shell-quoted): `python -m py_compile ' +
+        '{files} && ruff check --fix --select I,F811,F401 {files} && ruff format {files}`. What it ' +
+        'changes is committed on top of the merge; a non-zero exit is journalled and the merged ' +
+        'tree’s gates judge it.',
+    ),
+  timeout_s: z.number().int().min(1).default(300),
+})
+
+export const CodegenStepSchema = z.strictObject({
+  cmd: z
+    .string()
+    .min(1)
+    .describe(
+      'Shell command, run in the worktree with its environment — the lane’s or the integration ' +
+        'worktree’s. Must be deterministic: the same inputs produce byte-identical outputs ' +
+        '(`doctor --codegen` checks). A `format` step’s command takes `{changed_files}`.',
+    ),
+  outputs: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe(
+      'The files the command writes, as git glob pathspecs relative to the repository root ' +
+        '(`schema.yml`, `frontend/src/api-client/**`, `**/*.gen.ts`). What it changes among them ' +
+        'is committed; anything else it changes is left alone. Agents are told these are not ' +
+        'to be edited by hand, and a merge conflict confined to them is settled by running the ' +
+        'step instead of by a fixer.',
+    ),
+  inputs: z
+    .array(z.string().min(1))
+    .default([])
+    .describe(
+      'The files the outputs are a function of, as git glob pathspecs. When the step last ran ' +
+        'on exactly these contents and its outputs are still what it wrote, it is skipped, as a ' +
+        'gate is on a tree the cache has seen. Empty — the default — runs it every time.',
+    ),
+  after: z
+    .array(Id)
+    .default([])
+    .describe(
+      'Steps that run before this one: the schema before the client generated from it, the ' +
+        'client before whatever reads it.',
+    ),
+  requires: z
+    .array(Id)
+    .default([])
+    .describe('Resource pool ids held while the step runs, as a gate’s are. Never `lane`.'),
+  timeout_s: z.number().int().min(1).default(600),
+  format: z
+    .boolean()
+    .default(false)
+    .describe(
+      'A formatter rather than a generator. `{changed_files}` in `cmd` is the files the phase ' +
+        'changed that match `outputs`, shell-quoted; with none, the step is skipped. Formatting ' +
+        'the whole repository makes diffs in files the phase never touched. A format step’s ' +
+        'outputs are ordinary source, so they are not listed as hand-edit-free and a conflict ' +
+        'in them still goes to the fixer.',
+    ),
+  description: z.string().optional(),
+})
+
+/**
+ * The gate id a codegen step answers to wherever a gate's result is read — the
+ * pipeline's `gate` fact, the fixer's prompt, the agent's `gate` verb. A colon
+ * is not a legal `Id` character, so it can never shadow a declared gate.
+ */
+export const CODEGEN_GATE_PREFIX = 'codegen:'
+
+export const DependencySchema = z.strictObject({
+  node: Id.describe('The upstream node id.'),
+  artifact: z
+    .string()
+    .min(1)
+    .describe(
+      'What this node needs from the upstream one — a model, a symbol, a migration, ' +
+        'an endpoint. Required: it is what the implementer prompt uses to explain what ' +
+        'the phase builds on, and a bare id with no reason is usually a plan smell.',
+    ),
+})
+
+// ---------------------------------------------------------------------------
+// The crew — who is on this plan, in what role, and at what tier
+//
+// The alternative this replaces is a per-node `model`, picked phase by phase
+// with nothing anywhere adding it up. That reads fine one node at a time and
+// hides the two questions a plan is actually being asked: how many agents does
+// this feature need at once, and is any of them too low a tier for what it was
+// handed. A roster answers both before the run starts.
+//
+// **A member is an agent, not a model.** Each one owns a worktree for the whole
+// run and keeps its session across the phases it takes, so what it learned
+// about the repository in phase 1 is still in its context in phase 4 — which is
+// most of what an agent spends its first turn of a phase rediscovering. The
+// worktree is reset between phases and the session is told exactly which files
+// that changed; see `sessions.ts`. What made this impossible before was not the
+// reset but the *anonymity* of lanes: a member that lands in a different
+// directory each phase has a context describing paths it is no longer standing
+// in, which is what §15.2's `lane_changed` refuses.
+// ---------------------------------------------------------------------------
+
+export const CrewMemberSchema = z.strictObject({
+  tier: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .describe(
+      'Difficulty tier this member is staffed at, per the plan skill’s rubric. It is a ' +
+        'floor on what they may be handed, and the ordering the scheduler substitutes along.',
+    ),
+  model: z.string().min(1).describe('The model this tier resolves to for this run.'),
+  harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness for this member.'),
+  description: z.string().optional().describe('Why the plan staffed this tier.'),
+})
+
+export const NodeSchema = z.strictObject({
+  id: Id,
+  name: z.string().min(1),
+  depends_on: z
+    .array(DependencySchema)
+    .default([])
+    .describe('Empty means the node branches from base_branch and may start immediately.'),
+  prompt_ref: z.string().min(1).describe('Where the phase brief lives, e.g. `plan.md#phase-1`.'),
+  touches: z
+    .array(z.string())
+    .default([])
+    .describe('Touch List. Same-wave overlap is warned about, never refused.'),
+  pipeline: Id.optional().describe('Overrides defaults.pipeline.'),
+  gates: z.array(Id).default([]),
+  chores: z
+    .array(Id)
+    .optional()
+    .describe(
+      'The chores this phase runs, in order. Optional rather than defaulted, and that is the ' +
+        'whole of its override rule: absent takes `defaults.chores`, and a list — `[]` included ' +
+        '— replaces it. Merging instead would leave no way to skip a run-wide chore on the one ' +
+        'phase it makes no sense for.',
+    ),
+  harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness.'),
+  model: z
+    .string()
+    .optional()
+    .describe('Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.'),
+  crew: Id.optional().describe(
+    'The member this phase is assigned to. Their tier is the floor for it: a busier roster ' +
+      'may hand the phase to a free member at that tier or above, never below.',
+  ),
+  deferred: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Why this phase must not start on its own — "deferred until the flag has soaked two weeks ' +
+        'at 100% in production". A deferred phase is not dispatched when its dependencies are ' +
+        'done: it parks on a question naming this reason, and the operator answers `start` (now) ' +
+        'or `stop` (fail it, blocking what depends on it). Without it the scheduler would run a ' +
+        'soak-gated flag removal the moment its dependencies merged.',
+    ),
+  max_fix_rounds: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      'Fix rounds a phase may spend on red gates, and unsuccessful iterations each review ' +
+        'turn may run, before the operator is asked whether to keep going (§16). Absent — ' +
+        'the default — sets no limit: the fixer works until the gates are green and the ' +
+        'review loop until the reviewer approves. A fix round is a fixer turn; a review ' +
+        'iteration is one pass of the review loop that returned blockers. When a set budget ' +
+        'runs out the shipped pipeline asks rather than fails: `continue` grants the same ' +
+        'budget again, `stop` fails the phase and hands it to `--on-failure`.',
+    ),
+})
+
+// ---------------------------------------------------------------------------
+// The project — what a lane has to become a working checkout of it (§8)
+//
+// This block used to record only the databases to fork and the command that
+// migrates the template they fork from. Everything else a runnable checkout
+// needs — env files, compose isolation, redis indices, service namespaces —
+// was documented as `prepare-worktree`'s, discovered per worktree and read back
+// off the summary.
+//
+// That division did not survive contact. The daemon provisions its own lanes;
+// it never invokes the skill, so the skill's half of the contract simply did
+// not run, and a lane came up as a worktree with no `.env`, a compose stack
+// publishing the same fixed host ports as its five siblings, and — worse and
+// silently — every lane's stack mounting the same `external: true` data
+// volumes. The knowledge was real and written down, and nothing executed it.
+//
+// So the fields below are the ones the daemon must be able to act on itself:
+// the files a lane needs a copy of, the commands the project runs, the
+// services a lane needs its own namespace inside, and the project's own
+// setup hook for whatever remains irreducibly its. `prepare-worktree` still
+// owns discovering these for a project that has never declared them — it
+// writes this block — and still owns the interactive human path.
+//
+// A database declared here is always *forked*: `share` and `stub` are the
+// absence of a declaration, not a value, because a lane that shares the main
+// checkout's database is a lane with no database of its own to describe.
+// ---------------------------------------------------------------------------
+
+const SqliteDatabaseSchema = z.strictObject({
+  engine: z.literal('sqlite'),
+  path: z
+    .string()
+    .min(1)
+    .describe('Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane.'),
+  connection_url_var: z
+    .string()
+    .min(1)
+    .describe('Env var the project reads its connection string from, set per lane.'),
+})
+
+const PostgresDatabaseSchema = z.strictObject({
+  engine: z.literal('postgres'),
+  delivery: z
+    .enum(['external', 'compose'])
+    .describe(
+      '`external` forks a database on an already-running server — the cheap mode, and the ' +
+        'one to prefer for pooling. `compose` boots the lane its own server on its own forked ' +
+        'volume, which has no template to clone from and therefore no reset: such a lane is ' +
+        'single-use and is re-provisioned rather than reset.',
+    ),
+  name: z.string().min(1).describe('The main checkout’s database name. Lane names derive from it.'),
+  server_url: z
+    .string()
+    .min(1)
+    .describe('The server, without the database path segment, e.g. `postgres://localhost:5432`.'),
+  connection_url_var: z.string().min(1),
+  createdb_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Replaces the `createdb` binary name (default `createdb`) in every command that creates a ' +
+        'lane database. A trusted command prefix, unquoted, like `migrate_cmd`; the `-h`/`-p`/`-U` ' +
+        'flags derived from `server_url` still follow it. Only meaningful for `external`. For a ' +
+        'Postgres in a container whose password the host cannot supply: ' +
+        '`docker compose exec -T db createdb` — the official image trusts connections made from ' +
+        'inside the container, so no password is needed there.',
+    ),
+  dropdb_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Replaces the `dropdb` binary name (default `dropdb`), exactly as `createdb_cmd` does for ' +
+        '`createdb`. Set both together: `docker compose exec -T db dropdb`.',
+    ),
+})
+
+export const DatabaseSchema = z
+  .discriminatedUnion('engine', [SqliteDatabaseSchema, PostgresDatabaseSchema])
+  .describe('One forked database a lane gets its own copy of.')
+
+export const CommandsSchema = z
+  .strictObject({
+    lint: z.string().min(1).optional(),
+    typecheck: z.string().min(1).optional(),
+    test: z.string().min(1).optional().describe('The whole suite.'),
+    test_one: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('A single test or a subtree. The agent appends the target, so end it accordingly.'),
+    migrate: z.string().min(1).optional(),
+  })
+  .describe(
+    'The project’s own command lines, handed to every agent verbatim. A fixed vocabulary ' +
+      'rather than free-form, because the prompt has to be able to say which one step 3 of ' +
+      'the working instructions means. Declaring these is how an agent stops guessing: a ' +
+      'project whose suite only runs inside a container, or only against a lane-specific ' +
+      'database, has no way of telling one otherwise, and `pytest` is a plausible guess that ' +
+      'is wrong in exactly that project.',
+  )
+
+export const ServiceSchema = z
+  .strictObject({
+    namespace: z
+      .enum(['index', 'name'])
+      .describe(
+        'How this lane’s namespace inside the shared server is derived. `index` is a small ' +
+          'integer, for a server with a fixed number of slots — redis’s sixteen databases are ' +
+          'the case it exists for. `name` is a token derived from the lane, for a server that ' +
+          'names things freely: a vhost, a bucket prefix, a schema.',
+      ),
+    url: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'The shared server, without the per-lane segment — `redis://localhost:6379`. Omit it ' +
+          'where the namespace *is* the value: an object-storage prefix has no URL to hang off, ' +
+          'and the variable then carries the bare token.',
+      ),
+    url_var: z.string().min(1).describe('Env var the lane reads this service’s address from.'),
+    capacity: z
+      .number()
+      .int()
+      .min(1)
+      .default(16)
+      .describe(
+        'How many distinct namespaces the server has. Only meaningful for `index`, where a ' +
+          'pool larger than this is refused before anything is created — two lanes on one ' +
+          'redis database is the bug this exists to prevent, and reaching it by arithmetic is ' +
+          'no better than reaching it by neglect.',
+      ),
+    create_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Run once per lane, in the lane. `{namespace}`, `{url}` and `{lane}` are substituted. ' +
+          'Declaring a vhost is a `rabbitmqadmin` invocation this package has no business ' +
+          'knowing; a project that needs none declares none.',
+      ),
+    reset_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Empties this lane’s namespace when the lane is handed to the next phase. Same ' +
+          'substitutions. A service without one keeps whatever the last phase left in it, ' +
+          'which for a cache is usually right and for a queue usually is not — declaring this ' +
+          'is how a project says which of those it has.',
+      ),
+  })
+  .describe('A shared server each lane gets its own namespace inside.')
+
+export const ComposeSchema = z
+  .strictObject({
+    enabled: z
+      .boolean()
+      .default(true)
+      .describe(
+        'Whether lane provisioning generates a compose override. On by default, and it does ' +
+          'nothing at all in a project with no compose file. Where there is one and docker ' +
+          'cannot answer, provisioning fails rather than quietly producing lanes that share ' +
+          'a data volume — set this to false to say that is genuinely what you want.',
+      ),
+    publish: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Services that must keep a reachable host port, republished on one this lane was ' +
+          'granted instead of the one the project pinned. Empty is the default and is usually ' +
+          'right outright: where the project’s own test command runs inside compose, services ' +
+          'reach each other by container DNS on the lane’s own network and a published port ' +
+          'buys nothing but a collision. The granted port reaches the lane as ' +
+          '`LANE_PORT_<SERVICE>_<CONTAINER_PORT>`.',
+      ),
+    shared_volumes: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Volume keys that leak past the project name and are to be left leaking. The escape ' +
+          'hatch for the one decision this cannot make for you: re-pinning a shared dependency ' +
+          'volume is correct, and it costs every lane the install that sharing it was avoiding. ' +
+          'A read-only cache with no dependency churn in the plan is safe here. A data volume ' +
+          'never is — that is two servers on one data directory, which is the bug this exists ' +
+          'to prevent.',
+      ),
+  })
+  .describe('How a lane’s compose stack is isolated past `COMPOSE_PROJECT_NAME`.')
+
+export const ProjectSchema = z
+  .strictObject({
+    migrate_cmd: z
+      .string()
+      .min(1)
+      .describe(
+        'The project’s own migrate command. Run once per template database — never per lane, ' +
+          'which is what makes the Nth lane cost a copy rather than a provision.',
+      ),
+    databases: z
+      .strictObject({
+        dev: DatabaseSchema.optional(),
+        test: DatabaseSchema.optional(),
+      })
+      .default({})
+      .describe('Roles a lane forks. An undeclared role means the lane has no database of its own.'),
+    env_files: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Repo-relative ignored files every lane needs its own COPY of — `.env`, `.env.docker`, ' +
+          '`.envrc`. Copied, never symlinked: lane provisioning appends to them (a connection ' +
+          'string, a compose override path), and a symlink would write those lane-specific ' +
+          'lines back into the main checkout. A declared file that is missing fails ' +
+          'provisioning rather than producing a lane whose stack cannot boot.',
+      ),
+    commands: CommandsSchema.default({}),
+    hooks: z
+      .enum(['run', 'skip'])
+      .default('run')
+      .describe(
+        'Whether the repository’s git hooks run on commits made inside a lane. `run` is the ' +
+          'default and is what a developer’s own checkout does. `skip` points the lane at an ' +
+          'empty `core.hooksPath`, for the case this exists for: a `language: system` ' +
+          'pre-commit chain that, in a worktree that has never been committed in, builds a ' +
+          'virtualenv per lane before it will let a commit through — observed as four failed ' +
+          'commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. ' +
+          'The gates still run; this only stops each lane paying a whole-environment install ' +
+          'to make a commit. The integration worktree follows the same setting: the merge ' +
+          'commits maestro makes there — a resolved conflict, a wave — run the hooks under ' +
+          '`run` and skip them under `skip`, exactly as a lane’s commits do. A hook that ' +
+          'refuses one of those commits is asked about (commit, commit --no-verify, abort) ' +
+          'rather than left mid-merge; a hook that needs a gitignored file needs that file ' +
+          'in `env_files`.',
+      ),
+    services: z
+      .record(Id, ServiceSchema)
+      .default({})
+      .describe(
+        'Shared servers each lane gets its own namespace inside, by id. One postgres, one ' +
+          'redis, one rabbit on the machine, with a database / db index / vhost per lane — ' +
+          'which is the difference between six lanes being viable on a laptop and not. The ' +
+          'alternative a project falls into without this is booting a server per lane, or ' +
+          'sharing one with no isolation at all.',
+      ),
+    compose: ComposeSchema.default(() => ({ enabled: true, publish: [], shared_volumes: [] })),
+    prepare_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Run in the repository root **before anything else a run does** — before the preflight, ' +
+          'before the template databases, before the first worktree. Its job is to make the ' +
+          'shared servers this project’s lanes connect to reachable: `docker compose up -d ' +
+          '--wait db redis` for a stack in the root checkout, `brew services start postgresql` ' +
+          'for a host install, nothing at all for a project whose lanes boot their own. ' +
+          '`setup_cmd` cannot do this — it runs per lane, long after the template database has ' +
+          'been created on a server that had to be up already. MUST be idempotent: it runs ' +
+          'again before every lane recycle, which is what restores a server that died mid-run. ' +
+          'Note that `--wait` only waits for services that declare a `healthcheck`; without one ' +
+          'it returns as soon as the container is started, and `createdb` races the server.',
+      ),
+    setup_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'The project’s own lane-setup command, run inside each freshly provisioned lane with ' +
+          'that lane’s environment applied. The escape hatch for whatever a project needs that ' +
+          'no field here describes. It MUST be idempotent: it runs again every time the lane is ' +
+          'recycled for another phase.',
+      ),
+    reset_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Run inside a lane when it is recycled for another phase, and only then — never on a ' +
+          'freshly provisioned lane. Runs with the lane’s environment applied, after maestro ' +
+          'has reset the worktree, the env files, the databases and the services, and before ' +
+          '`setup_cmd`. For what a phase leaves behind that the clean does not reach: a cache ' +
+          'outside the worktree, a `recycle_keep` directory that needs pruning rather than ' +
+          'deleting.',
+      ),
+    lane_seed: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Ignored cache files a lane is given when it is handed to a phase and lacks them, ' +
+          'relative to the lane (`apps/api/.testmondata`): copied from the lane of the phase’s ' +
+          'first dependency, else the integration worktree, else the main checkout, whichever ' +
+          'has it first. Only paths git ignores are copied, and never over one the lane has. ' +
+          'For a scope cache (`gates.<id>.scope_cache`) that is expensive to build from nothing.',
+      ),
+    recycle_keep: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Ignored paths a recycled lane keeps. A recycle removes every untracked and ignored ' +
+          'file the previous phase left — caches such as `.mypy_cache` and `__pycache__` ' +
+          'included, which once kept a deleted package importable and failed a type check on ' +
+          'clean code — except the copied dependency tree, the `env_files` and what is listed ' +
+          'here. Each entry is a gitignore pattern handed to `git clean -e`: `.venv` keeps one ' +
+          'at any depth, `/apps/api/.venv` only that one. For what is expensive to rebuild; ' +
+          'anything not listed is rebuilt by `setup_cmd`, which runs on every recycle.',
+      ),
+  })
+  .describe(
+    'What a lane needs to be a working checkout of this project. Optional: with no project ' +
+      'block a lane is a worktree and nothing else.',
+  )
+
+export const DefaultsSchema = z.strictObject({
+  harness: z.enum(HARNESS_IDS).default('claude-code'),
+  model: z.string().min(1),
+  pipeline: Id.default('standard-phase'),
+  gates: z
+    .array(Id)
+    .optional()
+    .describe(
+      'The gates every phase must pass unless it names its own. Resolved into each node when ' +
+        'the workflow is loaded, with the same override rule as `chores`: a node’s own list — ' +
+        '`[]` included — replaces this one.',
+    ),
+  allow_ungated_phases: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Whether a phase that resolves to no gates at all is acceptable. Off — the default — ' +
+        '`validate` refuses the workflow and `doctor` warns, because a phase with no gates ' +
+        'passes its gate step vacuously: an observed run finished twelve phases without a ' +
+        'single check because every node carried `gates: []` where its author meant "the ' +
+        'project’s". Set it only for a plan whose phases genuinely have nothing to check.',
+    ),
+  gate_scope: z
+    .enum(GATE_SCOPES)
+    .default('scoped')
+    .describe(
+      '`scoped` — the default — runs a gate’s `scoped_cmd` on a phase’s gates up to and during ' +
+        'its review, and its full `cmd` once the review approves (`verify`) and on every merged ' +
+        'tree in the integration worktree. `full` runs `cmd` everywhere.',
+    ),
+  substitution: z
+    .enum(SUBSTITUTIONS)
+    .default('up_one_tier')
+    .describe(
+      'How far above the member the plan named a phase may be moved when that member is busy ' +
+        'or another holds a warm session. `same_tier` \u2014 only a peer at the same tier; a phase ' +
+        'waits rather than run dearer. `up_one_tier` \u2014 the default \u2014 also the next tier up the ' +
+        'roster has, when nobody at the planned tier is free; a warm session never moves a ' +
+        'phase up. `any` \u2014 any tier above, and a warm session above the plan may take it to ' +
+        'avoid a cold start. One observed run moved 23 phases from Tier 3 to a Tier 4 member ' +
+        'whose credits then ran out, and nothing showed it.',
+    ),
+  escalate_after_rejections: z
+    .number()
+    .int()
+    .min(0)
+    .default(3)
+    .describe(
+      'Review rejections a phase may take on one desk before it moves up a crew tier. Every ' +
+        'review that does not approve counts, across attempts; at the Nth the scheduler amends ' +
+        'the run, moving the phase to the cheapest member of the next tier up, journalled as a ' +
+        '`workflow_amended` row by `scheduler` with the reason and the count. The new desk ' +
+        'takes the phase from its next attempt, and the count starts again there. Nothing ' +
+        'happens at the top tier, or in a workflow with no roster. `0` turns it off. One ' +
+        'observed run left a Tier 1 phase rejected 16 times over six hours before a person moved it.',
+    ),
+  pull_requests: z
+    .enum(['phase', 'plan'])
+    .default('phase')
+    .describe(
+      'Which pull requests a run opens. `phase` \u2014 the default \u2014 one per phase, one per ' +
+        'integration branch, and the plan PR that lands them all: the phase PRs are review units ' +
+        'stacked in merge order. `plan` opens the plan PR alone, from the last wave branch, which ' +
+        'already holds every phase and every conflict resolution; review happens there. One ' +
+        'observed ten-phase refactor opened fifteen PRs that nobody was going to merge. Under ' +
+        '`plan` a phase has no PR of its own, so its `after_pr` chores are skipped.',
+    ),
+  max_spare_crew: z
+    .number()
+    .int()
+    .min(0)
+    .default(2)
+    .describe(
+      'Crew members a run may take on beyond the roster. When the member a phase was planned ' +
+        'for is busy, the phase does not borrow a member another pending phase is planned for, ' +
+        'and does not wait: it gets a new member at the planned member’s tier and model, with ' +
+        'a worktree of its own provisioned there and then. A member nobody plans for is borrowed ' +
+        'as before. The spare stays on the roster for the rest of the run, is never planned for, ' +
+        'and covers later phases at its tier. `retry with <member>` takes a spare in that ' +
+        'member’s image the same way when the member is needed elsewhere. A worktree, its ' +
+        'databases and its compose stack each, so this is bounded; `0` keeps the roster to the ' +
+        'plan’s and restores waiting and covering. One observed run left a phase on the ' +
+        'critical path idle for 17 minutes while a retry held the member it was planned for.',
+    ),
+  verify_gates: z
+    .enum(VERIFY_GATES)
+    .default('full')
+    .describe(
+      'What `standard-phase`\u2019s `verify` runs once the review approves. `full` \u2014 the default \u2014 ' +
+        'runs every gate\u2019s whole `cmd` on the phase branch, so a PR never carries a suite only a ' +
+        'scoped run saw; a red full run goes back to a fixer and the review. `scoped` keeps the ' +
+        'scoped form there too, for a suite too slow to run once per phase \u2014 the merged-tree ' +
+        'gates are then the first full run. No effect under `gate_scope: full`.',
+    ),
+  base_gates: z
+    .enum(BASE_GATES)
+    .default('full')
+    .describe(
+      'Whether a multi-dependency phase\u2019s base (`integ-<id>`, its dependencies merged) is gated ' +
+        'before the phase starts on it. `full` \u2014 the default \u2014 runs every command gate its ' +
+        'dependencies declare, whole `cmd`, on the merged base, cached on its tree; red fails the ' +
+        'phase\u2019s setup. `off` starts the phase on the merged base unchecked.',
+    ),
+  wave_gates: z
+    .enum(WAVE_GATES)
+    .default('every')
+    .describe(
+      'When the phases\u2019 gates run in full on a merged wave, in the integration worktree. Each ' +
+        'phase passes its gates on its own branch, and two parallel phases can each be green and ' +
+        'disagree with each other \u2014 a sender and a receiver of one signal, say \u2014 which only a ' +
+        'merged tree shows. `every` \u2014 the default \u2014 runs the wave\u2019s phases\u2019 gates on every ' +
+        'wave, so the next wave builds on a passing tree and a disagreement is caught at the wave ' +
+        'that introduced it, and every gate of the plan once on the last wave before the plan PR ' +
+        'opens. It costs one full suite per wave. `final` runs the last wave\u2019s and any wave whose ' +
+        'merge needed a conflict resolution only. `off` runs none of these. Under `gate_scope: scoped` the full form of a ' +
+        'narrowed gate still runs on each wave whatever this says: that is where the suite the ' +
+        'phases skipped is paid back.',
+    ),
+  chores: z
+    .array(Id)
+    .default([])
+    .describe(
+      'The chores every phase runs unless it names its own. Most chores are run-wide — a ' +
+        'comment pass, a changelog entry — and repeating them on every node is how one phase ' +
+        'ends up quietly missing one.',
+    ),
+  model_fallbacks: z
+    .record(z.string().min(1), z.string().min(1))
+    .default({})
+    .describe(
+      'Model id → the model to run instead once the first is out of quota (§6.1). A `quota` ' +
+        'refusal on a model listed here does not park the harness: the spawn is retried at ' +
+        'once on the fallback, and every later spawn of that model on the same harness goes ' +
+        'straight to the fallback until the vendor’s stated reset, or for the rest of the run ' +
+        'when it stated none. Chains are followed; a fallback refused for quota too means the ' +
+        'account is out, not the model, and the harness parks as it would have.',
+    ),
+  harness_fallbacks: z
+    .partialRecord(
+      z.enum(HARNESS_IDS),
+      z.strictObject({
+        harness: z.enum(HARNESS_IDS).describe('The harness the run moves to.'),
+        model: z.string().min(1).describe('The model every moved turn runs on there.'),
+      }),
+    )
+    .default({})
+    .describe(
+      'Harness id → where the run moves once that harness is out of quota and has no model ' +
+        'fallback left (§6.1). Instead of parking every phase on it until the window resets, the ' +
+        'run switches: the turn that was refused runs again at once on the fallback, at the same ' +
+        'pipeline step, and every later turn that would have run on the harness runs there — ' +
+        'phases in a turn move when it ends. A moved phase starts a fresh session with a handoff ' +
+        '(the previous agent’s last report, its work in the lane, the red gate). One switch per ' +
+        'harness; a fallback that runs out too parks as it would have. One observed run moved ' +
+        'five phases off an account out of credits by aborting and retrying each by hand.',
+    ),
+  max_session_turns: z
+    .number()
+    .int()
+    .min(1)
+    .default(12)
+    .describe(
+      'Turns one reused session slot may take before the next spawn starts fresh (§15.5). ' +
+        'A shared session only ever grows; without a ceiling a long node eventually dies on a ' +
+        'context-window error that reads as a broken harness.',
+    ),
+})
+
+export const WorkflowSchema = z
+  .strictObject({
+    // Allowed explicitly: the object is closed, and a `$schema` key is how a
+    // JSON file opts into editor validation — the same affordance the YAML
+    // payloads get from their `# yaml-language-server:` directive.
+    $schema: z
+      .string()
+      .optional()
+      .describe('Optional URL of this schema, for editor validation. Ignored at runtime.'),
+    schema_version: z.literal(1).describe('Schema major version. Bumped only on breaking changes.'),
+    id: Id.describe('Stable identifier for this workflow. Used in branch names.'),
+    plan_ref: z
+      .string()
+      .optional()
+      .describe('The human-readable plan this was emitted alongside.'),
+    plan_context_refs: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Sections of the plan that bound every phase rather than any one of them — its ' +
+          'Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference ' +
+          'in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the ' +
+          'same resolver and handed to the implementer verbatim, marked as plan-level. ' +
+          'Empty — the default — means the prompts carry the phase brief alone.',
+      ),
+    base_branch: z.string().min(1).describe('What dependency-free nodes branch from.'),
+    project: ProjectSchema.optional(),
+    defaults: DefaultsSchema,
+    crew: z
+      .record(Id, CrewMemberSchema)
+      .default({})
+      .describe(
+        'The agents this plan is staffed with, by id. Empty — the default — means the ' +
+          'workflow is unstaffed and every node falls back to `model` / `defaults.model`, ' +
+          'which is how workflows written before rosters existed keep running.',
+      ),
+    resources: z.record(Id, ResourceSchema).describe('Named capacity pools. `lane` is required.'),
+    gates: z.record(Id, GateSchema).default({}),
+    chores: z
+      .record(Id, ChoreSchema)
+      .default({})
+      .describe(
+        'Agent turns a phase runs beside its gates, by id. A gate judges and a chore changes ' +
+          'the tree, so they are separate registries — see ChoreSchema.',
+      ),
+    codegen: z
+      .record(Id, CodegenStepSchema)
+      .default({})
+      .describe(
+        'Deterministic commands that write declared files, by id — see CodegenStepSchema. They ' +
+          'run in every lane before its gates and in the integration worktree around every ' +
+          'merge, in `after` order. A failing step is a red gate.',
+      ),
+    post_merge: PostMergeSchema.optional().describe(
+      'A normalizing command for files a clean merge combined — see PostMergeSchema.',
+    ),
+    ci_only: z
+      .array(
+        z.strictObject({
+          command: z.string().min(1).describe('The CI command, as CI runs it (wrappers like `uv run` are ignored when matching).'),
+          reason: z.string().min(1).describe('Why no gate runs it: it needs credentials, a deploy, a hosted service.'),
+        }),
+      )
+      .default([])
+      .describe(
+        'CI checks deliberately left to CI, each with its reason. `doctor` warns about every CI ' +
+          'command no gate runs; one listed here is reported as a decision instead of a gap.',
+      ),
+    append_only: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Files every phase only appends to — a DI container, a URL route list, a registry of ' +
+          'notification kinds, a beat schedule — as gitattributes patterns. Merged in the ' +
+          'integration worktree with git’s `union` driver, which keeps both sides’ lines, so ' +
+          'two phases each adding an entry is not a conflict. The merged tree is gated as ' +
+          'any other is; a union that reads wrong (a duplicate key, a missing comma) is a red ' +
+          'gate there, not a silent pass.',
+      ),
+    nodes: z.array(NodeSchema).min(1),
+    pipelines: z
+      .record(Id, PipelineSchema)
+      .default({})
+      .describe(
+        'Pipelines this workflow authors. Optional: `defaults.pipeline` may name one the ' +
+          'package ships (see BUILT_IN_PIPELINES), and a declared id shadows a built-in of ' +
+          'the same name. A pipeline is machinery, not plan data — requiring every emitted ' +
+          'workflow to carry a verbatim copy would duplicate it into every plan, and a fix ' +
+          'to the shipped one would never reach a plan already written.',
+      ),
+    data: Passthrough.optional(),
+  })
+  .describe(
+    'An executable plan: the phase DAG, the pipelines phases run through, the capacity ' +
+      'pools they contend for, and the gates they must pass.',
+  )
+
+// ---------------------------------------------------------------------------
+// The authored document — the file a plan commits, before the project's
+// configuration is layered under it
+//
+// `WorkflowSchema` is the *resolved* workflow: what the executor runs, what a
+// run freezes, what an amendment is diffed against. Every gate in it has its
+// command. A plan file need not: a gate that says only `"type": "test"` takes
+// its command from `.vinta-ai-workflows.yaml`, and a plan whose base is the
+// project's default branch need not name it. This is the shape such a file is
+// checked against before that resolution — the one the generated JSON Schema
+// describes, because it is the one people and `plan-feature` write.
+// ---------------------------------------------------------------------------
+
+export const AuthoredCommandGateSchema = CommandGateSchema.partial({ cmd: true })
+
+export const AuthoredWorkflowSchema = WorkflowSchema.extend({
+  base_branch: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'What dependency-free nodes branch from, and what the plan PR targets. Absent takes ' +
+        '`project.default_branch` from `.vinta-ai-workflows.yaml`.',
+    ),
+  gates: z
+    .record(Id, z.union([AuthoredCommandGateSchema, JudgeGateSchema]))
+    .default({})
+    .describe(
+      'Gates by id. A command gate with a `type` may omit `cmd` and inherit it from the ' +
+        'project. Gates the project configures by type (`maestro.gates.<type>`, or a ' +
+        '`commands.*` line) are also available under the type’s name without being declared ' +
+        'here, and so is every custom gate the project declares (`maestro.gates.<id>`) under ' +
+        'its id. An entry here of the same id replaces the project’s whole.',
+    ),
+}).describe(
+  'An executable plan: the phase DAG, the pipelines phases run through, the capacity ' +
+    'pools they contend for, and the gates they must pass. Layered over the project’s own ' +
+    'configuration (`.vinta-ai-workflows.yaml`) when it is loaded.',
+)
+
+export type Workflow = z.infer<typeof WorkflowSchema>
+export type WorkflowInput = z.input<typeof WorkflowSchema>
+export type Node = z.infer<typeof NodeSchema>
+export type Dependency = z.infer<typeof DependencySchema>
+export type Gate = z.infer<typeof GateSchema>
+export type CommandGate = z.infer<typeof CommandGateSchema>
+export type JudgeGate = z.infer<typeof JudgeGateSchema>
+export type Judge = z.infer<typeof JudgeSchema>
+export type Chore = z.infer<typeof ChoreSchema>
+export type CodegenStep = z.infer<typeof CodegenStepSchema>
+export type GateTuning = z.infer<typeof GateTuningSchema>
+export type Project = z.infer<typeof ProjectSchema>
+export type ProjectService = z.infer<typeof ServiceSchema>
+export type ProjectCommands = z.infer<typeof CommandsSchema>
+export type ProjectDatabase = z.infer<typeof DatabaseSchema>
+export type Resource = z.infer<typeof ResourceSchema>
+export type CrewMember = z.infer<typeof CrewMemberSchema>
+export type Pipeline = z.infer<typeof PipelineSchema>
+export type SideEffect = z.infer<typeof SideEffectSchema>
+export type HarnessId = (typeof HARNESS_IDS)[number]
+export type EffectId = (typeof EFFECT_IDS)[number]
+export type AgentRole = (typeof AGENT_ROLES)[number]
+
+/** Narrows a gate to its judge form. Every consumer of `cmd` asks this first. */
+export function isJudgeGate(gate: Gate): gate is JudgeGate {
+  return 'judge' in gate
+}

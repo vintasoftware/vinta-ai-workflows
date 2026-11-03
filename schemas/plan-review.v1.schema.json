@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/plan-review.v1.schema.json",
+  "title": "vinta-ai-maestro plan review",
+  "description": "A plan review: comments on a plan-feature plan and the conversation about it between the person reviewing it and the agent that wrote it. Lives at `ai-plans/<workflow-id>.review.json` in a target project, beside the plan and its `.workflow.json`, and is committed with them. Written by the `vinta-ai-maestro` review page and by `vinta-ai-maestro review reply`; read by the agent running `plan-feature` through `vinta-ai-maestro review wait`. GENERATED from packages/vinta-ai-maestro/src/review/document.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "approved"
+      ]
+    },
+    "approved_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "anchor": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "plan"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "section"
+                  },
+                  "section": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "heading": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "kind",
+                  "section"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "phase"
+                  },
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "implementer",
+                      "fixer"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "role"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "gate"
+                  },
+                  "gate": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "kind",
+                  "gate"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "quote": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "author": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "human",
+                  "agent"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "resolved"
+            ]
+          },
+          "resolved_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sent_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "author": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                },
+                "body": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "created_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sent_at": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "id",
+                "author",
+                "body",
+                "created_at"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "anchor",
+          "author",
+          "body",
+          "created_at",
+          "status",
+          "replies"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "conversation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "message",
+              "approval"
+            ]
+          },
+          "author": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "human",
+                  "agent"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "comment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "delivered_at": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "author",
+          "body",
+          "created_at"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "workflow_id",
+    "status",
+    "comments",
+    "conversation"
+  ],
+  "additionalProperties": false
+}

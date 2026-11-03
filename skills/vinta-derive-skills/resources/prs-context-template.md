@@ -3,10 +3,11 @@
 schema_version: 1                        # see schemas/prs-context-frontmatter.v1.schema.json
 plan_id: <plan-id>                       # filename feature portion, kebab-case
 feature_name: <FEATURE_NAME>             # UPPERCASE_WITH_UNDERSCORES, matches plan/spec
-phase_id: <phase-id>                     # e.g. "1", "4a"
-phase_title: <phase title>               # verbatim from the plan's Phased Rollout section
-branch: plan/<feature-kebab>/phase-<id>  # branch the PR opens from
-base: <main | plan/<feature-kebab>/phase-<prev-id>>  # PR target branch. Stacked: FIRST phase = default branch; every LATER phase = the PREVIOUS phase's branch (not the default branch). Modular / single-PR: default branch.
+kind: phase                              # phase (default) | integration (a phase's integ- branch) | plan (the PR that lands the whole plan)
+phase_id: <phase-id>                     # e.g. "1", "4a". Omit for kind: plan
+phase_title: <phase title>               # verbatim from the plan's Phased Rollout section. Omit for kind: plan
+branch: plan/<feature-kebab>/phase-<id>  # branch the PR opens from (integ-<id> for integration; final wave-<N> for a stacked plan PR)
+base: <main | plan/<feature-kebab>/phase-<dep-id> | plan/<feature-kebab>/integ-<id>>  # PR target branch. Stacked phase: its dependency-derived base (default branch only with no dependencies). Integration, plan, modular / single-PR: default branch.
 created_at: <ISO 8601 timestamp>
 status: pending                          # `pending` until published; `published` after CLI run
 pr_url:                                  # set by open-pr-from-context after publishing

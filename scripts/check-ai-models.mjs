@@ -85,14 +85,14 @@ function liveIdsFromLiteLLM(doc) {
 // --- match helpers --------------------------------------------------------------
 
 // A cited id is alive if the aggregator lists it exactly or as a dated/versioned snapshot
-// (claude-haiku-4-5 ⊂ claude-haiku-4-5-20251001 / ...@20251001).
+// (claude-haiku-4-5 ⊂ claude-haiku-4-5-20251001 / ...@20251001), optionally provider-
+// prefixed (LiteLLM's vertex_ai/…, Bedrock's us.anthropic.…). Anything looser misreads
+// sibling models as snapshots: claude-sonnet-5 must not match claude-sonnet-5-5, and
+// gemini-3-pro must not match gemini-3-pro-image.
+const SNAPSHOT_SUFFIX = String.raw`(?:-\d{8}|-\d{4}-\d{2}-\d{2}|@\d{8})?(?:-v\d+(?::\d+)?)?`;
 function liveMatch(cited, liveId) {
-  return (
-    liveId === cited ||
-    liveId.startsWith(cited + '-') ||
-    liveId.startsWith(cited + '@') ||
-    liveId.includes(cited)
-  );
+  const escaped = cited.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[/.])${escaped}${SNAPSHOT_SUFFIX}$`).test(liveId);
 }
 
 // Family root = alpha/dash prefix up to the first version digit.
@@ -110,7 +110,12 @@ function citedIdsByVendor(doc) {
   for (const tier of doc.tiers ?? []) {
     for (const [vendor, models] of Object.entries(tier.models ?? {})) {
       (out[vendor] ??= new Set());
-      for (const entry of models) out[vendor].add(entry.id);
+      for (const entry of models) {
+        out[vendor].add(entry.id);
+        // A fallback is spawned when its model runs out of quota, so a dead one
+        // fails exactly when it is needed. Same vendor: it runs on the same harness.
+        if (entry.fallback) out[vendor].add(entry.fallback);
+      }
     }
   }
   return out;
@@ -151,7 +156,8 @@ Produce an UPDATED version of the YAML file that:
 - keeps the exact same top-level structure, keys, comment style, \`source:\` block, and tier numbering,
 - keeps the leading comment block and the \`# yaml-language-server\` directive,
 - updates \`last_verified\` to today's date if you know it; otherwise leave it,
-- preserves \`note:\` caveats where still accurate, edits them where not.
+- preserves \`note:\` caveats where still accurate, edits them where not,
+- preserves every \`fallback:\` — it is a budget decision, not a tier placement: replace a dead fallback id with its closest current equivalent, and keep it on the same model if that model moves tier, but never add or remove one.
 
 Return ONLY the full updated YAML between <yaml> and </yaml> tags. No prose.`;
 

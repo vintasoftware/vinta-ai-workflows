@@ -79,6 +79,8 @@ For Python: read `pyproject.toml:[tool.poetry.scripts]` / `[project.scripts]` + 
 
 For other languages: read `Makefile` + `justfile` + language-specific files (`Cargo.toml:[bin]`, etc).
 
+Worktree provisioning: look for an existing script that sets up a git worktree, such as `bin/*worktree*` / `scripts/*worktree*` files, a `Makefile` / `justfile` target or `package.json` script with `worktree` in its name, or a `.gtrconfig` / `git gtr` setup. Record each one in `commands.worktree_candidates`, with a matching teardown when one exists. The bootstrap's `prepare-worktree` question offers them as the project's own provisioning command.
+
 Note: many repos have the test command in CI config but not surfaced as a top-level script. Read `.github/workflows/*.yml` / `.gitlab-ci.yml` / `.circleci/config.yml` / `Jenkinsfile` to confirm.
 
 ### 5. Monorepo shape
@@ -164,6 +166,7 @@ For each skill, also classify:
 
 - `vinta-managed` — directory name starts with `vinta-` (installed by `vinta-ai-workflows`; can be left alone or refreshed via that CLI).
 - `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `write-unit-test`). `implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`.
+- `integration` — installed by an external tool that the bootstrap's **Integrations** group knows about. The directory carries that tool's marker, such as `pr-review-canvas/` with a `.pr-review-install` file (installed by `pr-review install-skill`). The tool owns it. Record it, and also record `pr-review.config.yml` at the repo root when present, so the bootstrap can default the integration question to `Yes`.
 - `project-custom` — anything else; written by the team.
 
 **Sub-agents** — list every agent file with its name + description:
@@ -275,6 +278,8 @@ commands:
   lint: <e.g. pnpm lint>
   format: <e.g. pnpm format>
   typecheck: <e.g. pnpm build (tsc) — or null if no separate command>
+  worktree_candidates:          # existing worktree-provisioning scripts; [] when none
+    - { prepare: <e.g. ./bin/new-worktree>, teardown: <e.g. ./bin/rm-worktree — or null>, signal: <path of the script / Makefile / package.json> }
 
 tests:
   unit_framework: vitest | jest | pytest | ...
