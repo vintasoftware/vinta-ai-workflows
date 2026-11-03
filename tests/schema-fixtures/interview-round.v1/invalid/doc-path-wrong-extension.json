@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "round": 1,
+  "interview": {
+    "slug": "order-tags",
+    "title": "Order tags"
+  },
+  "groups": [
+    {
+      "id": "A",
+      "title": "A",
+      "decisions": [
+        {
+          "id": "A1",
+          "title": "Who?",
+          "explainer": {
+            "path": "docs/a.txt"
+          },
+          "input": {
+            "type": "single"
+          }
+        }
+      ]
+    }
+  ]
+}

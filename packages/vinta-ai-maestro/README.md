@@ -88,6 +88,9 @@ Every command runs against a project checkout — your project, not this one. `-
 | `review open <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Serves the UI and prints the URL of that plan's [review page](#reviewing-a-plan-before-it-runs). |
 | `review wait <workflow.json> [--timeout <s>]` | The authoring agent's side of the review chat. It blocks until the person sends something, prints it as JSON, and marks it delivered. It gives up after `--timeout` (default 110 s) with `{"kind":"timeout"}`. |
 | `review reply <workflow.json> -m <text\|-> [--comment <id> [--resolve]] [--as <name>]` | Answers in the chat, or on a comment thread, as the agent. |
+| `interview start --dir <interview-dir> [--port <n>] [--no-open]` | Serves the [interview page](#running-an-interview-in-the-browser) for one interview in the background and prints its URL — the token is in it. |
+| `interview wait --dir <interview-dir> --round <n> [--timeout <s>]` | The agent's side: blocks until the person submits round `<n>` and prints the answers file's path. Exits 124 after `--timeout` (default 3600 s), 1 when no server is up. |
+| `interview status\|stop --dir <interview-dir>` | The server and every round with whether it is answered, as JSON; and stopping the server. |
 | `doctor <workflow.json> [--repo <dir>] [--resume <run-id>] [--codegen]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. `--codegen` also runs each codegen step twice in the checkout to flag output that is not deterministic or is stale at `HEAD`, then puts the generated files back. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
@@ -951,6 +954,18 @@ The chat shows the agent's state:
 When the agent edits the plan or the workflow, the page notices and reloads them. **Approve plan** ends the loop: the agent's next `wait` returns `{"kind": "approved"}`. If you write again after approving, the review reopens.
 
 **Where it lives.** The review is a committed document, `ai-plans/<id>.review.json`, written beside the plan and its workflow and validated by [`plan-review.v1.schema.json`](../../schemas/plan-review.v1.schema.json). The next reader of the plan can see what was questioned and what changed. The agent's presence (pid and heartbeat) and the file lock are per-machine state under `.vinta-ai-maestro/reviews/`. Both the page and the agent write the review under that lock, so neither can overwrite the other. The browser can only write as the person. Agent replies come only through `review reply`.
+
+## Running an interview in the browser
+
+A skill that interviews a person — `create-spec`'s Step 0, through the `interview-ui` foundation skill — can ask its decisions on a page instead of in chat. The agent writes one round at a time as JSON (`.vinta-ai-workflows/interviews/<slug>/rounds/round-01.json`, the [`interview-round.v1`](../../schemas/interview-round.v1.schema.json) schema): groups of decisions, each with the context the agent already knows, an explainer with Mermaid diagrams, and options with their consequences. The page shows one decision per screen; the person answers, waives what does not apply, asks the agent questions in the panel beside it, and submits. The server writes `answers/round-01.json` ([`interview-answers.v1`](../../schemas/interview-answers.v1.schema.json)) and the agent's `wait` returns.
+
+```bash
+vinta-ai-maestro interview start --dir .vinta-ai-workflows/interviews/order-tags   # prints the URL; it carries the token
+vinta-ai-maestro interview wait  --dir .vinta-ai-workflows/interviews/order-tags --round 1 --timeout 600
+vinta-ai-maestro interview stop  --dir .vinta-ai-workflows/interviews/order-tags
+```
+
+The server binds `127.0.0.1`, serves documents only from the interview's `docs/`, accepts a round's answers once, and tells the page when the agent writes the next round. It is the same bundle and the same design system as the run monitor, at `dist/ui/interview.html`. Nothing here runs an agent: whichever session runs the skill is the interviewer, and `wait` is how it listens. [SPEC.md § 20](SPEC.md#20-browser-interview) has the protocol.
 
 ## Walkthrough — two phases in parallel
 

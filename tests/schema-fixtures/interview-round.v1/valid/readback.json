@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "round": 3,
+  "interview": {
+    "slug": "order-tags",
+    "title": "Order tags — spec interview"
+  },
+  "kind": "readback",
+  "summary": "Ops staff tag orders from the admin; optimistic lock on concurrent edits.",
+  "replies": [
+    {
+      "decision_id": "D4",
+      "question": "What about merges?",
+      "answer": "Needs tombstones — a new phase."
+    }
+  ],
+  "groups": [
+    {
+      "id": "R",
+      "title": "Read-back",
+      "decisions": [
+        {
+          "id": "R1",
+          "title": "Anything I got wrong before I draft?",
+          "explainer": "Everything above is what the spec will say.",
+          "waivable": false,
+          "input": {
+            "type": "confirm",
+            "options": [
+              {
+                "value": "go",
+                "label": "Looks good",
+                "recommended": true
+              },
+              {
+                "value": "corrections",
+                "label": "Some corrections (I'll list)",
+                "tags": [
+                  "Type them below"
+                ]
+              }
+            ],
+            "allow_other": true
+          }
+        }
+      ]
+    }
+  ]
+}

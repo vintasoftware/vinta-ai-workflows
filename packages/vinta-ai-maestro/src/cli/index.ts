@@ -19,6 +19,7 @@ import { guardHookMain } from '../guard/hook.ts'
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
 import { CODEGEN_USAGE, GATE_USAGE, codegenCommand, gateCommand } from './gate.ts'
+import { INTERVIEW_USAGE, interviewCommand } from './interview.ts'
 import { JUDGE_USAGE, judgeCommand } from './judge.ts'
 import { PAUSE_USAGE, STOP_USAGE, pauseCommand, stopCommand } from './halt.ts'
 import { LOGS_USAGE, logsCommand } from './logs.ts'
@@ -59,6 +60,10 @@ usage: vinta-ai-maestro <command> [options]
                              Serve the plan's review page — graph, prompts,
                              gates, comments, and a chat with its author.
   review wait|reply …        The authoring agent's side of that chat.
+  interview start|wait|status|stop --dir <interview-dir>
+                             A decision-heavy interview as a browser form:
+                             the agent writes rounds as JSON, the person
+                             answers them on the interview page.
   doctor <workflow.json>     Preflight every check a run depends on, and exit
                              non-zero if a run cannot start.
   simulate <workflow.json>   Project the schedule without running it: wall
@@ -127,6 +132,7 @@ const USAGES: Readonly<Record<string, string>> = {
   doctor: DOCTOR_USAGE,
   validate: VALIDATE_USAGE,
   review: REVIEW_USAGE,
+  interview: INTERVIEW_USAGE,
   simulate: SIMULATE_USAGE,
   serve: SERVE_USAGE,
   ui: SERVE_USAGE,
@@ -183,6 +189,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await validateCommand(rest, io)
     case 'review':
       return await reviewCommand(rest, io)
+    case 'interview':
+      return await interviewCommand(rest, io)
     case 'simulate':
       return await simulateCommand(rest, io)
     case 'serve':
@@ -259,6 +267,7 @@ export { doctorCommand } from './doctor.ts'
 export { simulateCommand } from './simulate.ts'
 export { validateCommand } from './validate.ts'
 export { reviewCommand, describeAnchor, type ReviewDeps } from './review.ts'
+export { interviewCommand, INTERVIEW_USAGE, WAIT_TIMED_OUT, type InterviewDeps } from './interview.ts'
 export { serveCommand, announce, type ServeDeps } from './serve.ts'
 export { runCommand, type RunDeps } from './run.ts'
 export { statusCommand } from './status.ts'
