@@ -1,43 +1,46 @@
 ---
 name: interview-ui
-description: Run an agent interview as a full-screen browser form instead of a chat exchange. The agent writes one round at a time as JSON (`interview-round.v1`) plus Markdown/Mermaid or HTML explainer docs; the bundled zero-dependency Node server (`scripts/interview-ui.mjs`) serves the shell (`resources/index.html`), the user answers one decision per screen with context, diagrams, and per-option consequences in view, and the server writes the answers back as JSON (`interview-answers.v1`) and unblocks the agent. The chat panel inside the UI is for questions to the agent, not decisions. Used by `create-spec` for its Step 0 interview when the user prefers the browser; reusable by any skill with a decision-heavy interview. Use when a user says "open the interview in the browser", "I want to see the options properly", "walk me through the decisions in a UI", or when a skill delegates its interview here.
+description: Run an agent interview as a full-screen browser form instead of a chat exchange. The agent writes one round at a time as JSON (`interview-round.v1`) plus Markdown/Mermaid or HTML explainer docs; `vinta-ai-maestro interview` serves the interview page — the same design system as maestro's run monitor — where the user answers one decision per screen with context, diagrams, and per-option consequences in view, and writes the answers back as JSON (`interview-answers.v1`) to unblock the agent. The chat panel inside the page is for questions to the agent, not decisions. Used by `create-spec` for its Step 0 interview when the user prefers the browser; reusable by any skill with a decision-heavy interview. Use when a user says "open the interview in the browser", "I want to see the options properly", "walk me through the decisions in a UI", or when a skill delegates its interview here.
 ---
 
 # Interview UI
 
-Chat is a poor surface for deciding. Options arrive as one-line labels, the context that makes them meaningful scrolled away three messages ago, and a diagram is impossible. This skill moves the **decisions** of an interview into a browser form where each decision owns the whole screen: what the agent already knows, an explanation with diagrams, the options as cards with their consequences, and the agent's recommended default marked. The chat that remains inside the UI is for **questions** — the user asks, the agent answers in the next round.
+Chat is a poor surface for deciding. Options arrive as one-line labels, the context that makes them meaningful scrolled away three messages ago, and a diagram is impossible. This skill moves the **decisions** of an interview into a browser form where each decision owns the whole screen: what the agent already knows, an explanation with diagrams, the options as cards with their consequences, and the agent's recommended default marked. The chat that remains inside the page is for **questions** — the user asks, the agent answers in the next round.
 
-The protocol is round-based and file-based, so it works identically under Claude Code, Codex, Cursor, and Copilot: nothing in the browser talks to the agent directly. The agent writes a round, blocks on a `wait` command, and resumes when the answers file lands.
+The protocol is round-based and file-based, so it works identically under Claude Code, Codex, Cursor, and Copilot: nothing in the browser talks to the agent directly. The agent writes a round, blocks on a `wait` command, and resumes when the answers file lands. The page is served by [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro): the same package, bundle and design system as its run monitor, so an interview looks like the rest of the toolchain.
 
 ```
 <interview-dir>/
 ├── rounds/round-01.json     ← agent writes   (interview-round.v1)
-├── answers/round-01.json    ← browser writes (interview-answers.v1), via the server
+├── answers/round-01.json    ← page writes    (interview-answers.v1), via the server
 ├── docs/**.md | **.html     ← agent writes explainer docs the round references
-└── server.json              ← pid + url of the running server (managed by the script)
+├── server.json              ← pid + URL of the running server (managed by maestro)
+└── server.log               ← the server's output
 ```
 
 Default `<interview-dir>`: `.vinta-ai-workflows/interviews/<slug>/` — the gitignored per-machine state dir the toolchain already uses. The durable artefact is whatever the calling skill produces (the spec, the plan); the interview files are the working trail. Keep them until the artefact is written and confirmed, then leave them — they are cheap and useful when the artefact is questioned later.
 
 ## Requirements
 
-- Node ≥ 18 on the machine running the agent. The server imports only `node:*` modules.
+- **`vinta-ai-maestro`** reachable from the project. When it is a devDependency, every command below is `npx --no-install vinta-ai-maestro interview …`. When it is not, `npx vinta-ai-maestro@alpha interview …` fetches it (`@alpha` while only pre-releases are published; plain `npx vinta-ai-maestro` once a stable exists). The commands below write `vinta-ai-maestro` and mean whichever of those the project uses. Run `vinta-ai-maestro interview --help` once to confirm it is there; a failure means the browser surface is unavailable and the interview runs in chat.
+- Node ≥ 22 on the machine running the agent (maestro's requirement).
 - A browser on the same machine. The server binds `127.0.0.1` only and never accepts remote connections.
-- Network access from the browser for the shell's renderer libraries (`marked`, `DOMPurify`, `mermaid` from cdnjs). Offline, the shell still renders every decision and option; Markdown falls back to preformatted text and diagrams show their source.
+
+No network access is needed from the browser: the page, its Markdown renderer and Mermaid are bundled.
 
 ## Protocol
 
 ### 0. Decide the surface
 
-Only when the calling skill hasn't already decided. `AskUserQuestion`: *"Where do you want to make the interview decisions?"* with options `In the browser (one decision per screen, with diagrams)` and `Here in chat`. Browser requires the agent to be able to run Node and the user to have a browser on this machine; if either is in doubt, say so and default to chat.
+Only when the calling skill hasn't already decided. `AskUserQuestion`: *"Where do you want to make the interview decisions?"* with options `In the browser (one decision per screen, with diagrams)` and `Here in chat`. Browser requires `vinta-ai-maestro` to be runnable and the user to have a browser on this machine; if either is in doubt, say so and default to chat.
 
 ### 1. Start the server once per interview
 
 ```bash
-node ai-tools/skills/interview-ui/scripts/interview-ui.mjs start --dir .vinta-ai-workflows/interviews/<slug>
+vinta-ai-maestro interview start --dir .vinta-ai-workflows/interviews/<slug>
 ```
 
-Prints the URL and tries to open the default browser (`--no-open` to skip). Re-running `start` on a live server is a no-op that reprints the URL. Tell the user the URL in chat as well — the browser may not open in a sandboxed session. `--port N` pins a port; default is random.
+Prints the page's URL and tries to open the default browser (`--no-open` to skip). Re-running `start` on a live server is a no-op that reprints the URL. Tell the user the URL in chat as well — the browser may not open in a sandboxed session. `--port N` pins a port; default is random. **The URL carries the access token** — it is the credential to the interview, so put it in chat for the user and nowhere else.
 
 ### 2. Write a round
 
@@ -60,12 +63,12 @@ See [resources/examples/round-01.json](resources/examples/round-01.json) and [re
 ### 3. Block until the round is submitted
 
 ```bash
-node ai-tools/skills/interview-ui/scripts/interview-ui.mjs wait --dir .vinta-ai-workflows/interviews/<slug> --round NN --timeout 3600
+vinta-ai-maestro interview wait --dir .vinta-ai-workflows/interviews/<slug> --round NN --timeout 600
 ```
 
-Exits `0` and prints the answers path when `answers/round-NN.json` appears; `124` on timeout (default one hour — raise it for long rounds, or re-run `wait`); `1` when the round file is missing or the server is not running. Say in chat, before waiting: *"Round NN is ready at `<url>`. I'll continue when you submit it."* Nothing else — the decisions happen in the browser.
+Exits `0` and prints the answers path when `answers/round-NN.json` appears; `124` on timeout (default one hour — set `--timeout` under the ceiling your harness puts on one command, and run `wait` again when it returns `124`); `1` when the round file is missing or the server is not running. Say in chat, before waiting: *"Round NN is ready at `<url>`. I'll continue when you submit it."* Nothing else — the decisions happen in the browser.
 
-The shell saves drafts in the browser, so a reload or a closed tab loses nothing before submission.
+The page saves drafts in the browser, so a reload or a closed tab loses nothing before submission.
 
 ### 4. Read the answers and loop
 
@@ -86,18 +89,18 @@ The last round has `"kind": "readback"`: a `summary` in Markdown of every load-b
 ### 6. Stop the server
 
 ```bash
-node ai-tools/skills/interview-ui/scripts/interview-ui.mjs stop --dir .vinta-ai-workflows/interviews/<slug>
+vinta-ai-maestro interview stop --dir .vinta-ai-workflows/interviews/<slug>
 ```
 
 After the artefact is written. `status` prints the server state and which rounds are answered, useful when resuming an interrupted interview: start the server again, and `wait` on the first unanswered round.
 
-## Shell behaviour the agent can rely on
+## Page behaviour the agent can rely on
 
 - One decision per screen; the left rail lists every group and decision with done / waived / open state and lets the user go back and change an earlier answer before submitting.
-- Submit is refused while a `required` decision is neither answered nor waived; the shell jumps to the first open one.
-- Submitted rounds stay viewable read-only; the shell switches to the next round on its own when the agent writes it (server-sent events, with polling as fallback).
-- Markdown renders with GitHub-flavoured tables and Mermaid fences; HTML explainers render in a sandboxed iframe (`allow-scripts`, no same-origin). Everything passes through DOMPurify.
-- Light and dark themes follow the OS.
+- Submit is refused while a `required` decision is neither answered nor waived; the page jumps to the first open one.
+- A round is accepted once. Submitted rounds stay viewable read-only; the page switches to the next round on its own when the agent writes it (server-sent events, with polling as fallback).
+- Markdown renders with GitHub-flavoured tables and Mermaid fences; HTML explainers render in a sandboxed iframe (`allow-scripts`, no same-origin). Raw HTML inside Markdown is shown as text.
+- Light and dark themes follow the OS, or the toggle in the top bar — the same theme setting as maestro's run monitor.
 
 ## Pitfalls
 
@@ -105,13 +108,14 @@ After the artefact is written. `status` prints the server state and which rounds
 - **Options without consequences.** A card that says only "Optimistic lock" is the chat experience with more pixels. The `consequences` line is the point.
 - **Answering a user question in one sentence when the explainer was the problem.** If they had to ask, the screen did not explain enough. Fix the screen and re-ask.
 - **Treating `waived` as unknown.** It is the user saying "not applicable". Put it in negative scope.
-- **Writing `round-2.json`.** Two digits: `round-02.json`. The server lists only `round-NN.json`.
+- **Writing `round-2.json`.** Two digits: `round-02.json`. The server lists only `round-NN.json`, and the body's `round` must match the number in the filename.
 - **Explainer paths outside `docs/`.** The server refuses them. Keep docs under `<interview-dir>/docs/` and reference them as `docs/<file>`.
 - **Forgetting to tell the user the URL.** In headless or sandboxed sessions the browser does not open on its own.
 - **Leaving the server running across interviews.** One server per interview dir; `stop` when the artefact is written.
+- **A `wait` longer than the harness allows.** The default is an hour; a harness that caps a command at ten minutes kills it first. Pass `--timeout` under the cap and loop on exit code `124`.
 
 ## Verification
 
-- `node ai-tools/skills/interview-ui/scripts/interview-ui.mjs status --dir <interview-dir>` shows `alive: true` and the expected rounds with `answered` flags.
-- `curl -s http://127.0.0.1:<port>/api/rounds/1 | head` returns the round JSON you wrote; a `404` means the filename is wrong.
+- `vinta-ai-maestro interview status --dir <interview-dir>` shows `server.alive: true` and the expected rounds with `answered` flags.
+- `curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:<port>/api/interview/rounds/1 | head` returns the round JSON you wrote (the token is the one in the printed URL); a `404` means the filename is wrong, a `422` that the file does not match the schema — the body names the field.
 - The answers file validates against `interview-answers.v1` (`ajv validate -s schemas/interview-answers.v1.schema.json -d answers/round-01.json` when `ajv-cli` is available).
