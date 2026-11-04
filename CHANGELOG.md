@@ -41,7 +41,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the band. Cards are now drawn at exactly the slot the layout reserves
   (96px, room for a two-line name and the status row with a step).
 
-## [0.7.0] — YYYY-MM-DD
+## [0.7.0] — 2026-11-03
 
 <!-- Graduates the 0.7.0-alpha1 … 0.7.0-alpha39 series (2026-09-11 to
      2026-10-24). This section is the net change since 0.6.1. The
