@@ -39,6 +39,11 @@ export const STYLES = `
   --vdag-status-done: #087f5b;
   --vdag-status-failed: #e03131;
   --vdag-status-blocked: #495057;
+  /* A dependency that has delivered, and one being consumed right now. A host
+     that binds the statuses to its own tones should bind these two as well,
+     or the edges will keep the defaults' hues while the cards take the host's. */
+  --vdag-edge-done: color-mix(in oklch, var(--vdag-status-done) 55%, var(--vdag-line));
+  --vdag-edge-active: var(--vdag-status-running);
   /* Derived once, so the rules below never repeat a mix. */
   --vdag-accent-soft: color-mix(in oklch, var(--vdag-accent) 18%, transparent);
   --vdag-accent-line: color-mix(in oklch, var(--vdag-accent) 55%, var(--vdag-line));
@@ -227,6 +232,26 @@ svg { display: block; }
 }
 .arrow { fill: var(--vdag-line); }
 .arrow-hot { fill: var(--vdag-accent); }
+.arrow-active { fill: var(--vdag-edge-active); }
+.arrow-done { fill: var(--vdag-edge-done); }
+/* The run, in the edges (scene.ts \`edgeFlow\`): a delivered dependency is drawn
+   in the done colour, and one being consumed carries a slow dash towards the
+   node working on it. Still, under reduced motion — the colour says it all. */
+.edge[data-flow='done'] {
+  stroke: var(--vdag-edge-done);
+  marker-end: url(#vdag-arrow-done);
+}
+.edge[data-flow='active'] {
+  stroke: var(--vdag-edge-active);
+  stroke-width: 2;
+  stroke-dasharray: 7 5;
+  marker-end: url(#vdag-arrow-active);
+  animation: vdag-flow 1.4s linear infinite;
+}
+@keyframes vdag-flow { to { stroke-dashoffset: -24; } }
+@media (prefers-reduced-motion: reduce) {
+  .edge[data-flow='active'] { animation: none; }
+}
 /* A node in hand — selected or under the pointer — pulls its own edges forward
    and lets the rest recede, which is what makes a dense wave readable. */
 .edge.hot, .edge[data-linked] {
@@ -292,6 +317,9 @@ svg { display: block; }
   gap: 5px;
   align-items: flex-start;
   padding: 9px 12px 9px 13px;
+  /* The height is the slot (scene.ts); what does not fit is clipped, never
+     drawn over the band's edge. */
+  overflow: hidden;
   border: 1px solid var(--vdag-line);
   border-left: 4px solid var(--vdag-node-color, var(--vdag-status-pending));
   border-radius: var(--vdag-radius);
@@ -302,6 +330,17 @@ svg { display: block; }
   transition: border-color 0.15s, box-shadow 0.15s, opacity 0.15s;
 }
 .node:hover, .node[data-linked] { border-color: var(--vdag-accent-line); }
+/* Work in progress is the thing a live graph is watched for, so a running
+   card wears its colour on every side with a soft glow, and a card parked on
+   capacity wears its own colour without the glow — visible, not alarming.
+   Selection, below, still wins over both. */
+.node[data-status='running'] {
+  border-color: var(--vdag-node-color);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--vdag-node-color) 22%, transparent), var(--vdag-shadow);
+}
+.node[data-status='waiting_on_capacity'] {
+  border-color: color-mix(in oklch, var(--vdag-node-color) 70%, var(--vdag-line));
+}
 .node[aria-pressed='true'] {
   border-color: var(--vdag-accent);
   box-shadow: 0 0 0 3px var(--vdag-accent-soft), var(--vdag-shadow);
@@ -341,6 +380,15 @@ svg { display: block; }
   border-radius: 50%;
   background: var(--vdag-node-color, var(--vdag-status-pending));
 }
+.node-step {
+  color: var(--vdag-muted);
+  font-family: var(--vdag-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.node-step::before { content: '·'; margin-right: 6px; color: var(--vdag-muted); }
+.node[data-status='running'] .node-step { color: var(--vdag-node-color); }
 .node[data-status='running'] .node-status::before { animation: vdag-pulse 1.6s ease-in-out infinite; }
 @keyframes vdag-pulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--vdag-node-color) 45%, transparent); }
