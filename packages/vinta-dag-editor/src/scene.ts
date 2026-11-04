@@ -202,18 +202,36 @@ function edgeLayer(
     path.dataset.from = edge.from
     path.dataset.to = edge.to
     path.dataset.edge = edge.id
+    const flow = edgeFlow(view.dag, edge)
+    if (flow !== null) path.dataset.flow = flow
     if (isLinked(view.selection, edge)) path.dataset.linked = ''
     svg.append(path)
   }
   return svg
 }
 
-/** Two arrowheads: the line colour, and the accent for an edge in hand. */
+/**
+ * What a dependency is doing, read off the two nodes it joins: `active` while
+ * the downstream node is running on it, `done` once the upstream node has
+ * delivered and nothing is consuming it yet. Anything else is a plain line.
+ * A run is otherwise invisible in the edges — every status change lands on a
+ * card — and this is what lets the eye follow work across waves.
+ */
+export function edgeFlow(dag: Dag, edge: DagEdge): 'active' | 'done' | null {
+  const to = dag.nodes.find((node) => node.id === edge.to)
+  if (to?.status === 'running') return 'active'
+  const from = dag.nodes.find((node) => node.id === edge.from)
+  return from?.status === 'done' ? 'done' : null
+}
+
+/** Four arrowheads: the line colour, the accent for an edge in hand, and the two run states. */
 function markers(doc: Document): Element {
   const defs = doc.createElementNS(SVG_NS, 'defs')
   for (const [id, className] of [
     ['vdag-arrow', 'arrow'],
     ['vdag-arrow-hot', 'arrow-hot'],
+    ['vdag-arrow-active', 'arrow-active'],
+    ['vdag-arrow-done', 'arrow-done'],
   ] as const) {
     const marker = doc.createElementNS(SVG_NS, 'marker')
     marker.setAttribute('id', id)
@@ -269,7 +287,9 @@ function nodeControls(view: SceneView, node: DagNode, at: DagPoint): readonly HT
   card.style.left = `${at.x}px`
   card.style.top = `${at.y}px`
   card.style.width = `${NODE_WIDTH}px`
-  card.style.minHeight = `${NODE_HEIGHT}px`
+  // Exactly the slot `layoutDag` gave it: the bands and the scene are sized
+  // from NODE_HEIGHT, and a taller card would hang out of both.
+  card.style.height = `${NODE_HEIGHT}px`
   card.dataset.status = node.status
   const statusLabel = view.strings.status[node.status]
   card.setAttribute('aria-label', view.strings.node({ name: node.name, status: statusLabel }))
@@ -294,12 +314,20 @@ function nodeControls(view: SceneView, node: DagNode, at: DagPoint): readonly HT
           ? 'refused'
           : 'ok'
   }
+  const status = text(view.doc, 'span', 'node-status', statusLabel)
+  // The status says a node is running; the step says what it is doing while
+  // it runs. It is the host's word, drawn verbatim on the status row — the
+  // same row, so the card keeps the height its slot was sized for.
+  if (node.step !== undefined && node.step !== '') {
+    card.dataset.step = node.step
+    status.append(text(view.doc, 'span', 'node-step', node.step))
+  }
   card.append(
     // The id is how a phase is named everywhere else — the roster, the
     // transcript, the plan — so the card carries it beside the prose name.
     text(view.doc, 'span', 'node-id', node.id),
     text(view.doc, 'span', 'node-name', node.name),
-    text(view.doc, 'span', 'node-status', statusLabel),
+    status,
   )
   if (view.mode !== 'edit') return [card]
 

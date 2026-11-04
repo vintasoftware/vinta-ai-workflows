@@ -44,6 +44,11 @@ vinta-dag {
   --vdag-status-done: var(--tone-ok);
   --vdag-status-failed: var(--tone-error);
   --vdag-status-blocked: var(--tone-idle-foreground);
+  /* The edges follow the same tones as the cards they join: a delivered
+     dependency in the ok hue, softened towards the line colour so a finished
+     wave does not shout, and one being consumed in the active hue. */
+  --vdag-edge-done: color-mix(in oklch, var(--tone-ok) 60%, var(--line));
+  --vdag-edge-active: var(--tone-active);
   --vdag-danger: var(--destructive);
   --vdag-shadow: var(--shadow-xs);
   font-family: var(--font-sans);

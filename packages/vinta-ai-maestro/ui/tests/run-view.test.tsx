@@ -678,6 +678,47 @@ test('the coordinator docks beside the run and the header button toggles it', as
   localStorage.removeItem('vinta-ai-maestro-coordinator')
 })
 
+test('a running node’s card carries its step, the edges follow the run, and the pools sit under the graph', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [node('impl', 'done'), { ...node('api', 'running', 1), step: 'gate' }, node('docs', 'pending', 1)],
+        edges: [
+          { from: 'impl', to: 'api', artifact: 'the model' },
+          { from: 'impl', to: 'docs', artifact: 'the model' },
+        ],
+        resources: [
+          resource('lane', 3, 1, ['api']),
+          resource('test-suite', 1, 1, ['api']),
+          resource('db-a', 1, 0),
+          resource('db-b', 1, 0),
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(cardColorOf(container, 'api')).toBe('var(--vdag-status-running)'))
+  const root = container.querySelector('vinta-dag')?.shadowRoot
+  const card = (id: string) => root?.querySelector(`button[data-action="select-node"][data-id="${id}"]`)
+  // The step is the daemon's word, drawn only while the node runs on it.
+  expect(card('api')?.getAttribute('data-step')).toBe('gate')
+  expect(card('api')?.querySelector('.node-step')?.textContent).toBe('gate')
+  expect(card('impl')?.getAttribute('data-step')).toBe(null)
+  // A delivered dependency being consumed is active; one nobody has picked up yet is done.
+  expect(root?.querySelector('.edge[data-from="impl"][data-to="api"]')?.getAttribute('data-flow')).toBe('active')
+  expect(root?.querySelector('.edge[data-from="impl"][data-to="docs"]')?.getAttribute('data-flow')).toBe('done')
+  // The strip under the graph: the pools in use first, three at most, and no dialog of its own.
+  expect([...container.querySelectorAll('[data-pools-strip] [data-resource]')].map((row) => row.getAttribute('data-resource'))).toEqual([
+    'test-suite',
+    'lane',
+    'db-a',
+  ])
+  expect(container.querySelector('[data-pools-strip] [data-action="show-all"]')).toBe(null)
+})
+
 test('the pools panel shows the two that matter now, and the rest in a dialog', async () => {
   const stub = await startStubDaemon({
     runs: [runSummary()],

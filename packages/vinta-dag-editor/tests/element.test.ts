@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { VintaDagElement } from '../src/element'
 import type { DagChangeDetail, DagSelectionChangeDetail } from '../src/events'
 import { DAG_CHANGE_EVENT, DAG_SELECTION_CHANGE_EVENT } from '../src/events'
-import { BAND_GAP, layoutDag, NODE_WIDTH } from '../src/layout'
+import { BAND_GAP, layoutDag, NODE_HEIGHT, NODE_WIDTH } from '../src/layout'
 import { sceneSize } from '../src/scene'
 import type { Dag } from '../src/types'
 import { control, deepFreeze, mount, nodeCards, press, SAMPLE, setField, shadow } from './helpers'
@@ -61,6 +61,63 @@ describe('rendering', () => {
     const card = control(element, 'select-node', 'b')
     expect(card.style.getPropertyValue('--vdag-node-color')).toBe('var(--vdag-status-running)')
     expect(card.getAttribute('aria-label')).toBe('API, Running')
+  })
+
+  it('draws a node’s step beside its status, and nothing when the host gives none', () => {
+    const element = mount({
+      ...SAMPLE,
+      nodes: SAMPLE.nodes.map((node) => (node.id === 'b' ? { ...node, step: 'gate' } : node)),
+    })
+    const running = control(element, 'select-node', 'b')
+    expect(running.dataset.step).toBe('gate')
+    expect(running.querySelector('.node-step')?.textContent).toBe('gate')
+    const done = control(element, 'select-node', 'a')
+    expect(done.dataset.step).toBeUndefined()
+    expect(done.querySelector('.node-step')).toBeNull()
+  })
+
+  it('draws every card at its slot height, inside its wave band', () => {
+    const element = mount({
+      ...SAMPLE,
+      nodes: SAMPLE.nodes.map((node) => ({
+        ...node,
+        name: 'A name long enough to wrap onto a second line of the card',
+        step: 'review',
+      })),
+    })
+    const root = shadow(element)
+    const bands = [...root.querySelectorAll<HTMLElement>('.band')]
+    for (const card of nodeCards(element)) {
+      // The slot, exactly — not a minimum the content may exceed.
+      expect(card.style.height).toBe(`${NODE_HEIGHT}px`)
+      expect(card.style.minHeight).toBe('')
+      const top = Number.parseFloat(card.style.top)
+      const band = bands.find((candidate) => {
+        const left = Number.parseFloat(candidate.style.left)
+        return (
+          left <= Number.parseFloat(card.style.left) &&
+          Number.parseFloat(card.style.left) < left + Number.parseFloat(candidate.style.width)
+        )
+      })
+      expect(band).toBeDefined()
+      const bandTop = Number.parseFloat(band?.style.top ?? '0')
+      const bandBottom = bandTop + Number.parseFloat(band?.style.height ?? '0')
+      expect(top).toBeGreaterThanOrEqual(bandTop)
+      expect(top + NODE_HEIGHT).toBeLessThanOrEqual(bandBottom)
+    }
+  })
+
+  it('marks each edge with what the run is doing across it', () => {
+    const root = shadow(mount(SAMPLE))
+    const flow = (id: string): string | undefined =>
+      root.querySelector<SVGPathElement>(`.edge[data-edge='${id}']`)?.dataset.flow
+    // a is done and b is running on it: the dependency is being consumed.
+    expect(flow('a-b')).toBe('active')
+    // a is done and c has not started: delivered, waiting to be picked up.
+    expect(flow('a-c')).toBe('done')
+    // b is still running and d is blocked: a plain line.
+    expect(flow('b-d')).toBeUndefined()
+    expect(flow('c-d')).toBeUndefined()
   })
 
   it('takes its mode from the attribute and reflects the property back', () => {
