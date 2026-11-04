@@ -7,6 +7,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.1] — YYYY-MM-DD
 
+### Added
+
+- **Landing pages for AI Workflows and AI Maestro**, under `docs/` and
+  published by GitHub Pages (`.github/workflows/pages.yml`; set the Pages
+  source to GitHub Actions once). Static HTML on the design system's tokens,
+  light and dark, signed with the Vinta wordmark. The AI Maestro page's hero
+  is a replica of the run view, animated like a run. Not part of the
+  published package.
+
 ### Changed
 
 - **`vinta-ai-maestro`: the run graph shows the run, not just the plan.** A

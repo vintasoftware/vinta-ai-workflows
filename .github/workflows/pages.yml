@@ -1,0 +1,39 @@
+name: pages
+
+# Publishes the landing pages under `docs/` to GitHub Pages. Static files, no
+# build step: `docs/` is uploaded as-is.
+#
+# Deploys on every push to `main` that touches `docs/`, and on demand from any
+# branch through `workflow_dispatch` (useful to publish from `alpha` before a
+# series graduates). Pages must be set to "GitHub Actions" as its source once
+# in the repository settings; this workflow cannot flip that switch.
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4
