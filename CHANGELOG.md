@@ -5,6 +5,33 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — YYYY-MM-DD
+
+### Changed
+
+- **`vinta-ai-maestro`: the run graph shows the run, not just the plan.** A
+  running phase's card names the pipeline step it is on (`gate`, `review`, …)
+  and wears its colour on every side with a soft glow; a phase parked on
+  capacity wears amber. The edges follow: a dependency that has landed turns
+  green, and one a running phase is consuming flows blue (still, under
+  reduced motion). The resource pools that matter now sit directly under the
+  canvas, beside the cards they park, so a node that is not moving is
+  explained without a scroll. The DAG canvas gained an optional `step` on its
+  nodes and two host-bindable properties, `--vdag-edge-done` and
+  `--vdag-edge-active`, for this.
+- **`vinta-ai-maestro` signs with the Vinta wordmark and calls itself AI
+  Maestro** in the run monitor's and the interview page's top bar, blue in
+  light mode and the text colour in dark. The package, the command and the
+  storage keys keep their `vinta-ai-maestro` name.
+
+### Fixed
+
+- **A DAG card no longer hangs out of its wave band.** The canvas sized its
+  cards with a minimum height while the bands and the scene were computed
+  from that same number as if it were exact, so a two-line name overflowed
+  the band. Cards are now drawn at exactly the slot the layout reserves
+  (96px, room for a two-line name and the status row with a step).
+
 ## [0.7.0] — YYYY-MM-DD
 
 <!-- Graduates the 0.7.0-alpha1 … 0.7.0-alpha39 series (2026-09-11 to
