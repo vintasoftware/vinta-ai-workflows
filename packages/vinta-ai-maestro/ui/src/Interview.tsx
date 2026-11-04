@@ -129,7 +129,7 @@ export function InterviewApp({
   const rounds = state?.rounds ?? []
 
   useEffect(() => {
-    document.title = round === null ? 'Interview · vinta-ai-maestro' : `${title} · round ${round.round}`
+    document.title = round === null ? 'Interview · Vinta AI Maestro' : `${title} · round ${round.round}`
   }, [round, title])
 
   return (
@@ -138,7 +138,7 @@ export function InterviewApp({
         <AppTopbar className="app-head">
           <AppBrand>
             <BrandMark />
-            <span className="hidden sm:inline">vinta-ai-maestro</span>
+            <span className="hidden sm:inline">AI Maestro</span>
           </AppBrand>
           <div className="min-w-0 flex-1 truncate text-sm" data-interview-title>
             <span className="font-medium text-foreground">{title}</span>
