@@ -99,6 +99,9 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
         name: node.name,
         status: node.status,
         wave: node.wave,
+        // The pipeline state is only meaningful while the node is running on
+        // it; a done node's last step is history the node view already has.
+        ...(node.status === 'running' && node.step !== null ? { step: node.step } : {}),
       })),
       edges: (edges ?? []).map((edge) => ({
         id: `${edge.from}->${edge.to}`,
@@ -178,6 +181,7 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
         Click a node to see what it depends on and what waits for it; double-click to open it.
         Drag to pan, ⌘ or Ctrl + scroll to zoom.
       </Hint>
+      <PoolsStrip resources={snapshot.resources} />
 
       {/* A tiled grid, not a flow of cards: every cell is one or two row
           units tall, the panels fill their cells and scroll inside them, and
@@ -469,19 +473,7 @@ function Pools({
 }: {
   readonly resources: RunSnapshot['resources']
 }): ReactElement {
-  const byUse = useMemo(
-    () =>
-      resources
-        .map((resource, index) => ({ resource, index }))
-        .sort(
-          (a, b) =>
-            Number(b.resource.held > 0) - Number(a.resource.held > 0) ||
-            fraction(b.resource) - fraction(a.resource) ||
-            a.index - b.index,
-        )
-        .map(({ resource }) => resource),
-    [resources],
-  )
+  const byUse = useMemo(() => poolsByUse(resources), [resources])
   return (
     <Panel title="Resource pools" fill>
       <RecentList
@@ -493,31 +485,84 @@ function Pools({
         empty="No pools declared."
         listClassName="pools"
         data-pools=""
-        render={(resource) => (
-          <div data-resource={resource.id} className="flex flex-col gap-1.5">
-            <div className="pool-head flex items-center justify-between gap-2">
-              <span className="flex items-center gap-2">
-                <span className="font-medium">{resource.id}</span>
-                <Badge variant="outline" className="muted">
-                  {resource.kind}
-                </Badge>
-              </span>
-              <span className="font-mono text-xs" data-occupancy>
-                {resource.held} / {resource.capacity}
-              </span>
-            </div>
-            <Progress
-              value={fraction(resource)}
-              aria-label={`${resource.id} occupancy`}
-              className="meter h-1.5 bg-muted *:data-[slot=progress-indicator]:bg-tone-active"
-            />
-            <Hint className="text-xs">
-              {resource.holders.length === 0 ? 'idle' : `held by ${resource.holders.join(', ')}`}
-            </Hint>
-          </div>
-        )}
+        render={(resource) => <PoolRow resource={resource} />}
       />
     </Panel>
+  )
+}
+
+/** How many pools the strip under the graph holds; the panel has the rest. */
+const STRIP_POOLS = 3
+
+/**
+ * The pools that matter now, directly under the canvas. Capacity is the reason
+ * a node sits still — a lane pool at its ceiling, a suite semaphore held by
+ * another phase — and the panel that says so was a scroll away from the cards
+ * it explains. Same order as the panel, which keeps the whole list and the
+ * dialog; this is the glance, so it offers neither.
+ */
+function PoolsStrip({
+  resources,
+}: {
+  readonly resources: RunSnapshot['resources']
+}): ReactElement | null {
+  const byUse = useMemo(() => poolsByUse(resources), [resources])
+  if (byUse.length === 0) return null
+  return (
+    <ul
+      className="pools-strip -mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3"
+      data-pools-strip=""
+      aria-label="Resource pools"
+    >
+      {byUse.slice(0, STRIP_POOLS).map((resource) => (
+        <li key={resource.id} className="rounded-lg border bg-card px-3 py-2">
+          <PoolRow resource={resource} />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** Pools with a holder first, fullest first, then the idle ones in declaration order. */
+function poolsByUse(resources: RunSnapshot['resources']): RunSnapshot['resources'] {
+  return resources
+    .map((resource, index) => ({ resource, index }))
+    .sort(
+      (a, b) =>
+        Number(b.resource.held > 0) - Number(a.resource.held > 0) ||
+        fraction(b.resource) - fraction(a.resource) ||
+        a.index - b.index,
+    )
+    .map(({ resource }) => resource)
+}
+
+function PoolRow({
+  resource,
+}: {
+  readonly resource: RunSnapshot['resources'][number]
+}): ReactElement {
+  return (
+    <div data-resource={resource.id} className="flex flex-col gap-1.5">
+      <div className="pool-head flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2">
+          <span className="font-medium">{resource.id}</span>
+          <Badge variant="outline" className="muted">
+            {resource.kind}
+          </Badge>
+        </span>
+        <span className="font-mono text-xs" data-occupancy>
+          {resource.held} / {resource.capacity}
+        </span>
+      </div>
+      <Progress
+        value={fraction(resource)}
+        aria-label={`${resource.id} occupancy`}
+        className="meter h-1.5 bg-muted *:data-[slot=progress-indicator]:bg-tone-active"
+      />
+      <Hint className="text-xs">
+        {resource.holders.length === 0 ? 'idle' : `held by ${resource.holders.join(', ')}`}
+      </Hint>
+    </div>
   )
 }
 

@@ -141,7 +141,7 @@ export function App({
             <BrandMark />
             {/* The name wraps onto two lines on a phone and pushes the inbox off
                 the edge; the mark alone is the brand there. */}
-            <span className="hidden sm:inline">vinta-ai-maestro</span>
+            <span className="hidden sm:inline">AI Maestro</span>
           </AppBrand>
           <AppNav className="min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <AppNavLink href="#/" current={section === 'runs'}>

@@ -44,6 +44,13 @@ export interface DagNode {
   readonly status: DagNodeStatus
   /** Longest-path depth. Used for banding; the canvas does not compute it. */
   readonly wave: number
+  /**
+   * Where the node is inside its status, in the host's own words — a pipeline
+   * state such as `gate` or `review`. Drawn on the card when present; the
+   * canvas never interprets it, so a host that has no finer grain than
+   * `status` simply leaves it out.
+   */
+  readonly step?: string
   readonly position?: { readonly x: number; readonly y: number }
   readonly data?: Readonly<Record<string, unknown>>
 }

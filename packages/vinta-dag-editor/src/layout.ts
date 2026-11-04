@@ -19,7 +19,15 @@
 import type { Dag, DagPoint } from './types'
 
 export const NODE_WIDTH = 188
-export const NODE_HEIGHT = 72
+/**
+ * A card's slot, and its exact drawn height — `scene.ts` sets `height`, not
+ * `min-height`, and the card clips. The bands and the scene are computed from
+ * this number, so a card that grew past it with a two-line name overflowed
+ * the band it sat in. Sized for the tallest card: the id, a name clamped to
+ * two lines, and the status row with a step beside it, at the coarse-pointer
+ * padding.
+ */
+export const NODE_HEIGHT = 96
 /**
  * The empty strip between two waves. It holds an edge's label (`scene.ts` puts
  * it there, `styles.ts` caps it at this width), so it is wider than two cards
