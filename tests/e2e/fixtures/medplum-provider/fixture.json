@@ -1,0 +1,57 @@
+{
+  "name": "medplum-provider",
+  "description": "PRIMARY fixture — the Medplum provider example app (React + Vite + TS on @medplum/core / @medplum/react, React Router, Mantine). Tests run fully offline against MockClient, so app-tests-pass needs no live Medplum server.",
+  "upstream": {
+    "repo": "https://github.com/medplum/medplum",
+    "subdir": "examples/medplum-provider",
+    "pinnedCommit": "REPLACE_WITH_PINNED_SHA",
+    "note": "Vendored + pinned by vendor.mjs. Keep @medplum/{core,definitions,mock,fhirtypes} on matching versions; Node >= 22.4 (or a ws dev dep) for the WebSocket polyfill @medplum/core v5 needs at module load."
+  },
+  "project": {
+    "name": "medplum-provider",
+    "default_branch": "main",
+    "code_host": "github",
+    "stack_summary": "React + Vite + TypeScript on @medplum/core / @medplum/react, React Router, Mantine; tests via Vitest + MockClient"
+  },
+  "commands": {
+    "install": "npm ci",
+    "test": "npx vitest run",
+    "run": "npm run dev",
+    "ai_plans_dir": "ai-plans",
+    "scripts_dir": "scripts"
+  },
+  "medplum": {
+    "vitestSetup": {
+      "globalSetup": "test.globalSetup.ts",
+      "setupFiles": "test.setup.ts",
+      "note": "Both must be registered in vitest.config.* — globalSetup indexes FHIR bundles once and shares globalSchema.types to workers; setupFiles assigns the shared index at module scope. Without them, filtered searchResources silently return nothing."
+    },
+    "liveStack": {
+      "optIn": true,
+      "default": false,
+      "note": "Off by default. For server-only behavior (access policies, subscriptions, $everything, bots, GraphQL/transaction edges) bring up the full stack via Docker and run graders as integration checks. Slower + nondeterministic — reserve for contracts MockClient can't prove."
+    }
+  },
+  "states": {
+    "clean": {
+      "path": "states/clean",
+      "ref": "main",
+      "description": "App with NO ai-tools/, AGENTS.md, or vendor dirs. Drives S0 — Bootstrap."
+    },
+    "stale": {
+      "path": "states/stale",
+      "ref": "main",
+      "bootstrappedFrom": "0.3.0",
+      "description": "App bootstrapped against an OLDER vinta-ai-workflows version (deliberately behind current). Drives S1 — Sync."
+    },
+    "current": {
+      "path": "states/current",
+      "ref": "main",
+      "bootstrappedFrom": "0.4.0",
+      "description": "App bootstrapped against the CURRENT version, harness fully in place. Drives S2–S4."
+    }
+  },
+  "maintenance": {
+    "staleCadence": "Re-base `stale/` to 'current minus one meaningful change' each release so S1 keeps exercising a real upgrade rather than a no-op. Cheapest: regenerate from clean/ by bootstrapping with a pinned older package version (see states.stale.bootstrappedFrom)."
+  }
+}

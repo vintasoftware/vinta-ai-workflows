@@ -1,0 +1,54 @@
+name: e2e-checks
+
+# Free, deterministic layers of the e2e harness — run on EVERY PR (PLAN §3/§11:
+# "L0/L1 (free, deterministic) stay on every PR; only L2 is gated behind manual
+# invocation"). No models, no paid APIs, no network — just the CLI + harness
+# plumbing. The paid L2 agentic matrix is manual/human-triggered and lives
+# elsewhere (never on push/PR/schedule).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: L0/L1 static + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # L0 (partial): syntax-check every harness module so a broken import or
+      # parse error fails fast and cheap.
+      - name: Syntax-check harness modules
+        run: |
+          set -e
+          for f in $(find tests/e2e -name '*.mjs'); do
+            node --check "$f"
+          done
+          echo "all harness modules parse"
+
+      # L1 — install/bootstrap smoke: run the CLI against a scratch project and
+      # assert placement + idempotency + byte-clean uninstall.
+      - name: L1 install/uninstall smoke
+        run: npm run test:e2e:l1
+
+      # Harness self-check: every scenario spec parses, the fixture wiring loads,
+      # and the run matrix builds — without spending anything. Catches a broken
+      # scenario JSONC or adapter registration before a paid L2 run ever hits it.
+      - name: Harness self-check (scenarios parse + matrix builds)
+        run: |
+          node tests/e2e/runner/run-e2e.mjs --list
+          node tests/e2e/runner/run-e2e.mjs --vendor mock --dry-run
+
+      # NOTE: L0 package unit tests (CLI file-placement/marker semantics,
+      # JSON-Schema validation of sample payloads, validate-skill-md lint) plug
+      # in here once feat/write-unit-tests lands — add them as further steps in
+      # this job so they gate every PR too.

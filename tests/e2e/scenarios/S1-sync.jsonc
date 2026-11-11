@@ -1,0 +1,37 @@
+// S1 — Sync (PLAN §5). Proves `/vinta-sync-ai-tools` correctly UPGRADES an
+// already-configured, stale repo. Runs against the `stale/` fixture state
+// (bootstrapped from an older package version, so a real diff exists to apply).
+{
+  "id": "S1-sync",
+  "fixture": "medplum-provider",
+  "state": "stale",
+  "steps": [
+    {
+      "invoke": "/vinta-sync-ai-tools",
+      "input": "tasks/sync.md",
+      "answers": "tasks/sync.answers.md",
+      "autonomous": true
+    }
+  ],
+  "graders": ["sync-convergence", "git-tree-healthy"],
+  // The sync-convergence oracle (§14 Q2): synced managed files must converge on
+  // what a fresh `current/` bootstrap produces, hand-tuned regions preserved,
+  // opt-outs sticky.
+  "expect": {
+    "sync": {
+      "referenceDir": "states/current",
+      "managedGlobs": ["ai-tools/**", "AGENTS.md", ".vinta-ai-workflows.yaml"],
+      "ignore": [
+        ".vinta-ai-workflows.yaml",  // carries last_synced_at / version — always differs
+        "ai-tools/**/*.local.*"
+      ],
+      "preserve": [
+        { "file": "AGENTS.md", "contains": "<!-- hand-tuned:keep -->" }
+      ],
+      "optOuts": [
+        "ai-tools/skills/vinta-opted-out-example"
+      ]
+    }
+  },
+  "budget": { "maxWallSec": 1200 }
+}
