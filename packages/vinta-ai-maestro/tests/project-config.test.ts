@@ -1,0 +1,427 @@
+/**
+ * The project's configuration under a plan: `.vinta-ai-workflows.yaml` parsed,
+ * layered under the workflow file, and subtracted back out of an editor save.
+ */
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+
+import { ownDocument } from '../src/config/own.ts'
+import { loadProjectConfig, parseProjectConfig, type ProjectConfig } from '../src/config/project-config.ts'
+import { describeUnscopedGate, resolveDocument, resolveWorkflow, unscopedGates } from '../src/config/resolve.ts'
+import { isJudgeGate, type Gate, type Workflow, WorkflowSchema } from '../src/types.ts'
+
+const commandOf = (gate: Gate | undefined): string | undefined =>
+  gate === undefined || isJudgeGate(gate) ? undefined : gate.cmd
+
+/** The smallest plan that runs, with whatever the test overrides. */
+function plan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    id: 'widgets',
+    base_branch: 'main',
+    defaults: { model: 'sonnet' },
+    resources: { lane: { capacity: 2, kind: 'worktree' } },
+    nodes: [
+      { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' },
+      { id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', gates: [] },
+    ],
+    ...overrides,
+  }
+}
+
+function resolved(authored: unknown, config: ProjectConfig | null): Workflow {
+  const result = resolveWorkflow(authored, config)
+  if (!result.ok) throw new Error(JSON.stringify(result.issues))
+  return result.workflow
+}
+
+describe('resolving a plan over its project', () => {
+  it('runs a plan with no configuration exactly as it did before', () => {
+    const workflow = resolved(plan({ gates: { unit: { cmd: 'npm test' } } }), null)
+    expect(commandOf(workflow.gates['unit'])).toBe('npm test')
+    // The two run defaults a plan used to have to repeat.
+    expect(workflow.defaults.harness).toBe('claude-code')
+    expect(workflow.defaults.pipeline).toBe('standard-phase')
+  })
+
+  it('gives a typed gate the project’s command, and makes each type available by name', () => {
+    const config = { commands: { test_unit: 'pnpm test', build: 'pnpm typecheck', lint: 'pnpm lint' } }
+    const workflow = resolved(
+      plan({ gates: { unit: { type: 'test', timeout_s: 600 } }, nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['typecheck', 'unit'] }] }),
+      config,
+    )
+    expect(workflow.gates['unit']).toMatchObject({ type: 'test', cmd: 'pnpm test', timeout_s: 600 })
+    expect(commandOf(workflow.gates['typecheck'])).toBe('pnpm typecheck')
+    expect(commandOf(workflow.gates['lint'])).toBe('pnpm lint')
+    // No `e2e` line, no `e2e` gate.
+    expect(workflow.gates['e2e']).toBeUndefined()
+  })
+
+  it('layers maestro’s own gate settings over `commands`, and the plan over both', () => {
+    const config: ProjectConfig = {
+      commands: { test_unit: 'pytest' },
+      maestro: {
+        gates: { test: { cmd: 'pytest --reuse-db', requires: ['test-suite'], timeout_s: 1200 } },
+        resources: { 'test-suite': { capacity: 1, kind: 'semaphore' } },
+      },
+    }
+    const inherited = resolved(plan({ nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['test'] }] }), config)
+    expect(inherited.gates['test']).toMatchObject({ cmd: 'pytest --reuse-db', requires: ['test-suite'], timeout_s: 1200 })
+    expect(inherited.resources['test-suite']).toEqual({ capacity: 1, kind: 'semaphore' })
+
+    const overridden = resolved(plan({ gates: { test: { type: 'test', cmd: 'pytest -x' } } }), config)
+    // Field by field: the plan's command, the project's pool and timeout.
+    expect(overridden.gates['test']).toMatchObject({ cmd: 'pytest -x', requires: ['test-suite'], timeout_s: 1200 })
+  })
+
+  it('replaces a pool, a chore or an untyped gate whole rather than merging into it', () => {
+    const config: ProjectConfig = {
+      commands: { test_unit: 'pytest' },
+      maestro: { resources: { 'test-suite': { capacity: 1, kind: 'semaphore', match: ['pytest*'] } } },
+    }
+    const workflow = resolved(
+      plan({
+        resources: { lane: { capacity: 2, kind: 'worktree' }, 'test-suite': { capacity: 2, kind: 'semaphore' } },
+        gates: { test: { cmd: 'make test' } },
+      }),
+      config,
+    )
+    expect(workflow.resources['test-suite']).toEqual({ capacity: 2, kind: 'semaphore' })
+    expect(workflow.gates['test']).toEqual({ cmd: 'make test', requires: [], timeout_s: 1800 })
+  })
+
+  it('inherits a scoped command only when it says how it is scoped', () => {
+    const fixed = resolved(plan(), { commands: { test_unit: 'pnpm test', test_unit_scoped: 'pnpm test:patient' } })
+    expect(fixed.gates['test']).not.toHaveProperty('scoped_cmd')
+
+    const templated = resolved(plan(), {
+      commands: { test_unit: 'pnpm test', test_unit_scoped: 'pnpm vitest related {changed_files} --run' },
+    })
+    expect(templated.gates['test']).toMatchObject({ scoped_cmd: 'pnpm vitest related {changed_files} --run' })
+  })
+
+  it('fills `defaults.gates` into the nodes that name none, and leaves an explicit list alone', () => {
+    const workflow = resolved(plan({ defaults: { model: 'sonnet', gates: ['typecheck', 'test'] } }), {
+      commands: { test_unit: 'pnpm test', build: 'pnpm build' },
+    })
+    expect(workflow.nodes.find((node) => node.id === 'p1')?.gates).toEqual(['typecheck', 'test'])
+    // p2 says `[]`, which is an opt-out, not an omission.
+    expect(workflow.nodes.find((node) => node.id === 'p2')?.gates).toEqual([])
+  })
+
+  it('takes the base branch from the project when the plan names none, and run defaults from maestro', () => {
+    const { base_branch: _omitted, ...rest } = plan()
+    const workflow = resolved(rest, {
+      project: { default_branch: 'develop' },
+      maestro: { defaults: { harness: 'codex', gate_scope: 'full', chores: [] } },
+    })
+    expect(workflow.base_branch).toBe('develop')
+    expect(workflow.defaults.harness).toBe('codex')
+    expect(workflow.defaults.gate_scope).toBe('full')
+    // The plan's own `model` survives the merge.
+    expect(workflow.defaults.model).toBe('sonnet')
+  })
+
+  it('carries the project’s commands into `project.commands` when there is a project block', () => {
+    const config: ProjectConfig = {
+      commands: { test_unit: 'pytest', build: 'mypy .', lint: 'ruff check' },
+      maestro: { project: { migrate_cmd: 'python manage.py migrate' } },
+    }
+    const workflow = resolved(plan({ project: { commands: { test: 'pytest -q' } } }), config)
+    expect(workflow.project?.migrate_cmd).toBe('python manage.py migrate')
+    expect(workflow.project?.commands).toEqual({ test: 'pytest -q', typecheck: 'mypy .', lint: 'ruff check' })
+  })
+
+  it('says what to set when a typed gate gets no command from anywhere', () => {
+    const result = resolveWorkflow(plan({ gates: { e2e: { type: 'e2e' } } }), { commands: { test_unit: 'x' } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.issues).toEqual([
+      {
+        path: ['gates', 'e2e', 'cmd'],
+        message: expect.stringContaining('`commands.e2e` in .vinta-ai-workflows.yaml'),
+      },
+    ])
+  })
+
+  it('reports an unknown pool a project gate requires against the resolved document', () => {
+    const result = resolveWorkflow(plan(), { commands: { test_unit: 'x' }, maestro: { gates: { test: { requires: ['nope'] } } } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.issues[0]).toMatchObject({ path: ['gates', 'test', 'requires', 0] })
+  })
+
+  it('leaves a document it cannot merge for the parser to report where it was written', () => {
+    expect(resolveDocument('not a workflow', { commands: { test_unit: 'x' } })).toBe('not a workflow')
+  })
+})
+
+describe('custom project gates', () => {
+  const config: ProjectConfig = {
+    commands: { build: 'mypy .', test_unit: 'pytest' },
+    maestro: {
+      defaults: { gates: ['typecheck', 'test', 'django-check', 'api-client-fresh'] },
+      gates: {
+        test: { timeout_s: 900 },
+        'django-check': { cmd: 'python manage.py check --fail-level WARNING' },
+        'api-client-fresh': { cmd: 'make api_client && git diff --exit-code -- client', requires: ['codegen-lock'], timeout_s: 600 },
+      },
+      resources: { 'codegen-lock': { capacity: 1, kind: 'semaphore' } },
+    },
+  }
+
+  it('gives every plan each one under its id, untyped, and runs it from `maestro.defaults.gates`', () => {
+    const workflow = resolved(plan(), config)
+    expect(Object.keys(workflow.gates)).toEqual(['test', 'typecheck', 'django-check', 'api-client-fresh'])
+    expect(workflow.gates['django-check']).toEqual({ cmd: 'python manage.py check --fail-level WARNING', requires: [], timeout_s: 1800 })
+    expect(workflow.gates['api-client-fresh']).toMatchObject({ requires: ['codegen-lock'], timeout_s: 600 })
+    expect(workflow.gates['api-client-fresh']).not.toHaveProperty('type')
+    // The type default beside them still merges into its type.
+    expect(workflow.gates['test']).toMatchObject({ type: 'test', cmd: 'pytest', timeout_s: 900 })
+    expect(workflow.nodes.find((node) => node.id === 'p1')?.gates).toEqual(['typecheck', 'test', 'django-check', 'api-client-fresh'])
+  })
+
+  it('lets a plan name one on a node, or replace it whole under the same id', () => {
+    const workflow = resolved(
+      plan({
+        gates: { 'django-check': { cmd: 'python manage.py check' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['api-client-fresh', 'django-check'] }],
+      }),
+      config,
+    )
+    expect(workflow.gates['django-check']).toEqual({ cmd: 'python manage.py check', requires: [], timeout_s: 1800 })
+    expect(workflow.nodes[0]?.gates).toEqual(['api-client-fresh', 'django-check'])
+  })
+
+  it('is what a plan with no project configuration never sees', () => {
+    expect(resolved(plan({ gates: { unit: { cmd: 'npm test' } } }), null).gates).not.toHaveProperty('django-check')
+  })
+
+  it('refuses a malformed or reserved id, and a custom gate with no command, at the key that is wrong', () => {
+    const issuesOf = (text: string) => {
+      const result = parseProjectConfig(text)
+      expect(result.ok).toBe(false)
+      return result.ok ? [] : result.issues
+    }
+    const [bad] = issuesOf('maestro:\n  gates:\n    Django_Check:\n      cmd: x\n')
+    expect(bad).toMatchObject({ path: ['maestro', 'gates', 'Django_Check'] })
+    expect(bad?.message).toMatch(/lowercase kebab-case.*test, lint, typecheck, e2e/)
+
+    const [reserved] = issuesOf('maestro:\n  gates:\n    codegen:\n      cmd: make api_client\n')
+    expect(reserved).toMatchObject({ path: ['maestro', 'gates', 'codegen'] })
+    expect(reserved?.message).toMatch(/reserved/)
+
+    const [commandless] = issuesOf('maestro:\n  gates:\n    django-check:\n      timeout_s: 60\n')
+    expect(commandless).toMatchObject({ path: ['maestro', 'gates', 'django-check', 'cmd'] })
+    expect(commandless?.message).toMatch(/custom gate "django-check" has no `cmd`/)
+
+    // A type's entry may still omit `cmd`: it inherits one from `commands.*`.
+    expect(parseProjectConfig('maestro:\n  gates:\n    test:\n      timeout_s: 60\n').ok).toBe(true)
+  })
+
+  it('accepts the config schema’s custom-gates fixture and refuses its invalid ones', () => {
+    const fixtures = join(import.meta.dirname, '../../../tests/schema-fixtures/vinta-ai-workflows-config.v1')
+    const valid = parseProjectConfig(readFileSync(join(fixtures, 'valid/maestro-custom-gates.yaml'), 'utf8'))
+    expect(valid.ok).toBe(true)
+    if (valid.ok) {
+      const workflow = resolved(plan(), valid.config)
+      expect(workflow.nodes[0]?.gates).toEqual(['typecheck', 'lint', 'test', 'django-check', 'api-client-fresh'])
+    }
+    for (const name of ['maestro-custom-gate-no-cmd', 'maestro-custom-gate-bad-id', 'maestro-custom-gate-reserved-id']) {
+      expect(parseProjectConfig(readFileSync(join(fixtures, `invalid/${name}.yaml`), 'utf8')).ok, name).toBe(false)
+    }
+  })
+})
+
+describe('gates that run in full on every phase', () => {
+  /** Both phases gated on `gates`, so every gate named is one a phase runs. */
+  const gatedPlan = (gates: readonly string[], overrides: Record<string, unknown> = {}): Record<string, unknown> =>
+    plan({
+      nodes: [
+        { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates },
+        { id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', gates },
+      ],
+      ...overrides,
+    })
+
+  it('names a scoped line that was passed over for having no placeholder, without quoting it', () => {
+    // The observed run's line: a skill-era `<app>` for an agent to fill in. The
+    // daemon cannot, so the gate fell back to the full suite every phase.
+    const config = {
+      commands: {
+        test_unit: 'docker compose run --rm -T api uv run pytest -n auto',
+        test_unit_scoped: 'docker compose run --rm -T api uv run pytest <app>/tests/ -n auto',
+      },
+    }
+    const workflow = resolved(gatedPlan(['test']), config)
+
+    const found = unscopedGates(workflow, config)
+    expect(found).toEqual([
+      { gateId: 'test', type: 'test', typed: true, reason: { kind: 'placeholderless', key: 'test_unit_scoped' } },
+    ])
+    const { label, remedy } = describeUnscopedGate(found[0]!)
+    expect(label).toContain('commands.test_unit_scoped')
+    expect(label).toContain('{changed_files}')
+    // A command line is repository content: the key finds it, the line is not repeated.
+    expect(label).not.toContain('<app>')
+    expect(remedy).toContain('commands.test_unit_scoped')
+    expect(remedy).toContain('pytest --testmon {changed_files}')
+    expect(remedy).toContain('maestro.defaults.gate_scope: full')
+  })
+
+  it('says when nothing configures a scoped form at all', () => {
+    const config = { commands: { test_unit: 'pnpm test', lint: 'pnpm lint', build: 'pnpm build' } }
+    const workflow = resolved(gatedPlan(['typecheck', 'lint', 'test']), config)
+
+    const found = unscopedGates(workflow, config)
+    // `typecheck` has no scoped line to forget.
+    expect(found.map((finding) => [finding.gateId, finding.reason.kind])).toEqual([
+      ['test', 'none'],
+      ['lint', 'none'],
+    ])
+    expect(describeUnscopedGate(found[1]!).label).toContain('no scoped_cmd')
+  })
+
+  it('says nothing of a gate that narrows, a gate no phase runs, or a run that asked for full gates', () => {
+    const templated = {
+      commands: { test_unit: 'pnpm test', test_unit_scoped: 'pnpm vitest related {changed_files} --run' },
+    }
+    expect(unscopedGates(resolved(gatedPlan(['test']), templated), templated)).toEqual([])
+
+    const plain = { commands: { test_unit: 'pnpm test', lint: 'pnpm lint' } }
+    // `lint` is in the table by its type, and no phase names it.
+    expect(unscopedGates(resolved(gatedPlan(['test']), plain), plain).map((finding) => finding.gateId)).toEqual(['test'])
+
+    const full = { ...plain, maestro: { defaults: { gate_scope: 'full' as const } } }
+    expect(unscopedGates(resolved(gatedPlan(['test']), full), full)).toEqual([])
+  })
+
+  it('counts a gate the plan named `test` without a type, and points it at its own scoped_cmd', () => {
+    // An untyped plan entry replaces the project's gate whole, so no
+    // `commands.test_unit_scoped` would reach it however it were written.
+    const workflow = resolved(gatedPlan(['test'], { gates: { test: { cmd: 'uv run pytest' } } }), null)
+
+    const found = unscopedGates(workflow, null)
+    expect(found).toEqual([{ gateId: 'test', type: 'test', typed: false, reason: { kind: 'none' } }])
+    const { remedy } = describeUnscopedGate(found[0]!)
+    expect(remedy).toContain('gates.test.scoped_cmd')
+    expect(remedy).toContain('type: test')
+  })
+})
+
+describe('reading .vinta-ai-workflows.yaml', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('treats a missing or empty file as a project with no configuration', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'maestro-config-'))
+    dirs.push(dir)
+    expect(await loadProjectConfig(dir)).toEqual({ ok: true, config: null })
+    writeFileSync(join(dir, '.vinta-ai-workflows.yaml'), '')
+    expect(await loadProjectConfig(dir)).toEqual({ ok: true, config: null })
+  })
+
+  it('passes the rest of the file through and validates only what maestro reads', () => {
+    const result = parseProjectConfig(
+      'schema_version: 1\npolicies: { pr_creation: agents-create }\ncommands:\n  test_unit: pytest\n',
+    )
+    expect(result.ok).toBe(true)
+  })
+
+  it('accepts the config schema’s own fixture, and resolves a bare plan over it', () => {
+    // The JSON Schema at the repo root and the zod schema here describe the
+    // same section; this is the payload the first is proven against.
+    const text = readFileSync(
+      join(import.meta.dirname, '../../../tests/schema-fixtures/vinta-ai-workflows-config.v1/valid/maestro-defaults.yaml'),
+      'utf8',
+    )
+    const parsed = parseProjectConfig(text)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+
+    const { base_branch: _omitted, ...bare } = plan({ nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }] })
+    const workflow = resolved(bare, parsed.config)
+    expect(workflow.base_branch).toBe('main')
+    expect(workflow.nodes[0]?.gates).toEqual(['typecheck', 'lint', 'test'])
+    expect(workflow.gates['test']).toMatchObject({
+      cmd: 'uv run pytest --reuse-db -n auto',
+      scoped_cmd: 'uv run pytest --testmon {changed_files}',
+      requires: ['test-suite'],
+    })
+    expect(workflow.gates['lint']).toMatchObject({ cmd: 'uv run ruff check', scoped_cmd: 'uv run ruff check {changed_files}' })
+    expect(workflow.project?.commands).toMatchObject({ test: 'uv run pytest', typecheck: 'uv run mypy .' })
+    expect(workflow.defaults.model_fallbacks).toEqual({ 'claude-fable-5-1': 'claude-opus-5-5' })
+  })
+
+  it('locates a bad `maestro` value and never quotes the file', () => {
+    const bad = parseProjectConfig('maestro:\n  gates:\n    test:\n      timeout_s: soon\n')
+    expect(bad.ok).toBe(false)
+    if (bad.ok) return
+    expect(bad.issues[0]?.path).toEqual(['maestro', 'gates', 'test', 'timeout_s'])
+
+    const broken = parseProjectConfig('maestro:\n  gates: [secret-token\n')
+    expect(broken.ok).toBe(false)
+    if (broken.ok) return
+    expect(broken.issues[0]?.message).toMatch(/^\.vinta-ai-workflows\.yaml is not valid YAML/)
+    expect(JSON.stringify(broken.issues)).not.toContain('secret-token')
+  })
+})
+
+describe('what an editor save writes', () => {
+  const config: ProjectConfig = {
+    commands: { test_unit: 'pnpm test', build: 'pnpm build' },
+    maestro: { resources: { 'test-suite': { capacity: 1, kind: 'semaphore' } } },
+  }
+
+  it('writes nothing new when nothing was edited, however much the editor displayed', () => {
+    const stored = plan({ defaults: { model: 'sonnet', gates: ['test'] } })
+    const shown = resolved(stored, config)
+    expect(ownDocument(shown, stored, config)).toEqual(stored)
+  })
+
+  it('writes the one field that changed, and a typed gate as its type plus the override', () => {
+    const stored = plan()
+    const shown = resolved(stored, config)
+    const edited = structuredClone(shown)
+    ;(edited.gates['test'] as { timeout_s: number }).timeout_s = 99
+    edited.nodes[0] = { ...edited.nodes[0]!, name: 'Renamed' }
+
+    const own = ownDocument(edited, stored, config) as Record<string, any>
+    expect(own.gates).toEqual({ test: { type: 'test', timeout_s: 99 } })
+    expect(own.nodes[0]).toEqual({ id: 'p1', name: 'Renamed', prompt_ref: 'plan.md#phase-1' })
+    // The project's pool stayed the project's.
+    expect(own.resources).toEqual({ lane: { capacity: 2, kind: 'worktree' } })
+    // And the result resolves to what the editor showed.
+    expect(resolved(own, config)).toEqual(resolved(edited, null))
+  })
+
+  it('still writes only the edit when the stored file has a cross-reference error', () => {
+    // A `defaults.chores` entry the project no longer declares: the file does
+    // not *validate*, but it has a shape, and that shape is what the editor
+    // showed. Writing the posted document whole here — every default made
+    // explicit, every project value copied in — was a hundred-line diff for a
+    // one-field edit over a committed file.
+    const stored = plan({ defaults: { model: 'sonnet', chores: ['vanished'] } })
+    const shown = WorkflowSchema.parse(resolveDocument(stored, config))
+    const edited = structuredClone(shown)
+    edited.nodes[0] = { ...edited.nodes[0]!, name: 'Renamed' }
+
+    const own = ownDocument(edited, stored, config) as Record<string, any>
+    expect(own.nodes[0]).toEqual({ id: 'p1', name: 'Renamed', prompt_ref: 'plan.md#phase-1' })
+    expect(own.defaults).toEqual({ model: 'sonnet', chores: ['vanished'] })
+    // The project's pool stayed the project's; only the plan's own lane is here.
+    expect(own.resources).toEqual({ lane: { capacity: 2, kind: 'worktree' } })
+  })
+
+  it('copies a whole pool into the plan when one of its fields is edited', () => {
+    const stored = plan()
+    const edited = structuredClone(resolved(stored, config))
+    ;(edited.resources['test-suite'] as { capacity: number }).capacity = 3
+    const own = ownDocument(edited, stored, config) as Record<string, any>
+    expect(own.resources['test-suite']).toEqual({ capacity: 3, kind: 'semaphore' })
+  })
+})

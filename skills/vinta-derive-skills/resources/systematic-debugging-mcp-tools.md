@@ -21,7 +21,7 @@ The block rendered into the SKILL.md is exactly this:
 
 The cached preflight in the rendered SKILL.md decides which servers to introspect this run (cache-hit servers skip listing; freshly-preflighted servers get listed). For each server cleared by preflight, list every tool it exposes and group them by the evidence categories below — match on tool description and parameter names, not on remembered names from past sessions. MCP servers rename tools and add capabilities frequently; **trust the live tool list, not training data**.
 
-If a server claims to cover a category but no listed tool matches the description, ask the user before falling back to "no evidence available" — the tool may exist under a name the matcher missed.
+If a server claims to cover a category but no listed tool matches the description, ask via `AskUserQuestion` before falling back to "no evidence available" — offer the 2–4 closest-matching tools plus `No tool covers it`. The tool may exist under a name the matcher missed.
 
 If a tool call fails mid-session with auth / connection / transport errors, mark the server `dirty` in `.vinta-ai-workflows/cache.yaml` so the next debug run re-runs preflight on it. Do not re-preflight inside the same session — keep moving with the evidence already gathered.
 

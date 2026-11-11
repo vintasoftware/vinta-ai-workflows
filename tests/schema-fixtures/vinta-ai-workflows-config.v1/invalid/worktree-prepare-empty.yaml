@@ -1,0 +1,25 @@
+# An empty worktree_prepare would make worktrees look available while giving
+# the conductor nothing to run.
+schema_version: 1
+vinta_ai_workflows_version: 0.7.0-alpha25
+project:
+  name: acme
+  default_branch: main
+  code_host: github
+  stack_summary: pnpm + Vite + React
+  ai_plans_dir: ai-plans
+commands:
+  lint: pnpm lint
+  build: pnpm build
+  test_unit: pnpm test
+  worktree_prepare: ""
+policies:
+  pr_creation: agents-create
+  ai_coauthor: allowed
+  commit_style: conventional
+  stage_pattern: git add <paths>
+vendors: [claude]
+foundation_skills:
+  prepare-worktree: disabled
+foundation_agents:
+  implementer: enabled

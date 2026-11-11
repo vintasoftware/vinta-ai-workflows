@@ -1,17 +1,25 @@
 # Schemas
 
-JSON Schema (Draft 2020-12) contracts for every YAML file the vinta-ai-workflows toolchain produces or consumes. Every YAML file carries a `schema_version` integer at its top level; that integer matches the suffix on the schema filename.
+JSON Schema (Draft 2020-12) contracts for every YAML or JSON payload the vinta-ai-workflows toolchain produces or consumes. Every payload carries a `schema_version` integer at its top level; that integer matches the suffix on the schema filename.
 
 ## Inventory
 
 | Artifact | YAML location in target project | Schema file | Authored by | Read by |
 |---|---|---|---|---|
-| Project config | `.vinta-ai-workflows.yaml` (repo root) | [`vinta-ai-workflows-config.v1.schema.json`](vinta-ai-workflows-config.v1.schema.json) | `vinta-bootstrap-ai-tools` (initial) → `vinta-sync-ai-tools` (updates) | every builder skill, every template render, every meta-skill |
+| Project config | `.vinta-ai-workflows.yaml` (repo root) | [`vinta-ai-workflows-config.v1.schema.json`](vinta-ai-workflows-config.v1.schema.json) | `vinta-bootstrap-ai-tools` (initial) → `vinta-sync-ai-tools` (updates) | every builder skill, every template render, every meta-skill ; `vinta-ai-maestro` reads `commands` + `maestro` and layers every workflow over them |
 | Sub-agent definition | `ai-tools/agents/<name>.yaml` | [`sub-agent.v1.schema.json`](sub-agent.v1.schema.json) | `vinta-derive-subagents` | `setup-ai-tools.mjs` (emits per-vendor copies) |
 | PR-context frontmatter | top-of-file YAML in `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` | [`prs-context-frontmatter.v1.schema.json`](prs-context-frontmatter.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | PR-context inline comments | YAML inside the ` ```yaml ... ``` ` fence under `# Comments` of the same file | [`prs-context-comments.v1.schema.json`](prs-context-comments.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | MCP preflight cache | `.vinta-ai-workflows/cache.yaml` (gitignored — per-developer-machine state) | [`mcp-preflight-cache.v1.schema.json`](mcp-preflight-cache.v1.schema.json) | rendered `systematic-debugging` SKILL.md (writes during Phase 0) | rendered `systematic-debugging` SKILL.md (reads at Phase 0 start) |
+| Interview round | `.vinta-ai-workflows/interviews/<slug>/rounds/round-NN.json` (gitignored working trail; JSON, not YAML) | [`interview-round.v1.schema.json`](interview-round.v1.schema.json) | the skill running the interview (`create-spec` Step 0 via `interview-ui`) | `vinta-ai-maestro interview` (the server and the interview page) |
+| Interview answers | `.vinta-ai-workflows/interviews/<slug>/answers/round-NN.json` (gitignored; JSON) | [`interview-answers.v1.schema.json`](interview-answers.v1.schema.json) | `vinta-ai-maestro interview`, when the page submits | the skill running the interview (reads answers, writes the next round) |
 | AI model tier table | `ai-tools/skills/plan-feature/resources/ai-models.yaml` (shipped verbatim with the `plan-feature` foundation skill; source: `skills/vinta-derive-skills/resources/foundation-skills/plan-feature/resources/ai-models.yaml`) | [`ai-models.v1.schema.json`](ai-models.v1.schema.json) | nightly `check-ai-models` job ([`scripts/check-ai-models.mjs`](../scripts/check-ai-models.mjs)) → auto-PR | `plan-feature` (per-phase model suggestion) |
+| Workflow (executable plan) | `ai-plans/YYYY-MM-DD-<feature-kebab>.workflow.json` — **JSON, not YAML** | [`workflow.v1.schema.json`](workflow.v1.schema.json) | `plan-feature` (emitted alongside the human-readable plan) | `vinta-ai-maestro` (the orchestrator daemon) |
+| Plan post-mortem | `.vinta-ai-maestro/runs/<run-id>/postmortem.json` — **JSON, not YAML**; per-run state beside the frozen workflow, copied to `ai-plans/<feature-kebab>.postmortem.json` when a team wants it committed | [`postmortem.v1.schema.json`](postmortem.v1.schema.json) | `vinta-ai-maestro` (once a run has ended) | `plan-feature` (when planning the next feature in the same repo) |
+| Plan review | `ai-plans/YYYY-MM-DD-<feature-kebab>.review.json` — **JSON, not YAML**; beside the plan and its workflow, committed with them | [`plan-review.v1.schema.json`](plan-review.v1.schema.json) | the `vinta-ai-maestro` review page (a person's comments, messages, approval) and `vinta-ai-maestro review reply` (the agent's answers) | `plan-feature`, through `vinta-ai-maestro review wait` |
+
+> **Five of these are generated, not hand-written**: `workflow.v1`, `postmortem.v1`, `plan-review.v1`, `interview-round.v1` and `interview-answers.v1`. The workflow's source of truth is `packages/vinta-ai-maestro/src/types.ts`; regenerate with `pnpm --filter vinta-ai-maestro schema:gen` and verify with `schema:check`. The post-mortem's is `src/postmortem/postmortem.ts`, the plan review's is `src/review/document.ts`, and both interview schemas' is `src/interview/document.ts`; regenerate with `pnpm --filter vinta-ai-maestro <postmortem|review|interview>:schema:gen`, verify with `:schema:check` — `tests/postmortem.test.ts`, `tests/review.test.ts` and `tests/interview.test.ts` run those byte comparisons too. Edit the zod schemas, never the JSON.
+>
 
 ## Versioning rules
 
@@ -83,3 +91,7 @@ done
 ```
 
 For PR-context frontmatter, extract the YAML block first (`yq` does this cleanly), then validate.
+
+## Checking the schemas themselves (this repo only)
+
+`npm run validate-schemas` (also part of `npm test`) compiles every schema here under Ajv's strict Draft 2020-12 mode and checks the fixtures in `tests/schema-fixtures/<schema-file-stem>/`: everything under `valid/` must pass, everything under `invalid/` must fail. A fixture is `.json`, `.yaml` / `.yml`, or a `.md` file whose YAML frontmatter is the payload. **A conditional rule (`if` / `then`) needs an `invalid/` fixture for each branch it enforces** — a lenient validator ignores a broken one silently. Pass file paths instead to validate payloads against the schema their `$schema` key or `yaml-language-server` comment names.

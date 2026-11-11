@@ -1,0 +1,1239 @@
+/**
+ * The doctor is only worth having if it is right about a *broken* machine, so
+ * every case here is a deliberately broken environment built from scratch: temp
+ * directories, fake binaries, synthetic worktree summaries.
+ *
+ * Nothing in this file consults the machine's PATH. Every binary the doctor
+ * probes is injected, which is what makes "a harness is missing" and "git
+ * cannot do worktrees" assertable on a laptop where both are installed and
+ * working — and what keeps the suite passing in CI, where neither may be.
+ *
+ * The fakes are `tests/support/fake-cli.ts`'s: a Node program behind the
+ * launcher the platform actually installs. That matters more here than
+ * anywhere else in the suite, because the doctor probes through
+ * `commandInvocation` — so on Windows these fixtures are `.cmd` shims reached
+ * via `cmd.exe`, which is exactly the shape an npm-installed `claude` has and
+ * the exact thing a shebang fixture could never test.
+ */
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { createServer } from 'node:net'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { openJournal } from '../src/journal/journal.ts'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
+import { stringify } from 'yaml'
+import { afterAll, describe, expect, it } from 'vitest'
+import { commandLines, signatureWords } from '../src/doctor/ci.ts'
+import { resolveWorkflow } from '../src/config/resolve.ts'
+import {
+  checkCiCoverage,
+  exampleTarget,
+  formatDoctorReport,
+  runDoctor,
+  checkLeftovers,
+  type CheckResult,
+  type DoctorOptions,
+} from '../src/doctor/index.ts'
+import { writeSummary, type WorktreeSummaryInput } from '../src/lanes/summary.ts'
+import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
+
+const temps: string[] = []
+
+const makeTemp = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-doctor-'))
+  temps.push(dir)
+  return dir
+}
+
+afterAll(() => {
+  for (const dir of temps) rmSync(dir, { recursive: true, force: true })
+})
+
+/**
+ * A `.mjs` line that writes `text` verbatim.
+ *
+ * `JSON.stringify` rather than an inlined `\n`, because these strings are the
+ * subject: a fixture whose newline was eaten by one level of escaping would
+ * change what the adapter's version parser and the refusal patterns see, and
+ * would do it silently.
+ */
+const write = (stream: 'stdout' | 'stderr', text: string): string =>
+  `process.${stream}.write(${JSON.stringify(`${text}\n`)})`
+
+/**
+ * `process.exitCode` rather than `process.exit(code)`.
+ *
+ * Every one of these fakes writes a line and then reports a code, and on POSIX
+ * stdout to a pipe is asynchronous: `process.exit` can truncate a write that
+ * has not drained, which would turn "not authenticated" into a blank probe and
+ * a passing check. Setting the code and falling off the end of the program
+ * flushes first.
+ */
+const exitWith = (code: number): string => `process.exitCode = ${code}`
+
+const MISSING = '/nonexistent/vinta-ai-maestro-doctor/not-a-binary'
+
+/**
+ * `--version` answers, then the adapter's auth probe says whatever it is told.
+ *
+ * No argv branch is needed for the second half: claude-code's auth probe *is*
+ * the real invocation with stdin closed (`src/harness/claude-code.ts`), so
+ * "anything that is not `--version`" is precisely that probe.
+ */
+const fakeClaude = (dir: string, authOutput: string | null): string =>
+  fakeCli(dir, 'claude', {
+    version: '9.9.9 (Claude Code)',
+    ...(authOutput === null ? {} : { stdout: [authOutput], exit: 1 }),
+  })
+
+/**
+ * `codex login status` is what the adapter asks; nothing here holds a credential.
+ *
+ * Written as source rather than as a spec because the fixture's subject is the
+ * *subcommand*: `--version` must succeed while `login` fails, and a spec that
+ * answered every invocation the same way would pass this test for the wrong
+ * reason. `process.argv` reads identically under a shebang script and under a
+ * `.cmd` shim, which is why it can be said once.
+ */
+const fakeCodex = (dir: string, loggedIn: boolean): string =>
+  fakeCliFromSource(
+    dir,
+    'codex',
+    [
+      `const argv = process.argv.slice(2)`,
+      `if (argv[0] === '--version') {`,
+      `  ${write('stdout', 'codex-cli 0.20.0')}`,
+      `} else if (argv[0] === 'login') {`,
+      loggedIn
+        ? `  ${write('stdout', 'account active')}`
+        : `  ${write('stdout', 'Not logged in')}\n  ${exitWith(1)}`,
+      `}`,
+    ].join('\n'),
+  )
+
+/** Likewise: `git --version` answers while `git worktree` is the half that breaks. */
+const fakeGit = (dir: string, worktreesWork: boolean): string =>
+  fakeCliFromSource(
+    dir,
+    'git',
+    [
+      `const argv = process.argv.slice(2)`,
+      `if (argv[0] === '--version') {`,
+      `  ${write('stdout', 'git version 2.45.2')}`,
+      `} else if (argv[0] === 'worktree') {`,
+      // stderr, not stdout: §11's assertion below is that a probe's *diagnostic*
+      // never reaches a check line, and stderr is where a real git puts it.
+      worktreesWork
+        ? `  // usable: says nothing and exits 0`
+        : `  ${write('stderr', 'fatal: not a working tree')}\n  ${exitWith(128)}`,
+      `}`,
+    ].join('\n'),
+  )
+
+const fakeDocker = (dir: string): string =>
+  fakeCliFromSource(
+    dir,
+    'docker',
+    [
+      `if (process.argv[2] === 'compose') {`,
+      `  ${write('stdout', 'v2.29.0')}`,
+      `} else {`,
+      `  ${exitWith(1)}`,
+      `}`,
+    ].join('\n'),
+  )
+
+const workflow = (harnessOverride?: Workflow['defaults']['harness']): Workflow =>
+  WorkflowSchema.parse({
+    schema_version: 1,
+    id: 'doctor-fixture',
+    base_branch: 'main',
+    // Every phase gated, because an all-green environment is one where the
+    // gate check passes too; the ungated case has its own test below.
+    defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', gates: ['unit'] },
+    resources: { lane: { capacity: 2, kind: 'worktree' } },
+    gates: { unit: { cmd: 'true' } },
+    nodes: [
+      { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['unit'] },
+      ...(harnessOverride === undefined
+        ? []
+        : [{ id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', harness: harnessOverride, gates: ['unit'] }]),
+    ],
+  })
+
+/** A summary with one forked dev database, with or without a reset. */
+const summary = (name: string, resetCmd: string | null): WorktreeSummaryInput => ({
+  name,
+  path: `/tmp/${name}`,
+  branch: `wt/${name}`,
+  base_ref: 'main',
+  created_at: new Date(0).toISOString(),
+  state: {
+    dev_db: {
+      engine: 'postgres',
+      strategy: 'fork',
+      forked_name: `app_wt_${name.replaceAll('-', '_')}`,
+      connection_url_var: 'DATABASE_URL',
+      reset_cmd: resetCmd,
+    },
+    test_db: null,
+    compose: { project_name: name },
+  },
+})
+
+/**
+ * An environment where nothing is wrong: every binary answers, disk is ample,
+ * no compose is needed, no lane has been provisioned yet. Each test below
+ * breaks exactly one thing about it, so a failure names its own cause.
+ */
+const greenOptions = (): DoctorOptions & { summaryDir: string } => {
+  const root = makeTemp()
+  return {
+    workflow: workflow(),
+    repoPath: root,
+    poolRoot: join(root, 'pool'),
+    summaryDir: join(root, 'summaries'),
+    perLaneBytes: 1,
+    bins: {
+      git: fakeGit(root, true),
+      docker: fakeDocker(root),
+      harness: { 'claude-code': fakeClaude(root, null) },
+    },
+  }
+}
+
+const find = (checks: readonly CheckResult[], id: string): CheckResult => {
+  const check = checks.find((candidate) => candidate.id === id)
+  if (!check) throw new Error(`no check "${id}" in report`)
+  return check
+}
+
+describe('vinta-ai-maestro doctor', () => {
+  it('reports an all-green environment as all-pass and exits zero', async () => {
+    const report = await runDoctor(greenOptions())
+
+    expect(report.checks.every((check) => check.status === 'pass')).toBe(true)
+    expect(report.ok).toBe(true)
+    expect(report.exitCode).toBe(0)
+    // Passing checks carry no remedy: a fix printed beside working machinery is
+    // what teaches a reader to skim past the ones that matter.
+    expect(report.checks.every((check) => check.remedy === undefined)).toBe(true)
+  })
+
+  it('fails on a missing harness binary, with the install command', async () => {
+    const base = greenOptions()
+    const report = await runDoctor({
+      ...base,
+      bins: { ...base.bins, harness: { 'claude-code': MISSING } },
+    })
+
+    const check = find(report.checks, 'harness:claude-code')
+    expect(check.status).toBe('fail')
+    expect(check.label).toContain('not installed')
+    expect(check.remedy).toContain('npm install -g')
+    expect(report.exitCode).toBe(1)
+  })
+
+  it('fails a harness that is installed but not authenticated, with the login command', async () => {
+    const base = greenOptions()
+    const dir = makeTemp()
+    const codexBin = fakeCodex(dir, false)
+    const report = await runDoctor({
+      ...base,
+      workflow: workflow('codex'),
+      bins: {
+        ...base.bins,
+        harness: { ...base.bins?.harness, codex: codexBin },
+      },
+    })
+
+    // The harness that *is* logged in still passes: one broken harness must not
+    // smear across the report.
+    expect(find(report.checks, 'harness:claude-code').status).toBe('pass')
+
+    const check = find(report.checks, 'harness:codex')
+    expect(check.status).toBe('fail')
+    expect(check.label).toContain('not authenticated')
+    expect(check.remedy).toBe(`${codexBin} login`)
+    expect(report.exitCode).toBe(1)
+  })
+
+  it('fails when git cannot use worktrees, while still seeing git itself', async () => {
+    const base = greenOptions()
+    const dir = makeTemp()
+    const report = await runDoctor({
+      ...base,
+      bins: { ...base.bins, git: fakeGit(dir, false) },
+    })
+
+    expect(find(report.checks, 'git:present').status).toBe('pass')
+    const check = find(report.checks, 'git:worktrees')
+    expect(check.status).toBe('fail')
+    expect(check.remedy).toContain('worktree list')
+    expect(report.exitCode).toBe(1)
+  })
+
+  it('fails when git is absent entirely', async () => {
+    const base = greenOptions()
+    const report = await runDoctor({ ...base, bins: { ...base.bins, git: MISSING } })
+
+    expect(find(report.checks, 'git:present').status).toBe('fail')
+    expect(find(report.checks, 'git:present').remedy).toContain('install git')
+    expect(report.exitCode).toBe(1)
+  })
+
+  it('warns — never fails — on a forked database with no reset_cmd', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    await writeSummary(summaryDir, summary('run-lane-1', 'dropdb --if-exists x'))
+    await writeSummary(summaryDir, summary('run-lane-2', null))
+
+    const report = await runDoctor(base)
+
+    expect(find(report.checks, 'lane:run-lane-1').status).toBe('pass')
+    const single = find(report.checks, 'lane:run-lane-2')
+    expect(single.status).toBe('warn')
+    expect(single.label).toContain('single-use')
+    expect(single.label).toContain('re-provisioned')
+    expect(single.remedy).toContain('reset_cmd')
+    // Degraded, not blocked: the run still starts.
+    expect(report.ok).toBe(true)
+    expect(report.exitCode).toBe(0)
+  })
+
+  /**
+   * The shape a real repository produced: `prepare-worktree` wrote
+   * `strategy: create-empty-and-migrate`, which is not one of the three the
+   * skill's own spec lists, and omitted `reset_cmd` entirely. Eleven lanes
+   * reported "summary unreadable" and the only advice was to delete them —
+   * which would have dropped their forked databases over two wrong fields.
+   */
+  it('names the fields a summary got wrong instead of calling it unreadable', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    const broken = summary('run-lane-1', 'dropdb x') as unknown as Record<string, any>
+    broken['state'].dev_db.strategy = 'create-empty-and-migrate'
+    delete broken['state'].dev_db.reset_cmd
+    await writeFile(join(summaryDir, 'run-lane-1.yaml'), stringify(broken), 'utf8')
+
+    const report = await runDoctor(base)
+    const check = find(report.checks, 'lane:run-lane-1')
+
+    expect(check.status).toBe('warn')
+    expect(check.label).toContain('state.dev_db.strategy')
+    expect(check.label).toContain('state.dev_db.reset_cmd')
+    // Repairable, so repair is offered first: deleting takes the databases too.
+    expect(check.remedy).toContain('fix those fields')
+    // Still a warning. A stale summary from an older run must not block a run
+    // that is not using that lane.
+    expect(report.ok).toBe(true)
+  })
+
+  /**
+   * The other half: a file that is not YAML at all has no field to name, and
+   * must not pretend otherwise.
+   */
+  it('still says "unreadable" when the file does not parse', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    await writeFile(join(summaryDir, 'run-lane-1.yaml'), ': not: valid: yaml: [', 'utf8')
+
+    const check = find((await runDoctor(base)).checks, 'lane:run-lane-1')
+
+    expect(check.status).toBe('warn')
+    expect(check.label).toContain('unreadable')
+    expect(check.remedy).toContain('re-provision')
+  })
+
+  /**
+   * §11: a summary holds database names, connection variables and filesystem
+   * paths, and the value that failed validation is exactly the thing most
+   * likely to be one. Field paths and schema messages carry none of it.
+   */
+  it('reports the field and the expectation, never the offending value', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    const broken = summary('run-lane-1', 'dropdb x') as unknown as Record<string, any>
+    broken['state'].dev_db.strategy = 'secret_db_name_do_not_print'
+    await writeFile(join(summaryDir, 'run-lane-1.yaml'), stringify(broken), 'utf8')
+
+    const check = find((await runDoctor(base)).checks, 'lane:run-lane-1')
+
+    expect(check.label).toContain('state.dev_db.strategy')
+    expect(check.label).not.toContain('secret_db_name_do_not_print')
+  })
+
+  /**
+   * The four-run sequence this check exists to collapse into one line. Each of
+   * these failed a real run *after* provisioning worktrees and cutting
+   * branches, one node at a time, with every dependent blocked behind it.
+   */
+  describe('briefs against the base branch', () => {
+    /** A real repository, because `git cat-file` is the whole mechanism. */
+    const repo = async (): Promise<string> => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-git-'))
+      temps.push(dir)
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+      return dir
+    }
+
+    const planWorkflow = (base = 'main'): Workflow =>
+      WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'p',
+        base_branch: base,
+        defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'ai-plans/plan.md#phase-0' }],
+      })
+
+    /**
+     * Real `git`, deliberately. The rig's fake answers every probe with
+     * success, and the whole mechanism here is what `git cat-file -e` says
+     * about a path in a branch's tree.
+     */
+    const realGit = (dir: string, workflow: Workflow): DoctorOptions => {
+      const base = greenOptions()
+      return { ...base, workflow, repoPath: dir, bins: { ...base.bins, git: 'git' } }
+    }
+
+    const briefCheck = async (dir: string, workflow: Workflow) =>
+      find((await runDoctor(realGit(dir, workflow))).checks, 'brief:ai-plans/plan.md')
+
+    it('passes when the plan is committed on the base branch', async () => {
+      const dir = await repo()
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+      execFileSync('git', ['add', '.'], { cwd: dir, stdio: 'ignore' })
+      execFileSync('git', ['commit', '-qm', 'plan'], { cwd: dir, stdio: 'ignore' })
+
+      expect((await briefCheck(dir, planWorkflow())).status).toBe('pass')
+    })
+
+    /** Run 1: the file only ever existed in the working tree. */
+    it('fails an uncommitted plan, and says to commit it', async () => {
+      const dir = await repo()
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+
+      const check = await briefCheck(dir, planWorkflow())
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('not committed anywhere')
+      expect(check.remedy).toContain('commit ai-plans/plan.md to main')
+    })
+
+    /**
+     * Run 2: `git add` and no commit. Worth its own case because the operator
+     * has *done something* and the file looks tracked — "not committed
+     * anywhere" would read as wrong to them.
+     */
+    it('tells a staged-but-uncommitted plan that git add is not enough', async () => {
+      const dir = await repo()
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+      execFileSync('git', ['add', 'ai-plans/plan.md'], { cwd: dir, stdio: 'ignore' })
+
+      const check = await briefCheck(dir, planWorkflow())
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('staged, never committed')
+    })
+
+    /** Run 4: committed, but on a branch `base_branch` does not name. */
+    it('distinguishes "on another branch" and offers the other fix', async () => {
+      const dir = await repo()
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('checkout', '-qb', 'feature')
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'plan')
+
+      const check = await briefCheck(dir, planWorkflow('main'))
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('not on main')
+      // Both routes out, because only the operator knows which they want.
+      expect(check.remedy).toContain('merge it into main')
+      expect(check.remedy).toContain('base_branch')
+    })
+
+    it('fails a base_branch that is not a branch at all', async () => {
+      const dir = await repo()
+      const check = find((await runDoctor(realGit(dir, planWorkflow('nope')))).checks, 'briefs')
+
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('not a branch')
+    })
+  })
+
+  /**
+   * The run that failed at `git_branch`: a previous run's worktrees still held
+   * `plan/<id>/phase-p0`, and git will not check out a branch twice.
+   */
+  describe('phase branches held by another worktree', () => {
+    it('fails and names the worktree to remove', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-held-'))
+      temps.push(dir)
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+      // Exactly what a failed run leaves behind.
+      const stale = join(dir, 'stale-lane')
+      git('worktree', 'add', '-q', '-b', 'plan/p/phase-p0', stale)
+
+      const workflow = WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'p',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'seed.txt' }],
+      })
+      const base = greenOptions()
+      const report = await runDoctor({
+        ...base,
+        workflow,
+        repoPath: dir,
+        bins: { ...base.bins, git: 'git' },
+      })
+      const check = find(report.checks, 'branch:plan/p/phase-p0')
+
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('already checked out')
+      expect(check.remedy).toContain('worktree remove --force')
+      expect(check.remedy).toContain('stale-lane')
+      expect(report.ok).toBe(false)
+    })
+
+    it('passes when nothing holds them', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-free-'))
+      temps.push(dir)
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+
+      const workflow = WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'p',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'seed.txt' }],
+      })
+
+      const base = greenOptions()
+      const report = await runDoctor({
+        ...base,
+        workflow,
+        repoPath: dir,
+        bins: { ...base.bins, git: 'git' },
+      })
+      expect(find(report.checks, 'branches').status).toBe('pass')
+    })
+
+    /**
+     * The resume this check used to refuse.
+     *
+     * A kill mid-phase leaves the run's *own* lanes on `plan/<id>/phase-<n>` —
+     * the integrator put them there — which read as clashes turned the preflight
+     * of every `run --resume` into a wall of failures, each offering to
+     * `worktree remove --force` the lane holding the uncommitted work the
+     * resume existed to adopt.
+     *
+     * Built as a resume really leaves it: the lane branch exists, and HEAD is on
+     * the phase branch rather than on it, because `recycle` never ran.
+     */
+    const resumeFixture = async (): Promise<{ dir: string; poolRoot: string }> => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-resume-'))
+      temps.push(dir)
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+
+      const poolRoot = join(dir, 'lanes')
+      const lane = join(poolRoot, 'p-run1-lane-1')
+      git('worktree', 'add', '-q', '-b', 'wt/p-run1-lane-1', lane)
+      execFileSync('git', ['checkout', '-q', '-b', 'plan/p/phase-p0'], {
+        cwd: lane,
+        stdio: 'ignore',
+      })
+      return { dir, poolRoot }
+    }
+
+    const resumeWorkflow = WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'p',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'seed.txt' }],
+    })
+
+    it('passes when the holders are lanes of the run being resumed', async () => {
+      const { dir, poolRoot } = await resumeFixture()
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run1',
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      expect(find(report.checks, 'branches').status).toBe('pass')
+      // Not merely "not a fail": no per-branch line at all, so nothing offers
+      // to remove the lane.
+      expect(report.checks.some((check) => check.id.startsWith('branch:'))).toBe(false)
+      expect(report.ok).toBe(true)
+    })
+
+    it('still fails when the holder is a lane of some other run', async () => {
+      // The same filesystem as above. The only difference is which run is being
+      // resumed, which is the whole of what may excuse a held branch.
+      const { dir, poolRoot } = await resumeFixture()
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run2',
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      const check = find(report.checks, 'branch:plan/p/phase-p0')
+      expect(check.status).toBe('fail')
+      expect(check.remedy).toContain('worktree remove --force')
+      expect(report.ok).toBe(false)
+    })
+
+    it('does not charge the disk for worktrees the resume adopts', async () => {
+      // The observed refusal: every worktree was on disk, the pool would have
+      // created none, and the doctor still charged for all of them.
+      const { dir, poolRoot } = await resumeFixture()
+      execFileSync('git', ['worktree', 'add', '-q', '--detach', join(poolRoot, 'p-run1-integ')], {
+        cwd: dir,
+        stdio: 'ignore',
+      })
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run1',
+        perLaneBytes: 2 ** 50,
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      const check = find(report.checks, 'disk')
+      expect(check.status).toBe('pass')
+      expect(check.label).toContain('(2 already on disk)')
+      expect(check.label).toContain('nothing new to provision')
+    })
+
+    it('charges a resume for the worktrees it still has to create', async () => {
+      // Only the lane survived; the integration worktree was never made.
+      const { dir, poolRoot } = await resumeFixture()
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run1',
+        perLaneBytes: 2 ** 50,
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      const check = find(report.checks, 'disk')
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('(1 already on disk) — 1 new need 1048576.0 GiB')
+    })
+  })
+
+  describe('gates', () => {
+    it('warns when a phase runs no gate at all, naming it', async () => {
+      // Twelve phases finished without a check in one observed run: every
+      // node carried `gates: []` where its author meant "the project's".
+      const base = greenOptions()
+      const ungated = WorkflowSchema.parse({
+        ...base.workflow,
+        defaults: { ...base.workflow.defaults, gates: undefined },
+        nodes: [
+          { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['unit'] },
+          { id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', gates: [] },
+          { id: 'p3', name: 'Three', prompt_ref: 'plan.md#phase-3' },
+        ],
+      })
+      const report = await runDoctor({ ...base, workflow: ungated })
+
+      const check = find(report.checks, 'gates')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('2 of 3 phases')
+      expect(check.label).toContain('p2, p3')
+      expect(check.remedy).toContain('allow_ungated_phases')
+      // A warning, so the run can still start — the plan's author was told.
+      expect(report.exitCode).toBe(0)
+    })
+
+    it('passes an ungated phase the plan declared as such', async () => {
+      const base = greenOptions()
+      const declared = WorkflowSchema.parse({
+        ...base.workflow,
+        defaults: { ...base.workflow.defaults, gates: undefined, allow_ungated_phases: true },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+      })
+      const report = await runDoctor({ ...base, workflow: declared })
+
+      expect(find(report.checks, 'gates').status).toBe('pass')
+      expect(find(report.checks, 'gates').label).toContain('allow_ungated_phases')
+    })
+  })
+
+  describe('compose gates', () => {
+    it('warns about a docker compose run or exec with no -T, naming the field', async () => {
+      // With no terminal attached, compose fails with "the input device is not
+      // a TTY" before the command inside the container starts.
+      const base = greenOptions()
+      const workflow = WorkflowSchema.parse({
+        ...base.workflow,
+        gates: {
+          unit: { cmd: 'docker compose run --rm api python -m pytest', scoped_cmd: 'docker compose run --rm -T api pytest {changed_files}' },
+          lint: { cmd: 'docker-compose exec web ruff check .' },
+          types: { cmd: 'docker compose run --rm --no-TTY api mypy' },
+        },
+        project: { migrate_cmd: 'docker compose run --rm -T api python manage.py migrate', commands: { test: 'docker compose exec api pytest' } },
+      })
+      const report = await runDoctor({ ...base, workflow })
+
+      const check = find(report.checks, 'compose-tty')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('gates.unit.cmd')
+      expect(check.label).toContain('gates.lint.cmd')
+      expect(check.label).toContain('project.commands.test')
+      expect(check.label).not.toContain('scoped_cmd')
+      expect(check.label).not.toContain('gates.types')
+      expect(check.label).not.toContain('migrate_cmd')
+      expect(check.remedy).toContain('-T')
+    })
+
+    it('says nothing for commands that do not go through compose', async () => {
+      const report = await runDoctor(greenOptions())
+      expect(report.checks.find((check) => check.id === 'compose-tty')).toBeUndefined()
+    })
+  })
+
+  describe('gates that never narrow', () => {
+    it('warns about a test gate that will run in full every phase, naming the ignored scoped line', async () => {
+      // An observed run spent two hours on a 6,528-test suite in every fix
+      // round of every phase: its scoped line had `<app>` where maestro needs
+      // `{changed_files}`, was rightly not inherited, and nothing said so.
+      const base = greenOptions()
+      await writeFile(
+        join(base.repoPath, '.vinta-ai-workflows.yaml'),
+        stringify({
+          commands: {
+            test_unit: 'uv run pytest -n auto',
+            test_unit_scoped: 'uv run pytest <app>/tests/ -n auto',
+          },
+        }),
+      )
+      const workflow = WorkflowSchema.parse({
+        ...base.workflow,
+        gates: { ...base.workflow.gates, test: { type: 'test', cmd: 'uv run pytest -n auto' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['unit', 'test'] }],
+      })
+      const report = await runDoctor({ ...base, workflow })
+
+      const check = find(report.checks, 'gate-scope:test')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('every phase')
+      expect(check.label).toContain('commands.test_unit_scoped')
+      expect(check.label).not.toContain('<app>')
+      expect(check.remedy).toContain('{changed_files}')
+      expect(check.remedy).toContain('maestro.defaults.gate_scope: full')
+      expect(formatDoctorReport(report)).toContain('WARN  gate test: runs its full command on every phase')
+      // Slower, not broken: the run can start.
+      expect(report.exitCode).toBe(0)
+    })
+
+    it('says nothing when the run asked for full gates', async () => {
+      const base = greenOptions()
+      const workflow = WorkflowSchema.parse({
+        ...base.workflow,
+        defaults: { ...base.workflow.defaults, gate_scope: 'full' },
+        gates: { ...base.workflow.gates, test: { type: 'test', cmd: 'uv run pytest -n auto' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['test'] }],
+      })
+      const report = await runDoctor({ ...base, workflow })
+      expect(report.checks.filter((check) => check.id.startsWith('gate-scope:'))).toEqual([])
+    })
+  })
+
+  describe('env files', () => {
+    /** A real repository, because the check asks git what is tracked and what is ignored. */
+    const realRepo = async (
+      tracked: Readonly<Record<string, string>>,
+      ignore: string,
+    ): Promise<string> => {
+      const root = makeTemp()
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root })
+      for (const [path, body] of Object.entries(tracked)) {
+        await mkdir(join(root, dirname(path)), { recursive: true })
+        await writeFile(join(root, path), body, 'utf8')
+      }
+      await writeFile(join(root, '.gitignore'), ignore, 'utf8')
+      execFileSync('git', ['add', '-A'], { cwd: root })
+      execFileSync('git', ['-c', 'user.email=f@x.invalid', '-c', 'user.name=f', 'commit', '-q', '-m', 'fixture'], { cwd: root })
+      return root
+    }
+
+    it('warns, by name, when gitignored files have tracked examples and env_files is empty', async () => {
+      // The observed run: `.env`, `.env.docker` and the local settings module
+      // all ignored, all with examples, none declared — and `doctor` passed.
+      const root = await realRepo(
+        {
+          '.env.example': 'A=1\n',
+          '.env.docker.example': 'B=1\n',
+          'app/settings/local.py.example': 'DEBUG = True\n',
+          'README.md': 'x\n',
+        },
+        '.env\n.env.docker\napp/settings/local.py\n',
+      )
+      const base = greenOptions()
+      const report = await runDoctor({ ...base, repoPath: root, bins: { ...base.bins, git: 'git' } })
+
+      const check = find(report.checks, 'env-files')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('.env, .env.docker, app/settings/local.py')
+      expect(check.remedy).toContain('maestro.project.env_files')
+    })
+
+    it('fails a declared env file that is not in the checkout, and passes one that is', async () => {
+      const root = await realRepo({ '.env.example': 'A=1\n' }, '.env\n.env.docker\n')
+      await writeFile(join(root, '.env'), 'A=1\n', 'utf8')
+      const base = greenOptions()
+      const report = await runDoctor({
+        ...base,
+        repoPath: root,
+        bins: { ...base.bins, git: 'git' },
+        project: { databases: {}, migrateCmd: 'true', envFiles: ['.env', '.env.docker'] },
+      })
+
+      expect(find(report.checks, 'env-file:.env').status).toBe('pass')
+      const missing = find(report.checks, 'env-file:.env.docker')
+      expect(missing.status).toBe('fail')
+      expect(missing.remedy).toContain('.env.docker')
+      expect(report.exitCode).toBe(1)
+      // Declared and present: nothing undeclared is left to warn about.
+      expect(report.checks.find((check) => check.id === 'env-files')).toBeUndefined()
+    })
+
+    it('says so when nothing is gitignored with a tracked example', async () => {
+      const root = await realRepo({ 'README.md': 'x\n' }, 'node_modules\n')
+      const base = greenOptions()
+      const report = await runDoctor({ ...base, repoPath: root, bins: { ...base.bins, git: 'git' } })
+      expect(find(report.checks, 'env-files').status).toBe('pass')
+    })
+  })
+
+  it('fails when the disk cannot hold lanes + 1 worktrees', async () => {
+    const base = greenOptions()
+    // Two lanes plus the integration worktree at 1 PiB each: no volume fits it.
+    const report = await runDoctor({ ...base, perLaneBytes: 2 ** 50 })
+
+    const check = find(report.checks, 'disk')
+    expect(check.status).toBe('fail')
+    expect(check.label).toContain('2 lanes + 1 integration worktree')
+    expect(check.remedy).toContain('resources.lane.capacity')
+    expect(report.exitCode).toBe(1)
+  })
+
+  it('sizes a staffed run by its roster and spare headroom, not its capacity', async () => {
+    // Capacity 2, five members, two spares: the pool makes a desk per member
+    // plus the integration worktree, and may add two more mid-run.
+    const base = greenOptions()
+    const staffed = WorkflowSchema.parse({
+      ...base.workflow,
+      crew: Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((id) => [id, { tier: 1, model: 'opus' }])),
+      nodes: base.workflow.nodes.map((node) => ({ ...node, crew: 'a' })),
+    })
+
+    const report = await runDoctor({ ...base, workflow: staffed, perLaneBytes: 2 ** 50 })
+
+    const check = find(report.checks, 'disk')
+    expect(check.label).toContain('5 lanes + 1 integration worktree + 2 spare-crew worktrees — 8 new')
+    expect(check.remedy).toContain('max_spare_crew')
+  })
+
+  it('does not fail a project that needs no compose, even with docker missing', async () => {
+    const base = greenOptions()
+    const report = await runDoctor({ ...base, bins: { ...base.bins, docker: MISSING } })
+
+    const check = find(report.checks, 'compose')
+    expect(check.status).toBe('pass')
+    expect(check.label).toContain('not required')
+    expect(report.exitCode).toBe(0)
+  })
+
+  it('fails a compose-delivered project when compose is unavailable', async () => {
+    const base = greenOptions()
+    const report = await runDoctor({
+      ...base,
+      bins: { ...base.bins, docker: MISSING },
+      project: {
+        migrateCmd: 'true',
+        databases: {
+          dev: {
+            engine: 'postgres',
+            delivery: 'compose',
+            name: 'app',
+            serverUrl: 'postgres://localhost:5432',
+            connectionUrlVar: 'DATABASE_URL',
+          },
+        },
+      },
+    })
+
+    const check = find(report.checks, 'compose')
+    expect(check.status).toBe('fail')
+    expect(check.remedy).toContain('docker compose')
+    expect(report.exitCode).toBe(1)
+  })
+
+  it('reports every problem in one pass rather than stopping at the first', async () => {
+    const base = greenOptions()
+    const dir = makeTemp()
+    const report = await runDoctor({
+      ...base,
+      perLaneBytes: 2 ** 50,
+      bins: { git: fakeGit(dir, false), docker: MISSING, harness: { 'claude-code': MISSING } },
+    })
+
+    const failed = report.checks.filter((check) => check.status === 'fail').map((c) => c.id)
+    expect(failed).toEqual(['harness:claude-code', 'git:worktrees', 'disk'])
+  })
+
+  it('renders one line per check and a fix line only under what is broken', async () => {
+    const base = greenOptions()
+    const report = await runDoctor({
+      ...base,
+      bins: { ...base.bins, harness: { 'claude-code': MISSING } },
+    })
+    const text = formatDoctorReport(report)
+
+    expect(text).toContain('FAIL  harness claude-code: not installed')
+    expect(text).toContain('        fix: ')
+    expect(text.match(/^\s+fix: /gm)).toHaveLength(1)
+    expect(text).toContain('1 failed, 0 warned, ')
+    expect(text).toContain('A run cannot start')
+  })
+
+  it('never puts a probe’s output into a check line', async () => {
+    const base = greenOptions()
+    const dir = makeTemp()
+    const report = await runDoctor({
+      ...base,
+      // The fake git prints "fatal: not a working tree" on stderr. It informs
+      // the verdict and must not reach the report (§11).
+      bins: { ...base.bins, git: fakeGit(dir, false) },
+    })
+
+    const rendered = formatDoctorReport(report)
+    expect(rendered).not.toContain('fatal:')
+    expect(rendered).not.toContain('not a working tree')
+  })
+})
+
+describe('example files', () => {
+  it('names the file an example stands for', () => {
+    expect(exampleTarget('.env.example')).toBe('.env')
+    expect(exampleTarget('.env.docker.example')).toBe('.env.docker')
+    expect(exampleTarget('config/settings.sample')).toBe('config/settings')
+    expect(exampleTarget('app/settings/local.example.py')).toBe('app/settings/local.py')
+    expect(exampleTarget('app/settings/local.py.example')).toBe('app/settings/local.py')
+    expect(exampleTarget('phpunit.xml.dist')).toBe('phpunit.xml')
+    expect(exampleTarget('README.md')).toBeNull()
+    // `.example` as a directory name is not an example file.
+    expect(exampleTarget('docs.example/index.md')).toBeNull()
+  })
+})
+
+describe('leftovers of finished runs', () => {
+  it('warns about a done run’s stack still running, with the command that stops it', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-leftovers-'))
+    try {
+      const journal = openJournal(repo)
+      journal.createRun('old', WorkflowSchema.parse(JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures/golden-workflow.json'), 'utf8'))))
+      journal.append({ runId: 'old', type: 'run_ended', payload: { status: 'done' } })
+      journal.close()
+      const project = `${basename(repo).toLowerCase()}_old-lane-2`
+
+      const checks = await checkLeftovers(repo, { listStacks: async () => [project] })
+      expect(checks).toEqual([
+        {
+          id: 'leftover:stack:0',
+          label: `run old is over and left a compose stack running: ${project}`,
+          status: 'warn',
+          remedy: `docker compose -p ${project} down`,
+        },
+      ])
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('asks nothing of a project with no runs', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-leftovers-'))
+    try {
+      expect(await checkLeftovers(repo, { listStacks: async () => ['x'] })).toEqual([])
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('doctor exercises the database commands', () => {
+  const listening = async () => {
+    const server = createServer((socket) => socket.destroy())
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    return { server, port: typeof address === 'object' && address ? address.port : 0 }
+  }
+
+  const withDatabase = (port: number, dropdbCmd: string): DoctorOptions => ({
+    ...greenOptions(),
+    databaseProbeTimeoutMs: 400,
+    project: {
+      migrateCmd: 'true',
+      databases: {
+        dev: {
+          engine: 'postgres',
+          delivery: 'external',
+          name: 'app',
+          serverUrl: `postgres://app@127.0.0.1:${port}`,
+          connectionUrlVar: 'DATABASE_URL',
+          dropdbCmd,
+        },
+      },
+    },
+  })
+  // A stub `dropdb`: the real one needs a server, and the subject here is what
+  // the check does when the command hangs or succeeds. The trailing `--` keeps
+  // node from reading the appended `-h` as its own `--help`.
+  const stub = (body: string): string => `"${process.execPath}" -e "${body}" --`
+
+  it('fails, naming the missing password, when dropdb hangs on a prompt', async () => {
+    const { server, port } = await listening()
+    try {
+      const report = await runDoctor(withDatabase(port, stub('setTimeout(() => {}, 60000)')))
+      const check = find(report.checks, 'database-commands:dev')
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain("password")
+      expect(check.remedy).toContain('PGPASSWORD')
+      expect(check.remedy).toContain('dropdb_cmd')
+      expect(report.ok).toBe(false)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('passes when the dropdb command succeeds', async () => {
+    const { server, port } = await listening()
+    try {
+      const report = await runDoctor(withDatabase(port, stub('process.exit(0)')))
+      expect(find(report.checks, 'database-commands:dev').status).toBe('pass')
+    } finally {
+      server.close()
+    }
+  })
+})
+
+describe('gates checked against CI', () => {
+  const ciWorkflow = (gates: Record<string, string>): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'ci-fixture',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', gates: Object.keys(gates) },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      gates: Object.fromEntries(Object.entries(gates).map(([id, cmd]) => [id, { cmd }])),
+      nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+    })
+
+  const repoWithCi = async (files: Record<string, unknown>): Promise<string> => {
+    const root = makeTemp()
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    for (const [name, doc] of Object.entries(files)) {
+      await writeFile(join(root, '.github', 'workflows', name), typeof doc === 'string' ? doc : stringify(doc))
+    }
+    return root
+  }
+
+  const DJANGO_CI = {
+    name: 'ci',
+    on: ['pull_request'],
+    jobs: {
+      test: {
+        'runs-on': 'ubuntu-latest',
+        steps: [
+          { uses: 'actions/checkout@v4' },
+          { name: 'Install', run: 'pip install uv\nuv sync --frozen' },
+          { name: 'Tests', run: 'uv run pytest --cov=app' },
+          {
+            name: 'Django checks',
+            run: 'cd backend\nDJANGO_SETTINGS_MODULE=app.settings.prod \\\n  uv run python manage.py check --deploy --fail-level WARNING',
+          },
+          { name: 'Client is current', run: 'pnpm run generate-client && git diff --exit-code -- frontend/src/client' },
+        ],
+      },
+    },
+  }
+
+  it('names each CI command no gate runs, and the flag a near gate leaves out', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const checks = await checkCiCoverage(
+      root,
+      ciWorkflow({ unit: 'docker compose run --rm -T web pytest -x', check: 'uv run python manage.py check' }),
+    )
+
+    expect(checks.map((check) => check.status)).toEqual(['warn', 'warn', 'warn'])
+    const labels = checks.map((check) => check.label)
+    // pytest is covered: --cov is an output flag, not a different check.
+    expect(labels.some((label) => label.includes('pytest'))).toBe(false)
+    expect(labels[0]).toContain('.github/workflows/ci.yml (test › Django checks)')
+    expect(labels[0]).toContain('which gate check runs without --deploy --fail-level')
+    expect(labels[1]).toContain('`pnpm run generate-client`, which no gate runs')
+    expect(labels[2]).toContain('`git diff --exit-code -- frontend/src/client`, which no gate runs')
+    expect(checks[0]?.remedy).toContain('gates.<id>.cmd')
+  })
+
+  it('passes once every CI check has a gate, and says nothing without a workflow', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const covered = ciWorkflow({
+      unit: 'pytest',
+      deploy: 'python manage.py check --deploy --fail-level WARNING',
+      client: 'npm run generate-client && git diff --exit-code -- frontend/src/client',
+    })
+    expect((await checkCiCoverage(root, covered)).map((check) => [check.id, check.status])).toEqual([
+      ['ci-coverage', 'pass'],
+    ])
+    expect(await checkCiCoverage(makeTemp(), covered)).toEqual([])
+  })
+
+  it('counts the project’s custom gates, which every plan resolves without declaring them', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const config = {
+      maestro: {
+        defaults: { model: 'opus', gates: ['test', 'django-check', 'api-client-fresh'] },
+        gates: {
+          test: { cmd: 'uv run pytest' },
+          'django-check': { cmd: 'uv run python manage.py check --deploy --fail-level WARNING' },
+          'api-client-fresh': { cmd: 'pnpm generate-client && git diff --exit-code -- frontend/src/client' },
+        },
+      },
+    }
+    const result = resolveWorkflow(
+      {
+        schema_version: 1,
+        id: 'ci-fixture',
+        base_branch: 'main',
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+      },
+      config,
+    )
+    if (!result.ok) throw new Error(JSON.stringify(result.issues))
+    expect((await checkCiCoverage(root, result.workflow)).map((check) => [check.id, check.status])).toEqual([
+      ['ci-coverage', 'pass'],
+    ])
+  })
+
+  /**
+   * The CI-parity warning listed six commands on every run of one project,
+   * some of them deliberately CI-only. A check recorded under `ci_only` with
+   * its reason is a decision, not a gap.
+   */
+  it('leaves a command the project recorded as CI-only out of the gaps', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const config = {
+      maestro: {
+        defaults: { model: 'opus', gates: ['test', 'django-check'] },
+        gates: {
+          test: { cmd: 'uv run pytest' },
+          'django-check': { cmd: 'uv run python manage.py check --deploy --fail-level WARNING' },
+        },
+        ci_only: [
+          { command: 'pnpm run generate-client', reason: 'needs the deployed API schema' },
+          { command: 'git diff --exit-code -- frontend/src/client', reason: 'pairs with generate-client' },
+        ],
+      },
+    }
+    const result = resolveWorkflow(
+      {
+        schema_version: 1,
+        id: 'ci-fixture',
+        base_branch: 'main',
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+      },
+      config,
+    )
+    if (!result.ok) throw new Error(JSON.stringify(result.issues))
+    const checks = await checkCiCoverage(root, result.workflow)
+    expect(checks.map((check) => [check.id, check.status])).toEqual([['ci-coverage', 'pass']])
+    expect(checks[0]?.label).toContain('2 left to CI by decision (ci_only)')
+  })
+
+  it('reads commands, not setup, and reduces wrappers to the tool they run', () => {
+    expect(commandLines('set -euo pipefail\n# lint\nnpm ci\nnpx eslint . && npx tsc --noEmit\necho done')).toEqual([
+      'npx eslint .',
+      'npx tsc --noEmit',
+    ])
+    expect(signatureWords('FOO=1 uv run --frozen --with x python -m mypy src')).toEqual(['mypy', 'src'])
+    expect(signatureWords('docker compose exec -T -e A=1 api ./manage.py test')).toEqual(['manage.py', 'test'])
+    expect(signatureWords('pnpm lint')).toEqual(['run', 'lint'])
+    expect(signatureWords('yarn run lint')).toEqual(['run', 'lint'])
+  })
+
+  it('reports a matrix repeat once, and skips a workflow that does not parse', async () => {
+    const root = await repoWithCi({
+      'a.yml': { jobs: { one: { steps: [{ run: 'ruff check .' }] }, two: { steps: [{ run: 'ruff check .' }] } } },
+      'b.yaml': 'jobs: [unclosed',
+    })
+    const checks = await checkCiCoverage(root, ciWorkflow({ unit: 'pytest' }))
+    expect(checks.map((check) => check.label)).toEqual([
+      'ci: .github/workflows/a.yml (one › 1) runs `ruff check .`, which no gate runs',
+    ])
+  })
+})

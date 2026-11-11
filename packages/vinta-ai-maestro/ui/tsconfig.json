@@ -1,0 +1,16 @@
+{
+  "$comment": "The UI is bundler-resolved DOM code; the package's own tsconfig is NodeNext and has no DOM lib. Separate project rather than a second `include`, so a React file can never be imported by the daemon and vice versa.",
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"],
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "noEmit": true
+  },
+  "include": ["src", "tests", "vite.config.ts"]
+}

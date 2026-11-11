@@ -97,6 +97,19 @@ if [[ "$STATUS" == "published" && -n "$PR_URL" && "$PR_URL" != "null" ]]; then
   exit 0
 fi
 
+# awk, not sed: BSD sed (macOS) can't parse the GNU idiom for this
+# (`:a;...;ba`) — it reports "unused label" and trims nothing.
+trim_trailing_blank_lines() {
+  awk '
+    { lines[NR] = $0 }
+    END {
+      last = 0
+      for (i = 1; i <= NR; i++) if (lines[i] ~ /[^[:space:]]/) last = i
+      for (i = 1; i <= last; i++) print lines[i]
+    }
+  '
+}
+
 # Body sections — split on `^# ` H1 headings.
 extract_section() {
   local heading="$1"
@@ -104,7 +117,7 @@ extract_section() {
     $0 ~ h { in_sec = 1; next }
     /^# / && in_sec { in_sec = 0 }
     in_sec { print }
-  ' | sed -e ':a;/./,$!d;/^$/{$d;ba;}'   # trim trailing blank lines
+  ' | trim_trailing_blank_lines
 }
 
 TITLE=$(extract_section "Title" | sed -e '/./,$!d')
@@ -237,6 +250,10 @@ FAILURES=0
 
 post_comment_gh() {
   local file="$1" start="$2" end="$3" side="$4" body="$5"
+  # The API only takes upper case; the schema says LEFT/RIGHT, but tolerate
+  # hand-written `side: right` rather than 422 on every comment.
+  side=$(printf '%s' "${side:-RIGHT}" | tr '[:lower:]' '[:upper:]')
+  [[ "$side" == "LEFT" || "$side" == "RIGHT" ]] || side="RIGHT"
   local repo commit
   repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
   commit=$(git rev-parse "origin/$BRANCH")
@@ -248,12 +265,16 @@ post_comment_gh() {
     -f "commit_id=$commit"
     -f "path=$file"
     -F "line=${end:-$start}"
-    -f "side=${side:-RIGHT}"
+    -f "side=$side"
   )
   if [[ -n "$end" && "$end" != "$start" && "$end" != "null" ]]; then
-    args+=( -F "start_line=$start" -f "start_side=${side:-RIGHT}" )
+    args+=( -F "start_line=$start" -f "start_side=$side" )
   fi
-  gh "${args[@]}" >/dev/null 2>&1
+  local err
+  if ! err=$(gh "${args[@]}" 2>&1 >/dev/null); then
+    printf '    gh error: %s\n' "${err//$'\n'/ }" >&2
+    return 1
+  fi
 }
 
 post_comment_glab() {
@@ -264,7 +285,8 @@ post_comment_glab() {
   base_sha=$(echo "$refs" | jq -r '.base_sha')
   head_sha=$(echo "$refs" | jq -r '.head_sha')
   start_sha=$(echo "$refs" | jq -r '.start_sha')
-  glab api --method POST \
+  local err
+  if ! err=$(glab api --method POST \
     "projects/:id/merge_requests/$PR_NUMBER/discussions" \
     -f "body=$body" \
     -f "position[base_sha]=$base_sha" \
@@ -273,7 +295,10 @@ post_comment_glab() {
     -f "position[position_type]=text" \
     -f "position[new_path]=$file" \
     -f "position[new_line]=${end:-$start}" \
-    >/dev/null 2>&1
+    2>&1 >/dev/null); then
+    printf '    glab error: %s\n' "${err//$'\n'/ }" >&2
+    return 1
+  fi
 }
 
 if [[ "$COMMENT_COUNT" -eq 0 ]]; then
@@ -329,7 +354,9 @@ if [[ $DRY_RUN -eq 0 ]]; then
 
   # If body already has a publish log, append entries to it; else add new section.
   if echo "$BODY" | grep -q '^## Publish log'; then
-    NEW_BODY=$(echo "$BODY" | awk -v entries="$(printf '%s\n' "${PUBLISH_LOG[@]}" | sed 's/^/- /')" '
+    # Entries go through the environment: BSD awk rejects a newline in a -v value.
+    NEW_BODY=$(echo "$BODY" | PUBLISH_ENTRIES="$(printf '%s\n' "${PUBLISH_LOG[@]}" | sed 's/^/- /')" awk '
+      BEGIN { entries = ENVIRON["PUBLISH_ENTRIES"] }
       /^## Publish log/ { in_log = 1; print; next }
       /^## / && in_log { in_log = 0; print entries; print; next }
       { print }

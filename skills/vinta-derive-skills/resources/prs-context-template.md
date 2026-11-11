@@ -3,14 +3,19 @@
 schema_version: 1                        # see schemas/prs-context-frontmatter.v1.schema.json
 plan_id: <plan-id>                       # filename feature portion, kebab-case
 feature_name: <FEATURE_NAME>             # UPPERCASE_WITH_UNDERSCORES, matches plan/spec
-phase_id: <phase-id>                     # e.g. "1", "4a"
-phase_title: <phase title>               # verbatim from the plan's Phased Rollout section
-branch: plan/<feature-kebab>/phase-<id>  # branch the PR opens from
-base: <main | plan/<feature-kebab>/phase-<prev-id>>  # PR target branch. Stacked: FIRST phase = default branch; every LATER phase = the PREVIOUS phase's branch (not the default branch). Modular / single-PR: default branch.
+kind: phase                              # phase (default) | integration (a phase's integ- branch) | plan (the PR that lands the whole plan)
+phase_id: <phase-id>                     # e.g. "1", "4a". Omit for kind: plan
+phase_title: <phase title>               # verbatim from the plan's Phased Rollout section. Omit for kind: plan
+branch: plan/<feature-kebab>/phase-<id>  # branch the PR opens from (integ-<id> for integration; final wave-<N> for a stacked plan PR)
+base: <main | plan/<feature-kebab>/phase-<dep-id> | plan/<feature-kebab>/integ-<id>>  # PR target branch. Stacked phase: its dependency-derived base (default branch only with no dependencies). Integration, plan, modular / single-PR: default branch.
 created_at: <ISO 8601 timestamp>
 status: pending                          # `pending` until published; `published` after CLI run
 pr_url:                                  # set by open-pr-from-context after publishing
 ---
+
+Everything below the frontmatter is prose a human reads on the PR, so write it in
+**Simple English** — see [Write it in Simple English](#write-it-in-simple-english)
+at the bottom of this file.
 
 # Title
 
@@ -89,3 +94,24 @@ Plan sections have **names** (`Goals + Non-goals`, `Guiding Decisions`, `Data Mo
 - Boilerplate matching nearby files.
 - Standard patterns documented in AGENTS.md.
 - Test bodies whose names already describe the assertion.
+
+## Write it in Simple English
+
+The title, the description, and every comment `body` are read by a human reviewer.
+Write them the way the `deslop-comments` skill
+(`ai-tools/skills/deslop-comments/SKILL.md`) asks for:
+
+- One idea per sentence. Split the dense multi-clause sentence instead of nesting it.
+- Say what the code does now. Lead with "not X" only when the reader would
+  otherwise get it wrong — a real gotcha, an edge case, or the reason behind a fix.
+- Plain engineering words, not AI buzzwords: "check" instead of `gate` / `guard`,
+  "use" instead of `leverage` / `utilize`, "show" or "return" instead of `surface`,
+  "pass" or "connect" instead of `plumb` / `wire`, "created" instead of `mint`,
+  "rule" or "constraint" instead of `invariant`. Keep a word when it is the precise
+  domain term (`opaque` for a token, `idempotent` for a handler, framework and
+  database vocabulary).
+- Keep proper nouns verbatim: plan and phase names, the plan's section names,
+  branch names, flag names, file paths, identifiers from the code.
+
+`implement-plan` runs `deslop-comments` over this file before publishing it, so
+anything that slips through gets rewritten there — but write it clean the first time.

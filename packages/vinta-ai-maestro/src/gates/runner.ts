@@ -1,0 +1,328 @@
+/**
+ * The gate runner. A gate is a declarative `{cmd, requires, timeout_s}` — not
+ * an agent, no LLM involved — which is exactly why it can sit in a capacity
+ * queue without burning a model turn.
+ *
+ * It takes the working directory and the environment as data. Provisioning
+ * lanes and forking databases belongs to `src/lanes/**`; keeping that seam
+ * means a gate can be run against any directory, including a temp one in a
+ * test, without a worktree pool existing.
+ *
+ * Two things it must get right. The child leads its own process group where the
+ * platform has them, so a timeout can signal the whole tree — a gate is usually
+ * a shell line that starts a test runner that starts workers, and killing only
+ * the shell orphans all of it. *Which* shell, and how a tree is reached, are
+ * `src/platform/platform.ts`'s answers rather than this module's — a gate is
+ * project text, and it must be run by the shell the project's own scripts
+ * already assume. And the pools it acquired are
+ * released in a `finally`, so a timeout, a non-zero exit and a throw all leave
+ * the pools exactly as wide as they were.
+ *
+ * Gate output goes to the log file and nowhere else. It is repository content
+ * verbatim, so it never reaches a result field or an error message.
+ */
+import { spawn, type ChildProcess } from 'node:child_process'
+import { createWriteStream } from 'node:fs'
+import { availableParallelism, loadavg } from 'node:os'
+import {
+  killTree as killPlatformTree,
+  ownProcessGroup,
+  shellInvocation,
+  spawnOptionsFor,
+} from '../platform/platform.ts'
+import { stopComposeOneOffs, type ContainerCleanup } from '../platform/containers.ts'
+import type { ResourcePools } from '../resources/pools.ts'
+import type { CommandGate } from '../types.ts'
+
+export type GateStatus = 'passed' | 'failed' | 'timed_out'
+
+/**
+ * The exit code a timed-out gate reports. `GateResult.exitCode` is null there —
+ * the gate never got to say anything — and a guard reading `gate.exit_code`
+ * needs a number that is not zero. 124 is `timeout(1)`'s.
+ *
+ * It lives here rather than beside either caller because both of them turn a
+ * `GateResult` into an exit code, and two copies of a stand-in value is one
+ * copy too many for a number a guard compares against.
+ */
+export const TIMEOUT_EXIT = 124
+
+export interface GateResult {
+  readonly gateId: string
+  /** `timed_out` is distinct from `failed`: the gate never got to say anything. */
+  readonly status: GateStatus
+  /** null when the gate was killed rather than exiting on its own. */
+  readonly exitCode: number | null
+  readonly durationMs: number
+  readonly logPath: string
+  /** Present only on `timed_out`. See `TimeoutFacts`. */
+  readonly timeout?: TimeoutFacts
+  /**
+   * How many one-off compose containers the gate left running when it was
+   * killed, all stopped before this result returned. Absent when it was not
+   * killed or left none.
+   */
+  readonly containersStopped?: number
+  /**
+   * Whether docker was asked about those containers and answered (`done`), or
+   * did not answer in time (`failed`) — in which case the next gate in the same
+   * compose project checks again before it starts. Present only on a gate
+   * that was killed in a compose project.
+   */
+  readonly orphanCheck?: 'done' | 'failed'
+}
+
+/**
+ * What the runner could see at the moment it killed a gate — the evidence
+ * that tells a gate that *hung* from one that was *slow*, which the timeout by
+ * itself cannot. Numbers about the process and the host, never anything the
+ * gate printed (§11).
+ *
+ * - `quietMs` is how long the gate had gone without writing a byte. Near the
+ *   full timeout is a gate waiting on something (a lock, a port, a prompt
+ *   nobody will answer); small is a gate still working when time ran out.
+ * - `outputBytes` separates "silent from the first second" from "went quiet".
+ * - `load1m` over `cpus` is the host's run queue per core when the kill fired.
+ *   Well above 1 beside a small `quietMs` is contention, not a broken suite.
+ *   Absent where the platform reports no load average (Windows reports zeros).
+ */
+export interface TimeoutFacts {
+  readonly quietMs: number
+  readonly outputBytes: number
+  readonly load1m?: number
+  readonly cpus: number
+}
+
+export interface RunGateOptions {
+  readonly gateId: string
+  readonly gate: CommandGate
+  /** The lane checkout, or any directory. The runner does not create it. */
+  readonly cwd: string
+  /** Overlaid on the daemon's own environment. */
+  readonly env: Readonly<Record<string, string>>
+  /** Supplied by the caller — the journal's `gateLogPath`. */
+  readonly logPath: string
+  readonly pools: Pick<ResourcePools, 'acquire'>
+  /**
+   * Called once the gate is actually starting, with the same clock reading
+   * `durationMs` is measured from.
+   *
+   * It exists so a caller can journal a *start* whose distance from the
+   * result is the gate's own runtime and nothing else. Emitting that event
+   * from the call site instead would fold in the pool wait — `runGate` and
+   * `runGateCached` both block on `acquire` first — and a gate reported as
+   * having taken nine minutes when it ran for forty seconds behind a busy
+   * `test-suite` is a measurement that points at the wrong problem. A cache
+   * hit never reaches the runner, so it never fires: nothing ran.
+   */
+  readonly onStart?: (startedAtMs: number) => void
+  /**
+   * Stops what a killed gate's `docker compose run` left running
+   * (`platform/containers.ts`). Injected in tests; the default asks docker.
+   */
+  readonly stopContainers?: ContainerCleanup
+}
+
+/**
+ * Every gate this process has running. A gate leads its own process group, so
+ * nothing ends it when its host goes away — a cancelled run whose e2e suite
+ * kept going for twenty minutes after `stop` would be exactly that.
+ */
+const live = new Map<ChildProcess, { readonly gateId: string; readonly cwd: string; readonly startedAt: number }>()
+
+/** A gate running now, as the node view lists it (`processes/list.ts`). */
+export interface LiveGate {
+  readonly pid: number
+  readonly gateId: string
+  /** Where it runs: a lane, or the integration worktree — which is how it is attributed to a phase. */
+  readonly cwd: string
+  readonly startedAt: number
+}
+
+/** Every gate this process has running, with a pid. */
+export function liveGates(): readonly LiveGate[] {
+  const found: LiveGate[] = []
+  for (const [child, gate] of live) if (child.pid !== undefined) found.push({ pid: child.pid, ...gate })
+  return found
+}
+
+/**
+ * Ends one running gate as `killLiveGates` ends them all: its result says it
+ * did not pass, and whatever containers it left are stopped. False when no
+ * gate of this process has that pid.
+ */
+export function stopLiveGate(pid: number): boolean {
+  for (const child of live.keys()) {
+    if (child.pid !== pid) continue
+    cancelled.add(child)
+    killTree(pid)
+    return true
+  }
+  return false
+}
+
+/** Gates `killLiveGates` ended, as opposed to ones that exited on their own. */
+const cancelled = new WeakSet<ChildProcess>()
+
+/**
+ * Compose projects whose killed gate could not be cleaned up after, with the
+ * earliest such gate's start: the next gate in that project sweeps before it
+ * starts, rather than run beside a suite nobody stopped.
+ */
+const owedSweeps = new Map<string, number>()
+
+/**
+ * Ends every gate this process started that is still running. For a run being
+ * cancelled (`Scheduler.halt`); the gate's own effect then returns failed, and
+ * the node unwinds at that boundary.
+ */
+export function killLiveGates(): void {
+  for (const child of live.keys()) {
+    cancelled.add(child)
+    killTree(child.pid)
+  }
+}
+
+/**
+ * Acquires the gate's pools, runs it, releases them. The standalone entry
+ * point — use it when nothing else already holds those pools.
+ */
+export async function runGate(options: RunGateOptions): Promise<GateResult> {
+  const lease = await options.pools.acquire(options.gate.requires)
+  try {
+    return await executeGate(options)
+  } finally {
+    lease.release()
+  }
+}
+
+/**
+ * Runs the gate **without acquiring anything** — for a caller that already
+ * holds its pools.
+ *
+ * The scheduler is that caller: it takes the gate's pools around the whole
+ * `run_gate` effect, because that is what makes "release gate resources at
+ * `await_human`" implementable at all (§6, §9.1). Such a caller must NOT go
+ * through `runGate`, which would acquire the same pools a second time and
+ * self-deadlock the moment any of them has capacity 1.
+ *
+ * Taking no `pools` is the point: the type makes the mistake unwritable
+ * rather than documented.
+ */
+export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promise<GateResult> {
+  const log = createWriteStream(options.logPath)
+  const cleanup = options.stopContainers ?? stopComposeOneOffs
+  const project = options.env.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME
+  const composed = project !== undefined && project !== ''
+  const owed = composed ? owedSweeps.get(project) : undefined
+  if (composed && owed !== undefined) {
+    const stopped = await cleanup(project, owed)
+    if (stopped === null) {
+      log.write('[vinta-ai-maestro] docker still did not answer whether an earlier killed gate left containers running\n')
+    } else {
+      owedSweeps.delete(project)
+      if (stopped.length > 0) {
+        log.write(`[vinta-ai-maestro] stopped ${stopped.length} container(s) an earlier killed gate left running\n`)
+      }
+    }
+  }
+
+  const startedAt = Date.now()
+  options.onStart?.(startedAt)
+
+  const shell = shellInvocation(options.gate.cmd)
+  const child = spawn(shell.file, [...shell.args], {
+    cwd: options.cwd,
+    env: { ...process.env, ...options.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: ownProcessGroup(),
+    ...spawnOptionsFor(shell),
+  })
+  live.set(child, { gateId: options.gateId, cwd: options.cwd, startedAt })
+  child.once('close', () => live.delete(child))
+  // Combined output, in arrival order. `end: false` because the log is closed
+  // once, after the child is gone, rather than by whichever pipe drains first.
+  child.stdout?.pipe(log, { end: false })
+  child.stderr?.pipe(log, { end: false })
+
+  // Counted, never kept: only the size and the time of the last write.
+  let outputBytes = 0
+  let lastOutputAt = startedAt
+  const heard = (chunk: Buffer | string): void => {
+    outputBytes += chunk.length
+    lastOutputAt = Date.now()
+  }
+  child.stdout?.on('data', heard)
+  child.stderr?.on('data', heard)
+
+  let timeout: TimeoutFacts | undefined
+  const timer = setTimeout(() => {
+    // Read before the kill: once the tree is gone, the load it was causing is too.
+    timeout = timeoutFacts(Date.now() - lastOutputAt, outputBytes)
+    killTree(child.pid)
+  }, options.gate.timeout_s * 1000)
+
+  const exitCode = await new Promise<number | null>((resolve) => {
+    child.on('close', resolve)
+  })
+  clearTimeout(timer)
+  // A killed gate's process group is gone, but a container its `docker compose
+  // run` asked for belongs to the docker daemon and is not. It is stopped here,
+  // before the result returns, because the caller releases the gate's pools on
+  // return — and the next holder must not share the lane's databases with it.
+  let containersStopped = 0
+  let orphanCheck: 'done' | 'failed' | undefined
+  if ((timeout !== undefined || cancelled.has(child)) && composed) {
+    const stopped = await cleanup(project, startedAt)
+    if (stopped === null) {
+      orphanCheck = 'failed'
+      owedSweeps.set(project, Math.min(owedSweeps.get(project) ?? startedAt, startedAt))
+      log.write(
+        '\n[vinta-ai-maestro] docker did not answer whether the killed gate left containers running; ' +
+          'the next gate in this compose project checks again before it starts\n',
+      )
+    } else {
+      orphanCheck = 'done'
+      containersStopped = stopped.length
+      log.write(
+        containersStopped > 0
+          ? `\n[vinta-ai-maestro] stopped ${containersStopped} container(s) the killed gate left running\n`
+          : '\n[vinta-ai-maestro] the killed gate left no containers running\n',
+      )
+    }
+  }
+  await new Promise<void>((resolve) => log.end(resolve))
+
+  return {
+    gateId: options.gateId,
+    status: timeout !== undefined ? 'timed_out' : exitCode === 0 ? 'passed' : 'failed',
+    exitCode: timeout !== undefined ? null : exitCode,
+    durationMs: Date.now() - startedAt,
+    logPath: options.logPath,
+    ...(timeout === undefined ? {} : { timeout }),
+    ...(containersStopped > 0 ? { containersStopped } : {}),
+    ...(orphanCheck === undefined ? {} : { orphanCheck }),
+  }
+}
+
+function timeoutFacts(quietMs: number, outputBytes: number): TimeoutFacts {
+  const [load1m] = loadavg()
+  const reported = load1m !== undefined && load1m > 0
+  return {
+    quietMs,
+    outputBytes,
+    ...(reported ? { load1m: Math.round(load1m * 100) / 100 } : {}),
+    cpus: availableParallelism(),
+  }
+}
+
+/**
+ * Ends the gate *and* whatever it spawned. On POSIX that is one signal to the
+ * process group the shell leads; on Windows there are no groups, so the
+ * platform seam walks the process table instead. A gate that exited between the
+ * timer firing and this call is not an error either way.
+ */
+function killTree(pid: number | undefined): void {
+  if (pid === undefined) return
+  killPlatformTree(pid, 'SIGKILL')
+}

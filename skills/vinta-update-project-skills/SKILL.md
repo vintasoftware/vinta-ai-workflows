@@ -65,6 +65,7 @@ For each project skill, decide its bucket:
 | `verbatim` | The skill name matches a directory under `vinta-derive-skills/resources/foundation-skills/` (e.g. `plan-feature`, `create-spec`, `create-qa-use-cases`). | Diff against source. |
 | `templated` | The skill name is `implement-plan` (or any other future templated skill listed under `vinta-derive-skills/resources/*-template.md`). | **Don't diff.** Surface as "regenerate via [vinta-derive-skills](../vinta-derive-skills/SKILL.md)". |
 | `stack-derived` | The skill maps to a stack-template prompt under `vinta-bootstrap-ai-tools/resources/stacks/<stack>/notes.md`. | Same as `templated` — surface, don't diff. |
+| `integration` | The skill dir carries an external tool's ownership marker, such as `.pr-review-install` for `pr-review-canvas`. | **Never diff or edit** — the tool stamps a content hash and treats any edit as stale. Surface as "refresh with the tool's own updater" (`pr-review upgrade` for `pr-review-canvas`). |
 | `user-authored` | None of the above. | Skip silently. |
 
 For `templated` and `stack-derived`, in-place diffing is misleading because the project version contains interpolated values (commands, branch names, etc.) that won't appear in the template. The right refresh path for those is to re-run [vinta-derive-skills](../vinta-derive-skills/SKILL.md) so the user can re-supply the inputs.

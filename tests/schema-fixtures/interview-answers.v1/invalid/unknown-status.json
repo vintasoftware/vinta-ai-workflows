@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "round": 1,
+  "answers": [
+    {
+      "decision_id": "A1",
+      "status": "maybe"
+    }
+  ]
+}

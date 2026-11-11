@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "round": 1,
+  "interview": { "slug": "order-tags", "title": "Order tags — spec interview", "skill": "create-spec" },
+  "kind": "questions",
+  "intro": "You asked for *\"tags on orders so ops can group them\"*. Before I draft the spec I need the decisions below. Each screen shows what I already know, the options I see, and what each one costs. Use the panel on the right to ask me anything; I answer in the next round.",
+  "groups": [
+    {
+      "id": "A",
+      "title": "Problem & customer",
+      "decisions": [
+        {
+          "id": "A1",
+          "title": "Who is the primary user of order tags?",
+          "short": "Primary user",
+          "why": "Mixing audiences optimizes the wrong workflow; permissions and defaults differ per actor.",
+          "context": "The repo has an `ops` Django group with a custom admin, and a customer-facing dashboard under `dashboard/`. Nothing in the prompt says which one.",
+          "input": {
+            "type": "single",
+            "options": [
+              { "value": "ops", "label": "Internal ops staff", "description": "Tags live in the ops admin only.", "consequences": "No customer-facing UI in v1; permissions reduce to the existing ops group.", "recommended": true },
+              { "value": "tenant-admins", "label": "Tenant admins", "description": "Customers tag their own orders in the dashboard.", "consequences": "Per-tenant tag namespaces, dashboard UI, and a public API surface — roughly doubles the plan.", "tags": [{ "label": "Bigger scope", "tone": "warn" }] },
+              { "value": "both", "label": "Both, shared tags", "description": "Ops and tenant admins see the same tags.", "consequences": "Needs a visibility rule per tag (internal vs shared) from day one." }
+            ],
+            "allow_other": true
+          }
+        },
+        {
+          "id": "A2",
+          "title": "What do they do today without tags?",
+          "short": "Current workaround",
+          "why": "No current pain means no demand to validate; the workaround tells us the real objective.",
+          "input": { "type": "text", "label": "Describe the workaround and its pain", "placeholder": "Ops keeps a spreadsheet of order ids per campaign and re-exports it weekly" }
+        }
+      ]
+    },
+    {
+      "id": "D",
+      "title": "State, edges, idempotency",
+      "decisions": [
+        {
+          "id": "D4",
+          "title": "Two people edit the same order's tags within seconds. Who wins?",
+          "short": "Concurrency",
+          "why": "Silent last-write-wins eats user work; the rule has to be explicit in the spec.",
+          "context": "Your journey in A2 has tags edited from the order page **and** from a bulk import. Both can touch the same order.\n\n```mermaid\nflowchart LR\n  A[Order page] --> O[(Order #4411)]\n  B[Bulk import] --> O\n  O --> C{Conflict?}\n```",
+          "explainer": { "title": "How each rule behaves", "path": "docs/D4-concurrency.md" },
+          "input": {
+            "type": "single",
+            "options": [
+              { "value": "last-write-wins", "label": "Last write wins", "description": "Simplest. The later save replaces the earlier one.", "consequences": "Silent data loss on overlap. Acceptable only if overlap is genuinely rare.", "tags": [{ "label": "Loses work", "tone": "warn" }] },
+              { "value": "optimistic-lock", "label": "Optimistic lock", "description": "The second save sees a conflict and must reload.", "consequences": "Reuses the `last_updated_at` guard the bulk upsert already has. One extra error state in the UI.", "recommended": true, "tags": [{ "label": "Matches bulk upsert", "tone": "ok" }] },
+              { "value": "merge", "label": "Merge tag sets", "description": "Union of both edits.", "consequences": "Removals become ambiguous (did they remove it, or never see it?). Needs a tombstone design — a new plan phase.", "tags": [{ "label": "New plan phase", "tone": "warn" }] }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
