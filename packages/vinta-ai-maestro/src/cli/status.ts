@@ -25,6 +25,7 @@ import { describeUnattended, runAgentDetails, unattendedDecisions } from '../dec
 import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
 import { describeStep } from '../journal/integration-steps.ts'
 import {
+  type CrewWait,
   type IntegrationWait,
   type IntegrationWorktreeState,
   openJournal,
@@ -184,6 +185,8 @@ function showRun(
   const questions = new Map(journal.pendingQuestions(runId).map((pending) => [pending.nodeId, pending]))
   const asking = new Set(questions.keys())
   const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, IntegrationWait>()
+  // A staffed phase with nobody to run it yet: `running`, no lane, no agent.
+  const crewWaiting = state === 'running' ? journal.crewWaits(runId) : new Map<string, CrewWait>()
   const held = state === 'running' ? journal.heldNodes(runId) : new Set<string>()
   const substituted = journal.substitutions(runId)
   // Where each phase is in its pipeline, and who has the integration
@@ -204,6 +207,16 @@ function showRun(
   }
   const waitNote = (nodeId: string): string => {
     if (held.has(nodeId)) return ' — paused by operator'
+    const crew = crewWaiting.get(nodeId)
+    if (crew !== undefined) {
+      const holderStatus = crew.holder === null ? undefined : nodes.find((node) => node.node_id === crew.holder)?.status
+      const parked = holderStatus === 'awaiting_human' ? ', which is parked on a question' : ''
+      return (
+        ` — waiting ${duration(Date.now() - crew.since)} for ` +
+        `${crew.member === null ? 'a crew member' : `crew member ${crew.member}`}` +
+        `${crew.holder === null ? '' : ` (held by ${crew.holder}${parked})`}`
+      )
+    }
     const wait = waiting.get(nodeId)
     if (wait === undefined) return ''
     if (wait.paused) return ' — paused in the queue for the integration worktree'
@@ -234,8 +247,13 @@ function showRun(
           harness: node.harness,
           asking: asking.has(node.node_id),
           question: questionOf(questions.get(node.node_id)),
-          waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
-          heldBy: waiting.get(node.node_id)?.paused === true ? null : (worktree?.holder ?? waiting.get(node.node_id)?.holder ?? null),
+          waitingOn: crewWaiting.has(node.node_id) ? 'crew' : waiting.has(node.node_id) ? 'integration_worktree' : null,
+          heldBy: crewWaiting.has(node.node_id)
+            ? (crewWaiting.get(node.node_id)?.holder ?? null)
+            : waiting.get(node.node_id)?.paused === true
+              ? null
+              : (worktree?.holder ?? waiting.get(node.node_id)?.holder ?? null),
+          crewMember: crewWaiting.get(node.node_id)?.member ?? null,
           pausedInQueue: waiting.get(node.node_id)?.paused === true,
           pausedByOperator: held.has(node.node_id),
           step: steps.get(node.node_id) ?? null,

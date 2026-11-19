@@ -5,6 +5,53 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### Changed
+
+- **`vinta-ai-maestro gate-cache invalidate` forgets the tree of the gate's
+  last failure by default, not every tree.** With no flag it drops the cached
+  result on the tree the gate last failed on — the verdict in doubt — and
+  says so when no failure is cached. `--all` is the old default, every tree in
+  every lane; `--tree <hash>` is unchanged, and `--tree` with `--all` is
+  refused. One invalidation of one stale typecheck used to forget 28 verdicts
+  across every lane. **Migration:** a script or a coordinator prompt that
+  relied on the bare command clearing every tree passes `--all` (`"all": true`
+  on `POST /api/runs/:id/gates/:gate/invalidate`). The answer and the
+  `gate_cache_invalidated` event carry the `scope` and the tree.
+- **`vinta-ai-maestro` merges a wave's phases with the most-gated phase
+  first**, plan order between phases that declare as many gates. It was plan
+  order alone, which nothing said. A phase that brings a gate now merges
+  before the resolutions that gate should check.
+
+### Fixed
+
+- **`vinta-ai-maestro`: a conflicted merge is verified with the gates of the
+  phases in the merged tree**, not every gate in the plan. A wave holding two
+  of its three phases was failed on a build script only the third phase's
+  branch had — eight fix rounds on a gate no round could turn green.
+- **`vinta-ai-maestro`: a codegen step no longer skips as `cached` when its
+  output is missing.** A step's outputs are read from disk, gitignored files
+  included, and a declared output that is not there runs the step. A fresh
+  integration worktree and every recycled lane skipped a generator whose
+  output is not committed, and the typecheck behind it failed on the missing
+  module.
+- **`vinta-ai-maestro`: a fix round the harness refuses is not a round.** A
+  session limit that closes under a conflict fixer parks the phase on the
+  harness's wait, or moves to `defaults.harness_fallbacks`, instead of failing
+  the wave after "2 fix rounds" nobody ran and retrying it on unchanged
+  inputs. On a wave merge the finished phase waits in place rather than
+  re-running its pipeline, and the error names the limit, not a gate.
+- **`vinta-ai-maestro`: a phase no longer waits silently for a crew member a
+  parked phase holds.** A finished phase parked on its wave's question kept
+  its member, and the phase planned for the same member read `running` for
+  thirteen hours with no lane. The waiter now takes a cover or a spare, and a
+  wait that does happen is journalled (`node_wait` with `on: crew`), shown by
+  `status` and the node view, and wakes the coordinator.
+- **`vinta-ai-maestro`: a conflict fixer's words are no longer shown as the
+  phase's own.** The run digest keeps a fixer's last line apart from the
+  phase's, with the phase whose branch it was merging.
+
 ## [0.7.1] — YYYY-MM-DD
 
 ### Added

@@ -130,6 +130,15 @@ export type CoordinatorTrigger =
       readonly holder: string | null
       readonly observedMs: number
     }
+  /** A staffed phase dispatched and still waiting for a crew member (`node_wait` on `crew`). */
+  | {
+      readonly kind: 'crew_wait'
+      readonly key: string
+      readonly nodeId: string
+      readonly member: string | null
+      readonly holder: string | null
+      readonly observedMs: number
+    }
   | {
       readonly kind: 'maestro_error'
       readonly key: string
@@ -254,6 +263,21 @@ export function triggersFrom(
     }
   }
 
+  // The same threshold: either way a phase reads `running` and nothing runs.
+  for (const [nodeId, wait] of crewWaits(events)) {
+    const observedMs = now - wait.since
+    if (observedMs >= integrationWaitMs) {
+      found.push({
+        kind: 'crew_wait',
+        key: `crew:${nodeId}@${wait.since}`,
+        nodeId,
+        member: wait.member,
+        holder: wait.holder,
+        observedMs,
+      })
+    }
+  }
+
   return found
 }
 
@@ -313,6 +337,13 @@ function describeTrigger(trigger: CoordinatorTrigger): string {
       return (
         `- phase ${trigger.nodeId} has waited ${minutes(trigger.observedMs)} minutes for the integration ` +
         `worktree${trigger.holder === null ? '' : `, held by ${trigger.holder}`}`
+      )
+    case 'crew_wait':
+      return (
+        `- phase ${trigger.nodeId} has waited ${minutes(trigger.observedMs)} minutes for ` +
+        `${trigger.member === null ? 'a crew member' : `crew member ${trigger.member}`}` +
+        `${trigger.holder === null ? '' : `, held by ${trigger.holder}`}: nothing runs for it until one is free. ` +
+        'If the holder is parked on a question, answer it; or put the phase on another member (`node reassign`)'
       )
     case 'maestro_error':
       return (
@@ -435,7 +466,8 @@ function integrationWaits(
     const nodeId = nodeOf(event)
     if (nodeId === null) continue
     if (event.type === 'node_wait') {
-      const payload = event.payload as { state?: string; holder?: string | null }
+      const payload = event.payload as { on?: string; state?: string; holder?: string | null }
+      if (payload.on === 'crew') continue
       if (payload.state === 'queued') waits.set(nodeId, { since: event.ts, holder: payload.holder ?? null })
       else waits.delete(nodeId)
     } else if (event.type === 'node_status') {
@@ -443,6 +475,35 @@ function integrationWaits(
       // last `node_wait` said.
       const status = (event.payload as { status?: string }).status
       if (status !== 'running') waits.delete(nodeId)
+    }
+  }
+  return waits
+}
+
+/** Staffed nodes still waiting for a crew member: since when, for whom, and behind which phase. */
+function crewWaits(
+  events: readonly StoredEvent[],
+): ReadonlyMap<string, { readonly since: number; readonly member: string | null; readonly holder: string | null }> {
+  const waits = new Map<string, { readonly since: number; readonly member: string | null; readonly holder: string | null }>()
+  for (const event of events) {
+    if (event.type === 'run_resumed') {
+      waits.clear()
+      continue
+    }
+    const nodeId = nodeOf(event)
+    if (nodeId === null) continue
+    if (event.type === 'node_wait') {
+      const payload = event.payload as { on?: string; state?: string; member?: string | null; holder?: string | null }
+      if (payload.on !== 'crew') continue
+      if (payload.state === 'queued') {
+        waits.set(nodeId, {
+          since: waits.get(nodeId)?.since ?? event.ts,
+          member: payload.member ?? null,
+          holder: payload.holder ?? null,
+        })
+      } else waits.delete(nodeId)
+    } else if (event.type === 'node_status') {
+      if ((event.payload as { status?: string }).status !== 'running') waits.delete(nodeId)
     }
   }
   return waits

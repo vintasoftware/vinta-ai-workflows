@@ -43,6 +43,7 @@ import type { IntegrationCodegen } from '../codegen/integration.ts'
 import {
   type ConflictFixer,
   ConflictFixerInterrupted,
+  ConflictFixerRefused,
   ConflictFixerTimeout,
   type ConflictRequest,
   type FixVerdict,
@@ -59,6 +60,8 @@ export interface IntegrationNode {
   readonly name: string
   readonly prompt_ref: string
   readonly depends_on: readonly { readonly node: string }[]
+  /** The gates the phase declares. Read only to order a wave's merges (`mergeWave`). */
+  readonly gates?: readonly string[]
 }
 
 /** What integration reads from a workflow. `Workflow` satisfies it structurally. */
@@ -371,8 +374,21 @@ export interface IntegratorOptions {
    * The outer gate, re-run in the integration worktree after every fix. Red
    * sends the conflict back to the fixer — a resolution that does not build is
    * not a resolution.
+   *
+   * `phases` are the phases whose branches the tree under it carries from
+   * this merge: the ones already merged into the branch, then the one coming
+   * in. A gate is a phase's, and a phase not merged yet has not brought its
+   * gate's script, config or test into this tree — so a `verify` that runs
+   * every gate of the plan fails on the ones that cannot run here, which no
+   * fix round can change. The gates to run are those phases' own, as the
+   * base gates and the wave gates choose theirs.
    */
-  readonly verify?: (cwd: string, force?: FreshReason, progress?: VerifyProgress) => Promise<true | false | RedGate>
+  readonly verify?: (
+    cwd: string,
+    force?: FreshReason,
+    progress?: VerifyProgress,
+    phases?: readonly string[],
+  ) => Promise<true | false | RedGate>
   /**
    * `workflow.post_merge` on the files a clean merge combined: what it
    * changed is staged for a commit on top of the merge, and `ok` is false
@@ -727,8 +743,30 @@ export class Integrator {
   }
 
   /**
+   * The order a wave's members are merged in: the phase declaring the most
+   * gates first, plan order between phases that declare as many.
+   *
+   * It was plan order alone, which nothing said, and one operator fixed a
+   * wave by reordering its phases on a guess. The order matters because a
+   * conflicted merge is verified with the gates of the phases merged so far
+   * (`IntegratorOptions.verify`): a phase that brings a gate — its build
+   * script, its test target — merged first puts every later resolution in the
+   * wave in front of that gate, and merged last leaves them all unchecked by
+   * it until the wave gates. Counting gates is a cheap stand-in for "brings
+   * the most checks", stable, and a function of the plan alone, so a retry
+   * and a resume merge in the order the first attempt did.
+   */
+  mergeOrder(members: readonly string[]): string[] {
+    const gates = (id: string): number => this.#nodes.get(id)?.gates?.length ?? 0
+    return members
+      .map((id, index) => ({ id, index }))
+      .sort((a, b) => gates(b.id) - gates(a.id) || a.index - b.index)
+      .map((entry) => entry.id)
+  }
+
+  /**
    * Builds `wave-<N>` by merging every wave-N node branch into `wave-<N-1>`,
-   * `--no-ff`, in plan order.
+   * `--no-ff`, in `mergeOrder`.
    *
    * **`members` is the membership as the caller counted it, and passing it is
    * how a queued merge survives an amendment.** A wave merge is decided the
@@ -761,7 +799,8 @@ export class Integrator {
     if (wave > 1 && !(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${under}`]))) {
       throw new WaveNotBuiltError(wave - 1, under)
     }
-    const order = members ?? this.nodesAt(wave)
+    const asked = members ?? this.nodesAt(wave)
+    const order = this.mergeOrder(asked)
     const catchUp = wave > 1 && this.#options.runBase !== undefined
     // A wave this attempt can build on — one a person finished by hand after
     // the fixer gave up, typically — is kept, and only what it lacks is merged
@@ -790,7 +829,8 @@ export class Integrator {
       }
       merged.push(nodeId)
     }
-    return { wave, branch, merged: order.filter((id) => merged.includes(id)), conflicts }
+    // Reported in the order the caller counted them, not the order merged.
+    return { wave, branch, merged: asked.filter((id) => merged.includes(id)), conflicts }
   }
 
   /**
@@ -1090,6 +1130,9 @@ export class Integrator {
     // own: the phases already merged that touched a contested path are the
     // conflict's, and `nodeId` stands in when none did.
     const incoming = branch ?? this.nodeBranch(nodeId)
+    // Whose gates judge the merged tree (`IntegratorOptions.verify`): the
+    // phases it carries. For `mergeBranch`, `nodeId` is one of them already.
+    const phases = [...new Set([...alreadyMerged, nodeId])]
     // --no-ff always: a fast-forward erases that this was a separate phase,
     // and a squash erases the phase's unit commits.
     const mergeArgs = (await this.#options.codegen?.mergeArgs(cwd)) ?? []
@@ -1144,11 +1187,11 @@ export class Integrator {
       // fixer. Only a red one reaches the fixer — two migrations on one parent
       // merge cleanly and break together. Regenerated first: the gates judge
       // the tree that is committed, and a failing step is a red gate.
-      red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+      red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode, phases))
       if (red !== null) {
         redTree = await this.#writeTree(cwd)
         replayed = true
-        if (await this.#replayFixes(cwd, forNode)) red = null
+        if (await this.#replayFixes(cwd, forNode, phases)) red = null
       }
       if (red === null) {
         await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'], paths.length > 0)
@@ -1190,11 +1233,11 @@ export class Integrator {
     if (previous !== null && (await gitOk(cwd, ['read-tree', '--reset', '-u', `${previous}^{tree}`]))) {
       if (codegen !== undefined) await codegen.resettle(cwd, paths)
       if (!(await this.#unresolved(paths))) {
-        red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+        red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode, phases))
         if (red !== null && !replayed) {
           redTree ??= await this.#writeTree(cwd)
           replayed = true
-          if (await this.#replayFixes(cwd, forNode)) red = null
+          if (await this.#replayFixes(cwd, forNode, phases)) red = null
         }
         if (red === null) {
           await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'])
@@ -1236,12 +1279,15 @@ export class Integrator {
         // afresh. Only an unresolved conflict (below) is left standing on
         // purpose.
         //
-        // A round that was *stopped* — its time limit, a teardown — did
-        // resolve things, possibly most of them, and is kept first under
-        // `ABANDONED_REFS` exactly as `reclaim` keeps a merge a kill caught,
-        // so the retry's fixer is pointed at it rather than starting over.
+        // A round that was *stopped* — its time limit, a teardown, the
+        // vendor's window closing under it — did resolve things, possibly
+        // most of them, and is kept first under `ABANDONED_REFS` exactly as
+        // `reclaim` keeps a merge a kill caught, so the retry's fixer is
+        // pointed at it rather than starting over.
         if (
-          (error instanceof ConflictFixerTimeout || error instanceof ConflictFixerInterrupted) &&
+          (error instanceof ConflictFixerTimeout ||
+            error instanceof ConflictFixerInterrupted ||
+            (error instanceof ConflictFixerRefused && error.midTurn)) &&
           (await this.#merging(cwd))
         ) {
           await this.#keepAbandoned(cwd, into, incoming)
@@ -1288,13 +1334,13 @@ export class Integrator {
       // generated files are regenerated from the resolved sources first.
       red =
         (await codegen?.refresh(cwd, forNode)) ??
-        (await this.#verify(cwd, forNode, stale ? 'fixer_reported' : undefined))
+        (await this.#verify(cwd, forNode, phases, stale ? 'fixer_reported' : undefined))
       if (red !== null) redTree ??= await this.#writeTree(cwd)
       // Once per merge, before another round: a fix already made for this
       // same break, in another merge of the same phases.
       if (red !== null && !replayed) {
         replayed = true
-        if (await this.#replayFixes(cwd, forNode)) {
+        if (await this.#replayFixes(cwd, forNode, phases)) {
           red = null
           replayedGreen = true
         }
@@ -1437,7 +1483,12 @@ export class Integrator {
    * it, rather than only once the whole suite has finished. One that reports
    * nothing gets the single bracketing step it always had.
    */
-  async #verify(cwd: string, forNode: string, force?: FreshReason): Promise<RedGate | null> {
+  async #verify(
+    cwd: string,
+    forNode: string,
+    phases: readonly string[],
+    force?: FreshReason,
+  ): Promise<RedGate | null> {
     if (this.#options.verify === undefined) return null
     let reported = false
     const progress: VerifyProgress = {
@@ -1449,7 +1500,7 @@ export class Integrator {
         this.#options.onStep?.(forNode, { step: 'verify', state: 'finished', gate, outcome })
       },
     }
-    const verdict = await this.#options.verify(cwd, force, progress).catch((error: unknown) => {
+    const verdict = await this.#options.verify(cwd, force, progress, phases).catch((error: unknown) => {
       if (!reported) this.#options.onStep?.(forNode, { step: 'verify', state: 'started' })
       this.#options.onStep?.(forNode, { step: 'verify', state: 'finished', outcome: 'failed' })
       throw error
@@ -1685,7 +1736,7 @@ export class Integrator {
    * that needs a three-way merge to land is a different situation, and is the
    * fixer's to judge. Answers whether the tree is now green.
    */
-  async #replayFixes(cwd: string, forNode: string): Promise<boolean> {
+  async #replayFixes(cwd: string, forNode: string, phases: readonly string[]): Promise<boolean> {
     const fixes = await gitLines(cwd, [
       'for-each-ref',
       '--sort=-creatordate',
@@ -1711,7 +1762,7 @@ export class Integrator {
       await rm(patchPath, { force: true })
     }
     if (applied === 0) return false
-    const red = (await this.#options.codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+    const red = (await this.#options.codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode, phases))
     if (red === null) {
       this.#options.onFixReplayed?.(forNode, applied)
       return true

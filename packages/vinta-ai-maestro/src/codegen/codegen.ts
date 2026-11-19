@@ -22,7 +22,9 @@
  * A step's `inputs` make it skippable the way the gate cache makes a gate
  * skippable: the key is the step, its command and its inputs' contents, and
  * the entry is the outputs' contents it produced. A lane whose inputs and
- * outputs both match a recorded run has nothing to regenerate.
+ * outputs both match a recorded run has nothing to regenerate — and the
+ * outputs are read from disk, gitignored ones included, so a worktree that
+ * lacks one is never a hit (`outputState`).
  *
  * A step that fails is a red gate wherever it runs: a generator that crashes
  * means code that does not build. Its output goes to a log file, never to a
@@ -119,6 +121,24 @@ export async function filterMatching(
   return paths.filter((path) => matching.has(path))
 }
 
+/**
+ * Every file on disk matching the patterns, ignored ones included, sorted.
+ *
+ * What a step's outputs are read with. `matchingFiles` leaves out what
+ * `.gitignore` covers, which is right for inputs and for what is committed,
+ * and wrong for an output: a generated module the project does not commit is
+ * still what the step is for.
+ */
+export async function filesOnDisk(cwd: string, patterns: readonly string[]): Promise<string[]> {
+  if (patterns.length === 0) return []
+  const out = await git(cwd, ['ls-files', '-z', '-c', '-o', '--', ...pathspecs(patterns)], {
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  return [...new Set(out.split('\0').filter((path) => path.length > 0))]
+    .filter((file) => existsSync(join(cwd, file)))
+    .sort()
+}
+
 /** Blob ids of the files as they are in the worktree; `-` for one that is not there. */
 async function blobs(cwd: string, files: readonly string[]): Promise<Map<string, string>> {
   const present = files.filter((file) => existsSync(join(cwd, file)))
@@ -134,10 +154,46 @@ async function blobs(cwd: string, files: readonly string[]): Promise<Map<string,
 
 /** One hash over the contents of every file matching the patterns. */
 export async function contentKey(cwd: string, patterns: readonly string[]): Promise<string> {
-  const ids = await blobs(cwd, await matchingFiles(cwd, patterns))
+  return hashOf(await blobs(cwd, await matchingFiles(cwd, patterns)))
+}
+
+function hashOf(ids: ReadonlyMap<string, string>): string {
   const hash = createHash('sha256')
   for (const [file, id] of ids) hash.update(`${file}\0${id}\n`)
   return hash.digest('hex')
+}
+
+/**
+ * A step's outputs as this worktree has them: one hash over their contents,
+ * and whether every declared pattern has a file here.
+ *
+ * **Read from disk, ignored files included.** The skip cache compares this
+ * with what a recorded run wrote, and it used to be taken through
+ * `matchingFiles`, which leaves out gitignored paths: a step whose output is
+ * not committed hashed to the same nothing in every worktree, so the cache was
+ * keyed on the inputs alone. A fresh integration worktree and every recycled
+ * lane — where the ignored output had been cleaned away, or never written —
+ * logged `skipped: cached`, and the typecheck after it failed on a module
+ * that was not there.
+ *
+ * `complete` is the second half of the same check: a pattern nothing on disk
+ * matches is an output this worktree does not have, whatever the cache says.
+ */
+export async function outputState(
+  cwd: string,
+  patterns: readonly string[],
+): Promise<{ readonly key: string; readonly complete: boolean }> {
+  // One listing per pattern: git walks only under a pattern's literal prefix,
+  // so an ignored `node_modules` is read only by a pattern that starts with a
+  // wildcard.
+  const files = new Set<string>()
+  let complete = true
+  for (const pattern of patterns) {
+    const matched = await filesOnDisk(cwd, [pattern])
+    if (matched.length === 0) complete = false
+    for (const file of matched) files.add(file)
+  }
+  return { key: hashOf(await blobs(cwd, [...files].sort())), complete }
 }
 
 /**
@@ -333,7 +389,10 @@ export async function runCodegen(options: RunCodegenOptions): Promise<CodegenOut
       key = createHash('sha256')
         .update(`${id}\0${cmd}\0${await contentKey(options.cwd, step.inputs)}`)
         .digest('hex')
-      if (options.force !== true && cache.fresh(key, await contentKey(options.cwd, step.outputs))) {
+      // A hit needs the outputs here to be what that run wrote, and to be
+      // here at all: a worktree missing one runs the step.
+      const outputs = await outputState(options.cwd, step.outputs)
+      if (options.force !== true && outputs.complete && cache.fresh(key, outputs.key)) {
         skip('cached')
         continue
       }
@@ -356,7 +415,7 @@ export async function runCodegen(options: RunCodegenOptions): Promise<CodegenOut
     }
     let nondeterministic = false
     if (cache !== undefined && key !== undefined) {
-      const outputs = await contentKey(options.cwd, step.outputs)
+      const outputs = (await outputState(options.cwd, step.outputs)).key
       const recorded = cache.get(key)
       nondeterministic = recorded !== undefined && recorded !== outputs
       cache.store(key, outputs)

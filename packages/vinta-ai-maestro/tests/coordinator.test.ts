@@ -247,6 +247,27 @@ describe('what wakes the coordinator', () => {
     expect(found).toEqual([expect.objectContaining({ kind: 'integration_wait', nodeId: 'p2', holder: 'p1' })])
   })
 
+  it('wakes for a phase waiting on a crew member, naming the member and the phase holding them', () => {
+    // A phase read `running` for thirteen hours with no lane: its member was
+    // held by a finished phase parked on a question.
+    const journal = journalWith(workflowOf())
+    const t0 = Date.now()
+    journal.append({ runId: RUN, nodeId: 'p2', type: 'node_status', payload: { status: 'running' } })
+    journal.append({
+      runId: RUN,
+      nodeId: 'p2',
+      type: 'node_wait',
+      payload: { on: 'crew', state: 'queued', member: 'tier4', holder: 'p1' },
+    })
+    const found = triggersFrom(journal.events(RUN), Number.MAX_SAFE_INTEGER, {
+      now: t0 + 30 * 60 * 1000,
+      phaseThresholdMs: 10 * HOUR,
+    })
+    // One trigger, and not an integration-worktree one.
+    expect(found).toEqual([expect.objectContaining({ kind: 'crew_wait', nodeId: 'p2', member: 'tier4', holder: 'p1' })])
+    expect(describeTriggers(found)).toContain('crew member tier4, held by p1')
+  })
+
   /**
    * The coordinator fixed p10 while its attempt 2 was still in flight; that
    * attempt then failed on the old cause and woke it again. An attempt that

@@ -162,6 +162,35 @@ describe('running codegen steps', () => {
     expect(await readFile(join(main, 'gen.txt'), 'utf8')).toBe('a\nb\n')
   })
 
+  /**
+   * The output is not committed, so the worktree a run starts in does not
+   * have it. Its contents were read through a listing that leaves ignored
+   * files out, which made every worktree's outputs "what the recorded run
+   * wrote": a fresh integration worktree skipped the step as cached and the
+   * typecheck behind it failed on a missing module.
+   */
+  it('runs a step whose gitignored output this worktree lacks, whatever another one recorded', async () => {
+    const { root, main } = await makeRepo({ 'in/a.txt': 'a\n', '.gitignore': 'gen.txt\n' })
+    const cache = new CodegenCache(join(root, 'cache.json'))
+    const options = { steps: { gen: GENERATE }, env: {}, logPath: logs(root), cache }
+
+    expect((await runCodegen({ ...options, cwd: main })).runs.map((r) => r.status)).toEqual(['passed'])
+    expect((await runCodegen({ ...options, cwd: main })).runs.map((r) => r.skipped)).toEqual(['cached'])
+
+    // Another worktree of the same commit: the same inputs, and no output.
+    const other = join(root, 'other')
+    run(main, 'worktree', 'add', '--detach', other, 'main')
+    expect((await runCodegen({ ...options, cwd: other })).runs.map((r) => r.status)).toEqual(['passed'])
+    expect(await readFile(join(other, 'gen.txt'), 'utf8')).toBe('a\n')
+    // Once it is there, that worktree hits like any other.
+    expect((await runCodegen({ ...options, cwd: other })).runs.map((r) => r.skipped)).toEqual(['cached'])
+
+    // A recycled lane: the clean took the ignored file with it.
+    await rm(join(other, 'gen.txt'))
+    expect((await runCodegen({ ...options, cwd: other })).runs.map((r) => r.status)).toEqual(['passed'])
+    expect(await readFile(join(other, 'gen.txt'), 'utf8')).toBe('a\n')
+  })
+
   it('stops at a failing step and names it', async () => {
     const { root, main } = await makeRepo({})
     const outcome = await runCodegen({

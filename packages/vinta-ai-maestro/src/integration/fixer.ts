@@ -75,17 +75,38 @@ export interface ConflictRequest {
  * Before this the refusal was a plain `Error('conflict fixer spawn refused:
  * quota')`, which `failureReason` flattened to the word `Error` and the retry
  * policy retried on a timer, for as long as the window lasted.
+ *
+ * **Or would not let it finish** (`round`). A session that starts and is then
+ * turned away — the plan's window closing under it, `AgentSession.refusal` —
+ * is the same condition one frame later. It used to end the round like any
+ * other: one observed wave had both of its rounds come back within two
+ * seconds on the session limit, was failed as "fails gate … after 2 fix
+ * rounds", and was retried on the same inputs three times, with no fix ever
+ * attempted. The message names the limit, because the gate was never the
+ * reason.
  */
 export class ConflictFixerRefused extends Error {
+  /** The session had started: what the round left in the worktree is worth keeping. */
+  readonly midTurn: boolean
+
   constructor(
     readonly harness: string,
     readonly model: string,
     readonly kind: SpawnRefusalKind,
     readonly retryAfter: Date | undefined,
     detail: string,
+    /** The round a started session was refused in. Absent for a refused spawn. */
+    round?: { readonly nodeId: string; readonly round: number },
   ) {
-    super(`conflict fixer spawn refused: ${kind} on ${harness} (${model}): ${detail}`)
+    super(
+      round === undefined
+        ? `conflict fixer spawn refused: ${kind} on ${harness} (${model}): ${detail}`
+        : `conflict fixer round ${round.round} for ${round.nodeId} was refused by ${harness} (${model}): ` +
+            `${detail} (${kind})${retryAfter === undefined ? '' : `, resets ${retryAfter.toISOString()}`}; ` +
+            'the round did not run and is not counted',
+    )
     this.name = 'ConflictFixerRefused'
+    this.midTurn = round !== undefined
   }
 
   /** The refusal as admission control takes it, or null for a kind that does not wait. */
@@ -343,10 +364,11 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         throw new ConflictFixerRefused(adapter.id, model, outcome.kind, outcome.retryAfter, outcome.message)
       }
 
-      // Draining is mandatory — an unread stream never ends — and the outcome
-      // is deliberately not inspected: whether the conflict is actually
-      // resolved is answered by the worktree, not by what the agent said. A
-      // fixer that gave up costs a round rather than failing the run.
+      // Draining is mandatory — an unread stream never ends — and what the
+      // agent said is deliberately not inspected: whether the conflict is
+      // actually resolved is answered by the worktree. A fixer that gave up
+      // costs a round rather than failing the run. One the harness stopped is
+      // read after the stream, below.
       //
       // Filed against the incoming node, which is the phase whose merge hit the
       // conflict and the one an operator is looking at. Under its own role, so
@@ -355,7 +377,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // from the third: a conflict fixer works in the integration worktree on a
       // merge, not in the lane on the phase, and reading it as the review fixer
       // would be reading it as the wrong job.
-      const by: Attribution = { role: CONFLICT_FIXER_ROLE }
+      const by: Attribution = { role: CONFLICT_FIXER_ROLE, merge: request.nodeId }
       live = outcome.session
       liveAgent = { harness: adapter.id, model }
       // The drain, against the clock. A timer firing kills the session, which
@@ -398,6 +420,16 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         return
       }
       if (timedOut) throw new ConflictFixerTimeout(request.nodeId, request.round, timeoutMs)
+      // The vendor closed its window under the round. Not a round spent: the
+      // agent was stopped, it did not give up, and the worktree's answer to
+      // "is it resolved" would be charged to a fixer that never got to try.
+      const closed = outcome.session.refusal
+      if (closed !== undefined) {
+        throw new ConflictFixerRefused(adapter.id, model, closed.kind, closed.retryAfter, closed.reason, {
+          nodeId: request.nodeId,
+          round: request.round,
+        })
+      }
       return fixVerdict(lastText) ?? undefined
     },
   }

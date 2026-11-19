@@ -564,9 +564,10 @@ describe('exec', () => {
 })
 
 describe('gate-cache', () => {
-  it('asks the run to forget one gate’s results, on every tree by default', async () => {
+  it('asks the run to forget one gate’s result on the tree it last failed on, by default', async () => {
     const r = recorder()
-    const f = fakeFetch(json({ gate: 'unit', removed: 3 }))
+    const tree = 'c'.repeat(40)
+    const f = fakeFetch(json({ gate: 'unit', removed: 1, scope: 'last_failure', tree }))
 
     const code = await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--repo', emptyRepo()], r.io, {
       env: ENV,
@@ -577,7 +578,33 @@ describe('gate-cache', () => {
     expect(f.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/gates/unit/invalidate`)
     expect(f.sent[0]?.headers.authorization).toBe(`Bearer ${TOKEN}`)
     expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({})
-    expect(r.out).toEqual(['gate unit: 3 cached results forgotten'])
+    expect(r.out).toEqual([
+      'gate unit: 1 cached result forgotten (tree cccccccccccc, its last failure; --all for every tree)',
+    ])
+  })
+
+  it('says so when no failure is cached, and how to name what was meant', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ gate: 'unit', removed: 0, scope: 'last_failure' }))
+
+    expect(await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--repo', emptyRepo()], r.io, { env: ENV, fetch: f.fetch })).toBe(OK)
+
+    expect(r.out.join('\n')).toContain('no failed result is cached, so nothing was forgotten')
+    expect(r.out.join('\n')).toContain('--all')
+  })
+
+  it('forgets every tree only when asked with --all, and refuses --all with --tree', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ gate: 'unit', removed: 3, scope: 'all' }))
+
+    expect(await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--all', '--repo', emptyRepo()], r.io, { env: ENV, fetch: f.fetch })).toBe(OK)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ all: true })
+    expect(r.out).toEqual(['gate unit: 3 cached results forgotten (every tree)'])
+
+    const both = recorder()
+    expect(
+      await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--all', '--tree', 'b'.repeat(40), '--repo', emptyRepo()], both.io, { env: ENV }),
+    ).toBe(USAGE)
   })
 
   it('narrows to one tree with --tree', async () => {

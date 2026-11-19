@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentEvent, AgentTask, HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import {
+  ConflictFixerRefused,
   ConflictFixerTimeout,
   createAgentConflictFixer,
   type ConflictFixer,
@@ -514,6 +515,59 @@ describe('a merge the gates reject', () => {
     expect(error.message).toContain(RED_GATE.logPath)
     expect(fixer.calls[0]?.redGate).toBeUndefined()
     expect(fixer.calls[1]?.redGate).toEqual(RED_GATE)
+  })
+})
+
+/**
+ * `verify` ran every gate of the plan on a tree that held two of its phases,
+ * and one of those gates was a script only a third phase's branch had: eight
+ * fix rounds on a gate no round could turn green. It is told which phases the
+ * tree carries, and the host runs their gates.
+ */
+describe('which phases a merged tree is verified for', () => {
+  const resolving = (): SpyFixer =>
+    spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+
+  it('names the phases merged so far on a wave, and never one still to come', async () => {
+    const repo = await conflictingPair()
+    const lane = await repo.lane('lane-3')
+    run(lane, 'checkout', '-B', 'plan/wf/phase-c', 'main')
+    await repo.commit(lane, { 'c.ts': 'export const c = 1\n' }, 'phase c: its own file')
+    const seen: (readonly string[] | undefined)[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c')]),
+      integrationPath: repo.integ,
+      fixer: resolving(),
+      verify: async (_cwd, _force, _progress, phases) => {
+        seen.push(phases)
+        return true
+      },
+    })
+
+    await integrator.mergeWave(1)
+
+    // One conflicted merge, b into a wave holding a. c merges cleanly after.
+    expect(seen).toEqual([['a', 'b']])
+  })
+
+  it('names the dependencies merged so far on a base', async () => {
+    const repo = await conflictingPair()
+    const seen: (readonly string[] | undefined)[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('z'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: resolving(),
+      verify: async (_cwd, _force, _progress, phases) => {
+        seen.push(phases)
+        return true
+      },
+    })
+
+    await integrator.prepareBase('c')
+
+    expect(seen).toEqual([['a', 'b']])
   })
 })
 
@@ -2159,6 +2213,73 @@ describe('an integration worktree that is mid-merge', () => {
     await expect(integrator.prepareBase('c')).rejects.toThrow('quota')
     expect(midMerge(repo.integ)).toBe(false)
     expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+})
+
+/**
+ * The plan's session limit closed under both rounds of one wave merge. Each
+ * came back in a second or two, the conflict was "still" there, and the wave
+ * was failed after "2 fix rounds" nobody ran.
+ */
+describe('a fix round the harness stopped', () => {
+  it('is a refusal, not a round: no second round, and the merge is not left standing', async () => {
+    const repo = await conflictingPair()
+    const adapter = new MockAdapter({ midTurnRefusal: { kind: 'quota', reason: 'plan-limit-reached' } })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: createAgentConflictFixer({ adapter, model: 'opus' }),
+      maxFixRounds: 2,
+    })
+
+    const failure = await integrator.prepareBase('c').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(ConflictFixerRefused)
+    const refused = failure as ConflictFixerRefused
+    expect(refused.midTurn).toBe(true)
+    expect(refused.refusal).toMatchObject({ kind: 'quota' })
+    // The limit, by name; not a gate, and not a conflict that survived a fix.
+    expect(refused.message).toContain('plan-limit-reached')
+    expect(refused.message).toContain('round 1')
+    expect(adapter.spawned).toHaveLength(1)
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+})
+
+/**
+ * A wave merged its phases in the order the plan listed them, which nothing
+ * said. The phase bringing the most gates goes first, so a later resolution in
+ * the wave is verified with them.
+ */
+describe('the order a wave merges its phases in', () => {
+  it('merges the phase with the most gates first, plan order between equals', async () => {
+    const repo = await makeRepo()
+    for (const id of ['a', 'b', 'c']) {
+      const lane = await repo.lane(`lane-${id}`)
+      run(lane, 'checkout', '-B', `plan/wf/phase-${id}`, 'main')
+      await repo.commit(lane, { [`${id}.ts`]: `export const ${id} = 1\n` }, `phase ${id}`)
+    }
+    const integrator = new Integrator({
+      plan: plan([
+        { ...node('a'), gates: ['lint'] },
+        { ...node('b'), gates: ['lint'] },
+        { ...node('c'), gates: ['lint', 'build'] },
+      ]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+    })
+
+    expect(integrator.mergeOrder(['a', 'b', 'c'])).toEqual(['c', 'a', 'b'])
+    const wave = await integrator.mergeWave(1)
+
+    const merges = subjects(repo.integ, wave.branch).filter((subject) => subject.startsWith('Merge'))
+    expect(merges.map((subject) => /phase-(\w)/.exec(subject)?.[1]).reverse()).toEqual(['c', 'a', 'b'])
+    // Reported in the order asked for, whatever the merge order was.
+    expect(wave.merged).toEqual(['a', 'b', 'c'])
   })
 })
 

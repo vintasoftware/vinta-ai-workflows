@@ -228,6 +228,15 @@ export function NodeView({
           Nothing is running for this phase until it is free.
         </Hint>
       )}
+      {projection.crewWaits.has(nodeId) && status === 'running' && (
+        <Hint className="muted" data-waiting="crew">
+          Waiting for {projection.crewWaits.get(nodeId)?.member ?? 'a crew member'}
+          {projection.crewWaits.get(nodeId)?.holder == null
+            ? ''
+            : ` — held by ${projection.crewWaits.get(nodeId)?.holder}`}
+          . Nothing is running for this phase until a member is free.
+        </Hint>
+      )}
       {projection.held.has(nodeId) && status === 'awaiting_human' && (
         <Hint className="muted" data-held>
           Paused by the operator. No unattended timer answers this question; your answer releases it.

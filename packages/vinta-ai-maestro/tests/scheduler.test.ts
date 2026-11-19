@@ -6509,6 +6509,136 @@ describe('a wave that cannot be assembled', () => {
   })
 })
 
+/**
+ * A finished phase parked on its wave's question kept its crew member, and
+ * the phase planned for the same member waited behind it — `running`, no
+ * lane, no agent, no line in the journal — for thirteen hours. "Landed" used
+ * to mean "about to be free", which a parked phase is not.
+ */
+describe('a phase waiting for a crew member a parked phase holds', () => {
+  class WaveBuildError extends Error {
+    override name = 'WaveBuildError'
+    readonly wave = 1
+  }
+
+  /** `a` and `c` are both planned for `tier2-1`; `a`'s wave fails, so it parks, landed, and `c` may start. */
+  const parked = (options: Parameters<typeof rig>[1] = {}) =>
+    rig(
+      makeWorkflow(
+        [
+          node('a', [], { gates: ['unit'], crew: 'tier2-1' }),
+          node('c', ['a'], { gates: ['unit'], crew: 'tier2-1' }),
+        ],
+        {
+          resources: {
+            lane: { capacity: 2, kind: 'worktree' },
+            'test-suite': { capacity: 1, kind: 'semaphore' },
+          },
+          gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+          pipelines: { 'standard-phase': STANDARD_PHASE },
+          pipeline: 'standard-phase',
+          crew: { 'tier2-1': { tier: 2, model: 'medium' } },
+        },
+      ),
+      {
+        outcomes: APPROVED,
+        ...options,
+        tap: (call) => {
+          if (call.nodeId === 'a' && call.effect === 'e-merge') throw new WaveBuildError('wave 1 could not be assembled')
+        },
+      },
+    )
+
+  const crewWaitsOf = (r: Rig, nodeId: string): Record<string, unknown>[] =>
+    r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_wait' && event.nodeId === nodeId)
+      .map((event) => event.payload as Record<string, unknown>)
+      .filter((payload) => payload['on'] === 'crew')
+
+  it('journals who it waits for and behind which phase, and that it was let in', async () => {
+    const r = parked()
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    await until(() => crewWaitsOf(r, 'c').length > 0, 'the crew wait')
+
+    // Once, however many times the run changed state under it.
+    expect(crewWaitsOf(r, 'c')).toEqual([{ on: 'crew', state: 'queued', member: 'tier2-1', holder: 'a' }])
+    expect(r.journal.crewWaits('run-1').get('c')).toMatchObject({ member: 'tier2-1', holder: 'a' })
+    // Not an integration-worktree wait, to the readers of those.
+    expect(r.journal.integrationWaits('run-1').has('c')).toBe(false)
+
+    r.scheduler.answer('a', { human: { answer: 'skip' } })
+    expect((await running).statuses).toEqual({ a: 'done', c: 'done' })
+    expect(crewWaitsOf(r, 'c').map((payload) => payload['state'])).toEqual(['queued', 'granted'])
+    expect(r.journal.crewWaits('run-1').size).toBe(0)
+    expectDrained(r)
+  })
+
+  it('takes a spare instead of waiting on the parked phase', async () => {
+    const added: string[] = []
+    const r = parked({
+      addLane: async (name) => {
+        added.push(name)
+      },
+    })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    // `c` runs to the end while `a` is still parked, on a member of its own.
+    await until(() => r.scheduler.statuses['c'] === 'done', 'the dependent to finish on a spare')
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    expect(added).toHaveLength(1)
+
+    r.scheduler.answer('a', { human: { answer: 'skip' } })
+    expect((await running).statuses).toEqual({ a: 'done', c: 'done' })
+    expectDrained(r)
+  })
+})
+
+describe('a wave whose conflict fixer the harness refused', () => {
+  /**
+   * The plan's session limit stopped the fixer of a wave merge. Thrown on, it
+   * re-drove the finished phase from its implementer; counted as rounds, it
+   * failed the wave on a gate nobody had been able to fix. It waits where it
+   * is, landed, with its lane, and builds the wave when the window opens.
+   */
+  it('waits in place for the harness and then builds the wave, re-running nothing', async () => {
+    let merges = 0
+    const r = rig(
+      standardWorkflow([node('a', [], { gates: ['unit'] }), node('b', ['a'], { gates: ['unit'] })]),
+      {
+        outcomes: APPROVED,
+        tap: (call) => {
+          if (call.nodeId !== 'a' || call.effect !== 'e-merge') return
+          merges += 1
+          if (merges === 1) {
+            throw new ConflictFixerRefused(HARNESS, 'opus', 'quota', undefined, 'plan-limit-reached', {
+              nodeId: 'a',
+              round: 1,
+            })
+          }
+        },
+      },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'waiting_on_capacity', 'the wait')
+    // Backpressure: no failure, no question, the lane still its own.
+    expect(errorsOf(r, 'a')).toEqual([])
+    expect(questionsOf(r, 'a')).toEqual([])
+    expect(r.pools.held('lane')).toBeGreaterThan(0)
+
+    await r.advance(5_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(merges).toBe(2)
+    // The phase's own pipeline ran once: its branch was cut once.
+    expect(r.calls.filter((call) => call.nodeId === 'a' && call.effect === 'e-branch')).toHaveLength(1)
+    expectDrained(r)
+  })
+})
+
 describe('a conflict fixer the harness refused', () => {
   it('parks the phase on the harness’s wait rather than failing it', async () => {
     let refusals = 0

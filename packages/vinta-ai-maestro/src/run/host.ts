@@ -364,10 +364,19 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
      * on. The phases either side were gated to the hilt; the merge between them
      * was not.
      *
-     * Runs the *union* of the conflicting nodes' declared gates, in the
+     * Runs the union of the declared gates of the phases *in the merged
+     * tree* (`phases`: those already merged, then the one coming in), in the
      * integration worktree, with that worktree's own environment — the same
      * environment the fixer agent gets, for the same reason: without it the
      * commands resolve to the wrong compose project and the wrong database.
+     *
+     * It ran every gate of the plan before, and a gate belongs to the phase
+     * that brings what it runs. One observed wave merged p0 and p1 and was
+     * failed on `portal-build`, a script only p2's branch had: three times on
+     * the wave and twice on a base, eight fix rounds, each fixer answering
+     * that the gate belonged to a phase not in the tree. Chosen as the base
+     * gates and the wave gates are (`executor.ts`), so the three agree on
+     * what a merged tree owes.
      *
      * Deliberately not cached. `GateCache` keys on the lane's tree hash, and a
      * merge produces a tree nothing has ever gated, so a lookup could only ever
@@ -378,11 +387,19 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
      * failing the phase: the fixer gets told, and the round budget is what
      * bounds it.
      */
-    verify: async (cwd: string, force?: FreshReason, progress?: VerifyProgress): Promise<true | RedGate> => {
+    verify: async (
+      cwd: string,
+      force?: FreshReason,
+      progress?: VerifyProgress,
+      phases?: readonly string[],
+    ): Promise<true | RedGate> => {
       // Command gates only. A judge gate's question is about one phase's diff,
       // and a conflict resolution is not any phase's — asking it of the merge
       // would judge a diff the question was never written for.
-      const gates = [...new Set(current.nodes.flatMap((node) => node.gates))].flatMap((id) => {
+      // A caller that names no phases gets every gate, as before.
+      const inTree =
+        phases === undefined ? current.nodes : current.nodes.filter((node) => phases.includes(node.id))
+      const gates = [...new Set(inTree.flatMap((node) => node.gates))].flatMap((id) => {
         const gate = current.gates[id]
         return gate === undefined || isJudgeGate(gate) ? [] : [[id, gate] as const]
       })
@@ -670,6 +687,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     gateCache: {
       invalidate: (gateId, treeHash) => cache.invalidate(gateId, treeHash),
+      lastFailedTree: (gateId) => cache.lastFailedTree(gateId),
       forgetDatabases: (gateId) => {
         const gate = current.gates[gateId]
         return gate !== undefined && !isJudgeGate(gate) && freshness.forget(gateId, gate)

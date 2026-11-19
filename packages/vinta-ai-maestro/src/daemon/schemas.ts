@@ -183,6 +183,12 @@ export const GateCacheInvalidateSchema = z.strictObject({
     .string()
     .regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/)
     .optional(),
+  /**
+   * Every tree the gate has a result on. Explicit, because it is the wide
+   * one: with neither this nor `tree`, only the tree of the gate's last
+   * cached failure is forgotten.
+   */
+  all: z.boolean().optional(),
   /** Also start the gate's next integration-worktree run from fresh state. */
   databases: z.boolean().optional(),
 })

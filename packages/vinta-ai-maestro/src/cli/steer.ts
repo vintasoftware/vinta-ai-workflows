@@ -119,7 +119,7 @@ export const WORKFLOW_USAGE = `usage: vinta-ai-maestro workflow <runId> [--repo 
 
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash>] [--databases] [--reason <why>] [--repo <dir>]
+export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash> | --all] [--databases] [--reason <why>] [--repo <dir>]
 
   Forgets a gate's cached results, so the next run of it — by the phase's gate
   step or by an agent — runs the command instead of replaying the verdict.
@@ -129,7 +129,13 @@ export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <
   dependency, the lane's database — is replayed until the tracked contents
   move. This is the way out when that verdict is wrong.
 
-  --tree <hash>  Only the result for this lane tree. Default: every tree.
+  With neither --tree nor --all it forgets the result on the tree the gate
+  last failed on, which is the verdict in doubt, and leaves every other
+  lane's result alone.
+
+  --tree <hash>  The result for this lane tree instead.
+  --all          The gate's results on every tree, in every lane. Each lane
+                 then runs the gate again the next time it reaches it.
   --databases    Also run the gate's next run in the integration worktree
                  from fresh state (its \`fresh_cmd\`), for test databases a
                  killed or reused run left behind. Needs \`fresh_cmd\`.
@@ -414,6 +420,7 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
       options: {
         repo: { type: 'string' },
         tree: { type: 'string' },
+        all: { type: 'boolean' },
         databases: { type: 'boolean' },
         reason: { type: 'string' },
       },
@@ -428,7 +435,11 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
     io.err(GATE_CACHE_USAGE)
     return USAGE
   }
-  const { tree, databases } = parsed.values
+  const { tree, all, databases } = parsed.values
+  if (tree !== undefined && all === true) {
+    io.err('vinta-ai-maestro: --tree and --all are different scopes; pass one')
+    return USAGE
+  }
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const target = reach(repoPath, runId, deps.env ?? process.env)
   if (target === null) return notLive(io, runId)
@@ -436,15 +447,34 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
   const answered = await post(
     target,
     path,
-    JSON.stringify({ ...(tree === undefined ? {} : { tree }), ...(databases === true ? { databases } : {}) }),
+    JSON.stringify({
+      ...(tree === undefined ? {} : { tree }),
+      ...(all === true ? { all } : {}),
+      ...(databases === true ? { databases } : {}),
+    }),
     deps.fetch ?? fetch,
     parsed.values.reason,
   )
   if (answered === null) return notLive(io, runId)
   if (answered.status >= 400) return refused(io, answered.status, answered.body)
-  const body = answered.body as { removed?: number; databases?: boolean } | null
+  const body = answered.body as { removed?: number; databases?: boolean; scope?: string; tree?: string } | null
   const removed = body?.removed ?? 0
-  io.out(`gate ${gateId}: ${removed} cached result${removed === 1 ? '' : 's'} forgotten`)
+  if (body?.scope === 'last_failure' && body.tree === undefined) {
+    // Said, rather than "0 forgotten": the command did not do what a bare
+    // invalidate used to, and the two ways to say what was meant are these.
+    io.out(
+      `gate ${gateId}: no failed result is cached, so nothing was forgotten; ` +
+        'pass --tree <hash> for one tree or --all for every tree',
+    )
+  } else {
+    const where =
+      body?.scope === 'last_failure' && body.tree !== undefined
+        ? ` (tree ${body.tree.slice(0, 12)}, its last failure; --all for every tree)`
+        : body?.scope === 'all'
+          ? ' (every tree)'
+          : ''
+    io.out(`gate ${gateId}: ${removed} cached result${removed === 1 ? '' : 's'} forgotten${where}`)
+  }
   if (body?.databases === true) io.out(`gate ${gateId}: its next run in the integration worktree starts from fresh state`)
   if (body?.databases === false) {
     io.err(`gate ${gateId} declares no fresh_cmd, so there is no fresh form of it to run; recreate the databases by hand`)
