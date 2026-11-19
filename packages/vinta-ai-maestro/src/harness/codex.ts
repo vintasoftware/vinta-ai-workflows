@@ -704,6 +704,8 @@ class CodexSession implements AgentSession {
 
   #totals: TokenTotals | undefined
   #reportedTotals: TokenTotals | undefined
+  /** The last response’s prompt plus output: the thread’s context size (`usage.context`). */
+  #context: number | undefined
 
   get pid(): number | undefined {
     return this.#child.pid
@@ -839,6 +841,12 @@ class CodexSession implements AgentSession {
         this.#turnEnded(asRecord(params['turn']) ?? {})
         return
       case 'thread/tokenUsage/updated': {
+        // `last` is one response's usage, restated: wrong to add up (see
+        // `usageBetween`) and exactly the context size, since its prompt is
+        // the whole thread as the model last read it (OpenAI's `inputTokens`
+        // includes the cached part).
+        const last = readTotals(asRecord(params['tokenUsage'])?.['last'])
+        if (last !== undefined) this.#context = last.input + last.output
         const totals = readTotals(asRecord(params['tokenUsage'])?.['total'])
         if (totals === undefined) break
         // Before a turn of ours, a total is the history a resumed thread
@@ -1237,7 +1245,8 @@ class CodexSession implements AgentSession {
   #emitUsage(): void {
     const totals = this.#totals
     if (totals === undefined || totals === this.#reportedTotals) return
-    this.#queue.push(usageBetween(this.#reportedTotals, totals))
+    const usage = usageBetween(this.#reportedTotals, totals)
+    this.#queue.push(this.#context === undefined || usage.type !== 'usage' ? usage : { ...usage, context: this.#context })
     this.#reportedTotals = totals
   }
 

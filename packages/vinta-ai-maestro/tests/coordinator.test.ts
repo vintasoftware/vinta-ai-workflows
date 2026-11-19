@@ -247,6 +247,56 @@ describe('what wakes the coordinator', () => {
     expect(found).toEqual([expect.objectContaining({ kind: 'integration_wait', nodeId: 'p2', holder: 'p1' })])
   })
 
+  /**
+   * A wave's question sat eleven hours overnight and nothing woke the
+   * coordinator: only errors and elapsed phases did.
+   */
+  it('wakes for a question left unanswered, and at once for an agent’s', () => {
+    const journal = journalWith(workflowOf())
+    const t0 = Date.now()
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'node_status', payload: { status: 'awaiting_human' } })
+    journal.append({
+      runId: RUN,
+      nodeId: 'p1',
+      type: 'human_question',
+      payload: { question: 'Wave 1 could not be assembled. Try the wave again?', kind: 'choice', choices: ['retry', 'skip', 'stop'], effect_id: 'wave:p1:3' },
+    })
+    journal.append({ runId: RUN, nodeId: 'p2', type: 'node_status', payload: { status: 'awaiting_human' } })
+    journal.append({
+      runId: RUN,
+      nodeId: 'p2',
+      type: 'human_question',
+      payload: { question: 'The agent stopped to ask for a decision.', kind: 'agent', effect_id: 'agent-question:p2:1' },
+    })
+    const at = (ms: number) =>
+      triggersFrom(journal.events(RUN), Number.MAX_SAFE_INTEGER, { now: t0 + ms, phaseThresholdMs: 10 * HOUR })
+
+    // The agent's at once; the wave's only once it has waited.
+    expect(at(1000)).toEqual([expect.objectContaining({ kind: 'question_waiting', nodeId: 'p2', questionKind: 'agent' })])
+    const later = at(31 * 60 * 1000)
+    expect(later.map((trigger) => trigger.nodeId).sort()).toEqual(['p1', 'p2'])
+    expect(describeTriggers(later)).toContain('wave:p1:3')
+    expect(describeTriggers(later)).toContain('a person\u2019s: leave it')
+
+    // Answered: no longer news.
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'human_answered', payload: { effect_id: 'wave:p1:3', answer: 'retry' } })
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'node_status', payload: { status: 'running' } })
+    expect(at(31 * 60 * 1000).map((trigger) => trigger.nodeId)).toEqual(['p2'])
+  })
+
+  it('wakes for a long capacity wait once, however often the status repeats', () => {
+    const journal = journalWith(workflowOf())
+    const t0 = Date.now()
+    journal.append({ runId: RUN, nodeId: 'p3', type: 'node_status', payload: { status: 'waiting_on_capacity' } })
+    journal.append({ runId: RUN, nodeId: 'p3', type: 'node_status', payload: { status: 'waiting_on_capacity' } })
+    const found = triggersFrom(journal.events(RUN), Number.MAX_SAFE_INTEGER, {
+      now: t0 + 45 * 60 * 1000,
+      phaseThresholdMs: 10 * HOUR,
+    })
+    expect(found).toEqual([expect.objectContaining({ kind: 'capacity_wait', nodeId: 'p3' })])
+    expect(describeTriggers(found)).toContain('switch-harness')
+  })
+
   it('wakes for a phase waiting on a crew member, naming the member and the phase holding them', () => {
     // A phase read `running` for thirteen hours with no lane: its member was
     // held by a finished phase parked on a question.

@@ -16,5 +16,6 @@ export {
   type PromptJournal,
   type RedGate,
   type Reorientation,
+  type SetAsideWork,
   type SpawnPromptRequest,
 } from './prompts.ts'

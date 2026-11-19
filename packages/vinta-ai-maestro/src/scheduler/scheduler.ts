@@ -136,6 +136,7 @@ import {
   verdictFollowUp,
   type ChorePrompt,
   type Reorientation,
+  type SetAsideWork,
 } from '../prompts/index.ts'
 import { choresFor } from '../chores.ts'
 import {
@@ -149,10 +150,8 @@ import {
 import {
   AGENT_QUESTION_TEXT,
   decodeAnswers,
-  encodeAnswers,
   formatAnswers,
   QuestionWatch,
-  recommendedAnswers,
 } from '../questions/agent-questions.ts'
 import { killLiveGates } from '../gates/runner.ts'
 import { AcquireAborted, type Lease, type ResourcePools } from '../resources/pools.ts'
@@ -265,25 +264,6 @@ const RETRY_WITH = 'retry with '
  */
 const UNATTENDED_BACKOFF_CAP = 8
 
-/**
- * The least an agent's own question waits unattended when only `retryAfterMs`
- * set the pace. An observed run answered a design question after sixty
- * seconds, and an answer given that way added a database migration: a retry
- * costs an attempt, an agent's choice can cost a schema.
- */
-export const AGENT_ANSWER_FLOOR_MS = 30 * 60_000
-
-/**
- * How long an agent's question waits before it takes its recommended options:
- * the explicit `agentAnswerAfterMs`, else twice `retryAfterMs` and never less
- * than `AGENT_ANSWER_FLOOR_MS`, else never (a person answers).
- */
-export function agentAnswerAfter(retryAfterMs: number | undefined, explicit: number | undefined): number | undefined {
-  if (explicit !== undefined) return explicit > 0 ? explicit : undefined
-  if (retryAfterMs === undefined || retryAfterMs <= 0) return undefined
-  return Math.max(2 * retryAfterMs, AGENT_ANSWER_FLOOR_MS)
-}
-
 export interface SchedulerOptions {
   /** The frozen snapshot the run executes. Its `run_started` is already journalled. */
   readonly workflow: Workflow
@@ -390,12 +370,6 @@ export interface SchedulerOptions {
    * asked, which is the budget for a failure nobody has seen yet.
    */
   readonly retryAfterMs?: number
-  /**
-   * The unattended wait on an agent's own question (`#agentQuestions`), which
-   * is a design choice rather than a retry and so waits longer. Absent derives
-   * it from `retryAfterMs` (`agentAnswerAfter`).
-   */
-  readonly agentAnswerAfterMs?: number
   /** Drives `retryAfterMs`. Injected in tests; the real one is `systemClock`. */
   readonly clock?: Clock
   /**
@@ -1296,6 +1270,8 @@ export class Scheduler {
   /** Critical-path priority per node, handed to admission (§6.1). */
   #heights = new Map<string, number>()
   #waiters: (() => void)[] = []
+  /** Loop wake-ups booked at a harness reset (`#wakeAt`), by time. */
+  readonly #wakeTimers = new Set<number>()
   #iterations = 0
   /** Set once `run()` has left its loop: there is nothing left to dispatch into. */
   #ended = false
@@ -2600,6 +2576,16 @@ export class Scheduler {
         return upstream?.status === 'done' || upstream?.landed === true
       })
       if (!ready) continue
+      // Not dispatched into a harness that is parked (§6.1). Dispatching meant
+      // recycling a lane, cutting a branch, building and gating a base, only
+      // for the first spawn to be refused and all of it unwound: one observed
+      // run dispatched a phase two minutes into a plan limit announced for
+      // an hour later. It stays pending, and is looked at again at the reset.
+      const parked = this.#options.admission.wakeAt(this.#harnessOf(state))
+      if (parked !== undefined) {
+        this.#wakeAt(parked)
+        continue
+      }
       // A deferred phase (`node.deferred`) waits for a person, not for its
       // dependencies: the plan said when it may run and this is not the
       // scheduler's call. Asked once; the answer releases it into this same
@@ -2712,6 +2698,36 @@ export class Scheduler {
       [...this.#states.values()].map((state) => this.#harnessOf(state)),
     )
     return [...harnesses].filter((id) => this.#options.admission.wakeAt(id) !== undefined)
+  }
+
+  /**
+   * Wakes the loop at `at`, once per distinct time: the loop waits only on
+   * state changes, and a harness waking from a park is not one.
+   */
+  #wakeAt(at: number): void {
+    if (this.#wakeTimers.has(at)) return
+    const clock = this.#options.clock ?? systemClock
+    this.#wakeTimers.add(at)
+    clock.at(at, () => {
+      this.#wakeTimers.delete(at)
+      this.#wake()
+    })
+  }
+
+  /**
+   * The reset an unattended answer to this node should wait for, or undefined
+   * when nothing it would start is parked: the node's own harness, or any
+   * harness parked on `quota` — a plan window is the account's, and a wave
+   * or base retry spawns a conflict fixer whichever harness the phase is on.
+   */
+  #capacityHold(state: NodeState): number | undefined {
+    const admission = this.#options.admission
+    let until = admission.wakeAt(this.#harnessOf(state))
+    for (const harness of Object.keys(this.#options.adapters)) {
+      const parked = admission.parked(harness)
+      if (parked?.kind === 'quota') until = Math.max(until ?? 0, parked.wakeAt)
+    }
+    return until
   }
 
   /** Resolves on the next state change. The only thing the loop ever waits on. */
@@ -3205,6 +3221,7 @@ export class Scheduler {
             ledger,
             nodeId: state.node.id,
             maxTurns: this.#workflow.defaults.max_session_turns,
+            maxContextTokens: this.#workflow.defaults.max_session_context_tokens,
             poisoned: this.#poisoned.has(member.id),
             fixRounds: 0,
             maxFixRounds: state.node.max_fix_rounds ?? null,
@@ -4244,13 +4261,15 @@ export class Scheduler {
    * comment pass timed out is a far worse trade than merging comments nobody
    * tidied.
    *
-   * **A capacity refusal is the same answer, and this is the surprising half.**
-   * Everywhere else a `CapacityRetry` re-drives the node from its initial state
-   * — correct for a fixer, since the alternative is losing the fix — but here
-   * it would re-implement an entire finished phase to get a polish turn in. So
-   * an `on_failure: 'continue'` chore is skipped when the harness is full, and
-   * only a chore the phase is declared incorrect without is worth the re-drive.
-   * A review is never skipped: skipping it would merge a phase nobody reviewed.
+   * **A capacity refusal is waited out, here.** Everywhere else a
+   * `CapacityRetry` re-drives the node from its initial state, which here would
+   * re-implement a finished phase to get a polish turn in. It used to skip an
+   * `on_failure: 'continue'` chore instead, and one observed run opened two
+   * PRs with no review canvas and no deslop pass because the plan's window
+   * had closed for an hour — while the implement turn in the same place waits.
+   * So the chore waits too, in place, with the lane (`#waitInPlace`), and runs
+   * when the harness answers. No chore is skipped for capacity, and a review
+   * never was.
    *
    * `Aborted` is never swallowed by either: the run is being torn down, and
    * there is nothing left for the next chore to run in.
@@ -4289,7 +4308,8 @@ export class Scheduler {
       this.#wake()
     }
 
-    for (const entry of chores) {
+    for (let index = 0; index < chores.length; index += 1) {
+      const entry = chores[index] as (typeof chores)[number]
       const startedAt = Date.now()
       if (entry.chore.when === 'after_pr' && !prOpened) {
         this.#choreResult(state, entry.id, 'skipped', startedAt)
@@ -4332,8 +4352,9 @@ export class Scheduler {
       } catch (error) {
         if (error instanceof Aborted) throw error
         if (error instanceof CapacityRetry) {
-          if (review || entry.chore.on_failure === 'fail') throw error
-          this.#choreResult(state, entry.id, 'skipped', startedAt)
+          await this.#waitInPlace(state, error)
+          // The same chore again, once the harness answers.
+          index -= 1
           continue
         }
         if (!review && entry.chore.on_failure === 'fail') throw error
@@ -4359,6 +4380,24 @@ export class Scheduler {
     return {
       facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict, ...(stated ? {} : { stated: false }) } },
     }
+  }
+
+  /**
+   * The edits this phase had set aside (`review_left_lane_dirty`), oldest
+   * first, for every later prompt of the phase (`SetAsideWork`).
+   */
+  #setAsideFor(state: NodeState): SetAsideWork[] {
+    const found: SetAsideWork[] = []
+    for (const event of this.#options.journal.events(this.#options.runId)) {
+      if (event.type !== 'review_left_lane_dirty' || event.payload.node !== state.node.id) continue
+      found.push({
+        ref: event.payload.ref,
+        by: `the ${event.payload.chore} chore`,
+        paths: event.payload.paths,
+        count: event.payload.count,
+      })
+    }
+    return found
   }
 
   /**
@@ -4567,6 +4606,8 @@ export class Scheduler {
         // On every form, a delta included: a decision made in another session
         // — a reviewer's, a replaced one's — is not in this one.
         decisions: state.decisions,
+        // Read from the journal, so it holds across a lane move and a resume.
+        setAside: this.#setAsideFor(state),
       }),
       model: this.#modelFor(state, params),
       ...envField(),
@@ -4858,6 +4899,10 @@ export class Scheduler {
           // resume has to name.
           this.#remember(state, plan, adapter, event.sessionId)
         }
+        if (event.type === 'usage' && event.context !== undefined) {
+          this.#measure(state, plan, sessionId, { context: event.context })
+        }
+        if (event.type === 'context_compacted') this.#measure(state, plan, sessionId, { compacted: true })
       }
     } finally {
       withdraw()
@@ -4951,10 +4996,16 @@ export class Scheduler {
    * journalled as option indices plus the operator's own words, and reaches
    * the agent as a `user_message` restating each question with its answer.
    *
-   * An unattended run answers with the recommended options after
-   * `retryAfterMs`, through the same `answer` path a click takes. A harness
-   * that cannot resume has no way to deliver an answer, so its question is left
-   * in the transcript and the turn ends as it would have.
+   * **No timer answers it.** An agent stops to ask about a design choice —
+   * what the product shows, which table a record lives in — and the
+   * recommended option is the agent's guess, not a decision. One observed run
+   * took the first option after sixty seconds on a question its spec named as
+   * open and owned by the project lead, and nothing woke the coordinator. So
+   * the phase parks until a person answers, or the run coordinator does: it is
+   * woken for every agent question (`question_waiting`) and may answer, or
+   * leave it to a person. A harness that cannot resume has no way to deliver
+   * an answer, so its question is left in the transcript and the turn ends as
+   * it would have.
    *
    * Returns the watch over the turn's last session, whose prose is the report
    * the turn closed on.
@@ -4990,18 +5041,10 @@ export class Scheduler {
       })
       this.#ask(state, effectId, { question: AGENT_QUESTION_TEXT, kind: 'agent' })
       state.parkedEffectId = effectId
-      state.unattendedAnswer = encodeAnswers(recommendedAnswers(ask))
-
-      const cancel = this.#armUnattendedAnswer(
-        state,
-        agentAnswerAfter(this.#options.retryAfterMs, this.#options.agentAnswerAfterMs),
-      )
-      let facts: GuardContext
-      try {
-        facts = await this.#park(state)
-      } finally {
-        cancel()
-      }
+      // The coordinator's to answer, never a timer's.
+      state.unattendedAnswer = null
+      state.delegable = true
+      const facts = await this.#park(state)
 
       const answers = decodeAnswers(facts.human?.['answer'], ask)
       const unattended = facts.human?.['unattended'] === true
@@ -5127,6 +5170,16 @@ export class Scheduler {
       this.#setStatus(state, 'running')
       return
     }
+    await this.#waitInPlace(state, retry)
+  }
+
+  /**
+   * Waits out a capacity refusal without giving anything up: the lane, the
+   * branch and the session stay as they are, and the caller tries the same
+   * turn again when the harness answers — or a reassignment moves the phase
+   * off it (`nudge`). A halt or an abort ends the wait.
+   */
+  async #waitInPlace(state: NodeState, retry: CapacityRetry): Promise<void> {
     this.#setStatus(state, 'waiting_on_capacity')
     const nudged = deferred()
     state.nudge = nudged.resolve
@@ -5316,6 +5369,7 @@ export class Scheduler {
       ledger: this.#ledgerOf(state),
       nodeId: state.node.id,
       maxTurns: this.#workflow.defaults.max_session_turns,
+      maxContextTokens: this.#workflow.defaults.max_session_context_tokens,
       poisoned: this.#poisoned.has(state.crew?.member ?? ''),
       fixRounds: state.fixRounds,
       maxFixRounds: state.node.max_fix_rounds ?? null,
@@ -5332,12 +5386,37 @@ export class Scheduler {
   ): void {
     const lane = state.lane
     if (plan.slot === null || lane === null) return
-    this.#ledgerOf(state).set(plan.slot, {
+    const ledger = this.#ledgerOf(state)
+    // The same session, continued: what it was measured at carries until this
+    // turn reports again.
+    const before = ledger.get(plan.slot)
+    const measured =
+      before?.sessionId === sessionId
+        ? {
+            ...(before.contextTokens === undefined ? {} : { contextTokens: before.contextTokens }),
+            ...(before.compacted === true ? { compacted: true } : {}),
+          }
+        : {}
+    ledger.set(plan.slot, {
       harnessId: adapter.id,
       sessionId,
       lane,
       nodeId: state.node.id,
       turns: plan.turns,
+      ...measured,
+    })
+  }
+
+  /** How big the slot's session is now, or that it was compacted (§15.5). */
+  #measure(state: NodeState, plan: SessionPlan, sessionId: string | null, seen: { context?: number; compacted?: true }): void {
+    if (plan.slot === null || sessionId === null) return
+    const ledger = this.#ledgerOf(state)
+    const entry = ledger.get(plan.slot)
+    if (entry === undefined || entry.sessionId !== sessionId) return
+    ledger.set(plan.slot, {
+      ...entry,
+      ...(seen.context === undefined ? {} : { contextTokens: seen.context }),
+      ...(seen.compacted === true ? { compacted: true } : {}),
     })
   }
 
@@ -5813,6 +5892,14 @@ export class Scheduler {
         }
         return
       }
+      // An answer that would start work on a parked harness waits for its
+      // reset: given now, it only buys the refusal again.
+      const hold = this.#capacityHold(state)
+      if (hold !== undefined) {
+        this.#log.info('node.unattended_deferred', { node: state.node.id, until: hold })
+        cancel = clock.at(hold, fire)
+        return
+      }
       this.#log.info('node.unattended_answer', { node: state.node.id, after_ms: after })
       if (effect !== null) state.unattendedGiven.set(effect, (state.unattendedGiven.get(effect) ?? 0) + 1)
       this.answer(state.node.id, { human: { answer, unattended: true } })
@@ -5875,6 +5962,16 @@ export class Scheduler {
         }
         return
       }
+      // A retry into a parked harness is refused before it does anything, and
+      // used to be spent anyway: one observed wave retry fired sixty seconds
+      // into a plan limit and counted against its unchanged inputs. It waits
+      // for the reset instead, and is not counted until it runs.
+      const hold = this.#capacityHold(state)
+      if (hold !== undefined) {
+        this.#log.info('node.unattended_deferred', { node: state.node.id, until: hold })
+        cancel = clock.at(hold, fire)
+        return
+      }
       state.unattended += 1
       this.#log.info('node.unattended_retry', {
         node: state.node.id,
@@ -5905,6 +6002,15 @@ export class Scheduler {
       ...(state.lane === null ? {} : { lane: state.lane }),
     })
     state.status = status
+    // Admission journals the wait as it parks the node, and the scheduler sets
+    // the same status as it unwinds: one row, not two in a row.
+    if (
+      status === 'waiting_on_capacity' &&
+      this.#options.journal.nodeStatus(this.#options.runId, state.node.id) === status
+    ) {
+      this.#wake()
+      return
+    }
     this.#options.journal.append({
       runId: this.#options.runId,
       nodeId: state.node.id,

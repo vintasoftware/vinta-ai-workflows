@@ -163,6 +163,8 @@ describe('what the daemon records about itself', () => {
     expect(refusal).toBeDefined()
     expect(refusal?.level).toBe('warn')
     expect(refusal?.fields['path']).toBe('/api/runs/nope')
+    // And why: the refusal's own code, not only its status.
+    expect(refusal?.fields['error']).toBe('unknown_run')
     // The path, never the URL: a query string is where the token rides.
     expect(JSON.stringify(page)).not.toContain(r.daemon.token)
   })

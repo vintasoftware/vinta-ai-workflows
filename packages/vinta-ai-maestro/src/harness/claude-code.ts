@@ -545,6 +545,8 @@ class ClaudeCodeSession implements AgentSession {
   #idle: ReturnType<typeof setTimeout> | undefined
   /** The CLI's `total_cost_usd` is a running total for the process. */
   #costSoFar = 0
+  /** The context size the last main-thread model call reported (`usage.context`). */
+  #context: number | undefined
 
   constructor(readonly id: string, child: ChildProcess, queue: EventQueue, idleMs: number) {
     this.#child = child
@@ -579,6 +581,20 @@ class ClaudeCodeSession implements AgentSession {
     if (this.#ended) return
     const value = asRecord(raw)
     if (!value) return
+    // One model call's usage, on every main-thread assistant frame: its prompt
+    // is the session's context as it stood, so the last one is the size. A
+    // sub-agent's frames are its own context, not this session's.
+    if (value['type'] === 'assistant' && (value['parent_tool_use_id'] ?? null) === null) {
+      const usage = asRecord(asRecord(value['message'])?.['usage'])
+      const input = asNumber(usage?.['input_tokens'])
+      if (input !== undefined) {
+        this.#context =
+          input +
+          (asNumber(usage?.['cache_read_input_tokens']) ?? 0) +
+          (asNumber(usage?.['cache_creation_input_tokens']) ?? 0) +
+          (asNumber(usage?.['output_tokens']) ?? 0)
+      }
+    }
     if (this.#held !== undefined) {
       // A new turn has started; it is bounded the way every turn is, by the
       // scheduler, not by this session's silence timer.
@@ -720,11 +736,16 @@ class ClaudeCodeSession implements AgentSession {
       this.#finish(this.#stopping ? 'interrupted' : reported)
       return
     }
-    if (event.type === 'usage' && event.costUsd !== undefined) {
+    if (event.type === 'usage') {
+      const context = this.#context === undefined ? {} : { context: this.#context }
+      if (event.costUsd === undefined) {
+        this.#queue.push({ ...event, ...context })
+        return
+      }
       // Every `result` reports the process's cost so far; consumers add usage
       // events up, so each one carries only what its own turn added.
       const total = event.costUsd
-      this.#queue.push({ ...event, costUsd: Math.max(0, total - this.#costSoFar) })
+      this.#queue.push({ ...event, ...context, costUsd: Math.max(0, total - this.#costSoFar) })
       this.#costSoFar = total
       return
     }

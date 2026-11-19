@@ -29,7 +29,7 @@ import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
-import type { ConflictFixer } from '../integration/fixer.ts'
+import type { AgentConflictFixerOptions, ConflictFixer } from '../integration/fixer.ts'
 import { type FreshReason, IntegrationFreshness, looksStale } from '../integration/fresh.ts'
 import { gitLines } from '../integration/git.ts'
 import {
@@ -168,6 +168,13 @@ export interface HostWiring {
    */
   readonly bindCommitDecision?: (decide: (failure: CommitFailure) => Promise<CommitDecision>) => void
   /**
+   * Binds what the conflict fixer asks before it spawns: whether admission has
+   * the harness parked (`AdmissionControl.parked`). Late-bound for
+   * `bindCommitDecision`'s reason; until bound, the fixer spawns and learns
+   * of a limit from the refusal, as before.
+   */
+  readonly bindCapacity?: (parked: NonNullable<AgentConflictFixerOptions['parked']>) => void
+  /**
    * Ends what the scheduler cannot: a conflict-fixer round in progress, and an
    * unfinished merge of this run's left standing in the integration worktree
    * (`Integrator.reclaim`). For a run interrupted by a signal, and for a stop
@@ -292,6 +299,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   let current = workflow
   // Bound by `bindCommitDecision` once a scheduler exists to ask through.
   let decideCommit: ((failure: CommitFailure) => Promise<CommitDecision>) | null = null
+  // Bound by `bindCapacity`; read by every fixer built, amended ones too.
+  let parkedHarness: AgentConflictFixerOptions['parked'] | null = null
   // Every fixer built, the start-time one and one per amendment: a teardown
   // interrupts all of them, since a round already running when an amendment
   // landed keeps the fixer it started with.
@@ -306,11 +315,10 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       // the one agent turn in a run that cannot talk back to the daemon.
       { ...integration.env, ...options.agentEnv },
       () => journal.crewAssignments(runId),
-      // Into the incoming phase's own transcript, beside the implementer, fixer
-      // and chore turns that produced the branches now being merged — which is
-      // where somebody asking "why does the merge look like this" is already
-      // reading. Its `by.role` is what keeps it distinguishable from them.
+      // Into the transcript of the phase whose turn the merge is, once; its
+      // `by.role` and `by.merge` keep it apart from that phase's own turns.
       (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
+      (harness) => parkedHarness?.(harness),
     )
     fixers.push(built)
     return built
@@ -404,7 +412,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         return gate === undefined || isJudgeGate(gate) ? [] : [[id, gate] as const]
       })
       for (const [id, gate] of gates) {
-        const logPath = journal.gateLogPath(runId, INTEGRATION_NODE, id)
+        // Its own file per run, so a red one cited in an error is still there.
+        const logPath = journal.runLogPath(runId, INTEGRATION_NODE, id)
         // Reported before it runs, with its log, so the step is on the record
         // while the gate writes rather than once it has finished.
         progress?.started(id, logPath)
@@ -609,6 +618,9 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     bindCommitDecision: (decide) => {
       decideCommit = decide
     },
+    bindCapacity: (parked) => {
+      parkedHarness = parked
+    },
     // The run is being torn down by a signal. The scheduler ends the turns it
     // holds; this ends the one it does not — a fix round — and leaves the
     // shared worktree with no merge in progress, which is the state every
@@ -722,8 +734,10 @@ function conflictFixer(
   env: Readonly<Record<string, string>>,
   crewAssignments: () => readonly StoredEvent[],
   record: (nodeId: string, entry: TranscriptEntry) => void,
+  parked: NonNullable<AgentConflictFixerOptions['parked']>,
 ): ConflictFixer {
   return createCrewConflictFixer({
+    parked,
     adapters,
     defaults: { harness: workflow.defaults.harness, model: workflow.defaults.model },
     crew: workflow.crew,

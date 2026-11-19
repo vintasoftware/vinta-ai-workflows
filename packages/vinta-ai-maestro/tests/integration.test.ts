@@ -1139,7 +1139,7 @@ describe('merge conflicts', () => {
    * which finished long ago, while `c` — the phase being watched, sitting in
    * `running` — showed nothing.
    */
-  it('records the fixer’s turn under the phase being based too', async () => {
+  it('records the fixer’s turn once, under the phase being based, naming the branch it merged', async () => {
     const repo = await conflictingPair()
     const recorded: { nodeId: string; entry: TranscriptEntry }[] = []
     const agent = createAgentConflictFixer({
@@ -1160,7 +1160,9 @@ describe('merge conflicts', () => {
 
     const into = (nodeId: string) => recorded.filter((line) => line.nodeId === nodeId).map((line) => line.entry)
     expect(into('c').length).toBeGreaterThan(0)
-    expect(into('c')).toEqual(into('b'))
+    // Not again in `b`'s: one round, one transcript.
+    expect(into('b')).toEqual([])
+    expect(into('c').every((entry) => entry.by?.merge === 'b')).toBe(true)
   })
 
   /** What a phase in `integrate` is doing, step by step, filed against it. */
@@ -2247,6 +2249,33 @@ describe('a fix round the harness stopped', () => {
     expect(adapter.spawned).toHaveLength(1)
     expect(midMerge(repo.integ)).toBe(false)
     expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+})
+
+/**
+ * Four fixer sessions started in five seconds into a plan limit the run had
+ * already been told about. The fixer asks admission first.
+ */
+describe('a fix round for a parked harness', () => {
+  it('is refused before anything is spawned, with the reset as the retry time', async () => {
+    const repo = await conflictingPair()
+    const adapter = new MockAdapter()
+    const wakeAt = Date.now() + 60 * 60_000
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: createAgentConflictFixer({ adapter, model: 'opus', parked: () => ({ kind: 'quota', wakeAt }) }),
+    })
+
+    const failure = await integrator.prepareBase('c').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(ConflictFixerRefused)
+    expect((failure as ConflictFixerRefused).refusal).toMatchObject({ kind: 'quota', retryAfter: new Date(wakeAt) })
+    expect(adapter.spawned).toHaveLength(0)
+    expect(midMerge(repo.integ)).toBe(false)
   })
 })
 

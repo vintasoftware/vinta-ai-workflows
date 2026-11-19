@@ -429,6 +429,11 @@
               "type": "integer",
               "minimum": 1
             },
+            "max_session_context_tokens": {
+              "description": "Tokens of context a reused agent session may hold before the next turn on it starts fresh with the full brief. Default 300000.",
+              "type": "integer",
+              "minimum": 1
+            },
             "pull_requests": {
               "type": "string",
               "enum": [

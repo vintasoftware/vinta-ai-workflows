@@ -147,6 +147,13 @@ export type SessionFreshReason =
   | 'no_resume_capability'
   /** The slot hit `defaults.max_session_turns` (§15.5). */
   | 'turn_ceiling'
+  /** The session's context reached `defaults.max_session_context_tokens` (§15.5). */
+  | 'context_ceiling'
+  /**
+   * The harness compacted the session: what it holds is a summary of what it
+   * was told, and a continuation would assume the detail is still there.
+   */
+  | 'compacted'
   /**
    * The last fix round, deliberately handed to an agent that has not seen the
    * work (§15.5). The author already tried and failed; its assumptions are now

@@ -264,6 +264,15 @@ export interface AgentConflictFixerOptions {
   readonly record?: (nodeId: string, entry: TranscriptEntry) => void
   /** How long one round may run before it is stopped. `DEFAULT_FIXER_TIMEOUT_MS` when absent. */
   readonly timeoutMs?: number
+  /**
+   * Whether admission control has the harness parked, and on what until when
+   * (`AdmissionControl.parked`). The fixer spawns outside admission, so
+   * without this it spent a spawn to be told what the run already knew: one
+   * observed run started four fixer sessions in five seconds into a plan limit
+   * that had refused the phase's chore a minute before, each answered "resets
+   * 7pm".
+   */
+  readonly parked?: (harness: string) => { readonly kind: SpawnRefusalKind; readonly wakeAt: number } | undefined
 }
 
 /**
@@ -359,6 +368,10 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         // whoever reads this next.
       }
       const adapter = staffed?.adapter ?? options.adapter
+      const held = options.parked?.(adapter.id)
+      if (held !== undefined) {
+        throw new ConflictFixerRefused(adapter.id, task.model, held.kind, new Date(held.wakeAt), 'harness-parked')
+      }
       const { outcome, model } = await spawnWithFallbacks(adapter, task, options.fallbacks)
       if (!outcome.ok) {
         throw new ConflictFixerRefused(adapter.id, model, outcome.kind, outcome.retryAfter, outcome.message)
@@ -370,8 +383,11 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // costs a round rather than failing the run. One the harness stopped is
       // read after the stream, below.
       //
-      // Filed against the incoming node, which is the phase whose merge hit the
-      // conflict and the one an operator is looking at. Under its own role, so
+      // Filed once, against the phase whose turn the merge is — the one being
+      // based, or building the wave, and the one sitting in `integrate` while it
+      // runs — and labelled with the phase whose branch it merges (`by.merge`).
+      // It used to go to both, so one fix round sat in two phases' transcripts
+      // and read as each phase's own work. Under its own role, so
       // a phase transcript that already interleaves an implementer, a reviewer
       // and review fixers does not quietly gain a fourth voice indistinguishable
       // from the third: a conflict fixer works in the integration worktree on a
@@ -396,14 +412,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
           // agent's words.
           const entry = { ...event, by: attribute(event, by) }
           if (event.type === 'assistant_text') lastText = event.text
-          options.record?.(request.nodeId, entry)
-          // And under the phase whose turn the merge is, when that is another:
-          // a base merge for p5 resolving p3's branch was written only to p3,
-          // finished long ago, while p5 — the phase being watched — showed
-          // nothing at all.
-          if (request.forNode !== undefined && request.forNode !== request.nodeId) {
-            options.record?.(request.forNode, entry)
-          }
+          options.record?.(request.forNode ?? request.nodeId, entry)
         }
       } finally {
         clearTimeout(timer)

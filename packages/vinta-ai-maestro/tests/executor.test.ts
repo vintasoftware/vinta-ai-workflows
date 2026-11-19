@@ -19,7 +19,7 @@
  * touches the repository the suite runs in.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -1945,6 +1945,39 @@ describe('the git verbs', () => {
       expect(error?.message).toMatch(/test database left behind by another tree/)
       expect(error?.message).toMatch(/declares no `fresh_cmd`/)
       expect(error?.message).not.toMatch(/regression between/)
+    })
+
+    /**
+     * A flake failed a base gate and the attempt with it, and took an operator
+     * to clear, while the same kind of flake on a phase's own gate was triaged
+     * and rerun. Each run keeps its own log, so the red one stays readable.
+     */
+    it('reruns a red base gate the triage judge calls flaky, keeping both logs', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-base-gate-'))
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const marker = join(dir, 'flaked')
+      const flaky =
+        `${process.platform === 'win32' ? 'echo port in use &' : 'echo port in use;'} ` +
+        `node -e "const fs = require('fs'); const p = ${JSON.stringify(marker).replaceAll('"', "'")};` +
+        ` if (fs.existsSync(p)) process.exit(0); fs.writeFileSync(p, ''); process.exit(1)"`
+      const adapter = new MockSystemOneAdapter(() => ({ flaky: 0.9, real: 0.1 }))
+      const rig = setup(gatedDiamond(flaky), {
+        cache: true,
+        systemOne: { adapter, judges: { gate_triage: { rerun_above: 0.8, max_reruns: 1, max_input_bytes: 32 * 1024 } } },
+      })
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      rmSync(marker, { force: true })
+      const judgedBefore = rig.journal.events(RUN_ID).filter((event) => event.type === 'system_one_judged').length
+
+      await work(rig, 'p3', 2)
+
+      const judged = rig.journal.events(RUN_ID).filter((event) => event.type === 'system_one_judged').slice(judgedBefore)
+      expect(judged).toEqual([expect.objectContaining({ payload: expect.objectContaining({ judge: 'gate_triage', decision: 'rerun' }) })])
+      const logs = readdirSync(dirname(rig.journal.gateLogPath(RUN_ID, '_integration', 'x')))
+        .filter((name) => name.startsWith('base-p3-unit.'))
+        .sort()
+      expect(logs).toEqual(['base-p3-unit.1.log', 'base-p3-unit.2.log'])
     })
 
     it('re-runs a red verdict on the base when the phase is retried, rather than replaying it', async () => {

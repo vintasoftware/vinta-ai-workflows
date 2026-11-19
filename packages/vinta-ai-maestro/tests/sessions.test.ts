@@ -36,6 +36,7 @@ function input(overrides: Partial<SessionPlanInput> = {}): SessionPlanInput {
     ledger: new Map([['main', ENTRY]]),
     nodeId: 'p1',
     maxTurns: 12,
+    maxContextTokens: 300_000,
     poisoned: false,
     fixRounds: 0,
     maxFixRounds: 2,
@@ -136,6 +137,26 @@ describe('planSession — §15.2 invalidation', () => {
     const ledger = new Map([['main', { ...ENTRY, turns: 11 }]])
 
     expect(planSession(input({ ledger, maxTurns: 12 })).continuation).toBe(true)
+  })
+
+  /**
+   * A member's session continued from phase to phase until a review chore
+   * auto-compacted at 968k tokens: nothing asked how big it was.
+   */
+  it('starts fresh once the session’s context reaches its size cap, across a phase too', () => {
+    const big = new Map([['main', { ...ENTRY, contextTokens: 300_000 }]])
+    expect(planSession(input({ ledger: big })).reason).toBe('context_ceiling')
+    expect(planSession(input({ ledger: big, nodeId: 'p2' })).reason).toBe('context_ceiling')
+
+    const under = new Map([['main', { ...ENTRY, contextTokens: 299_999 }]])
+    expect(planSession(input({ ledger: under, nodeId: 'p2' }))).toMatchObject({ continuation: true, crossPhase: true })
+    // A harness that does not report a size is not capped by one.
+    expect(planSession(input()).continuation).toBe(true)
+  })
+
+  it('starts fresh after the harness compacted the session, whatever its size', () => {
+    const ledger = new Map([['main', { ...ENTRY, contextTokens: 20_000, compacted: true }]])
+    expect(planSession(input({ ledger }))).toMatchObject({ continuation: false, reason: 'compacted', turns: 1 })
   })
 })
 

@@ -913,7 +913,7 @@ An implementer that hits a decision it should not make alone ends its turn with 
 - one single-choice question is answered by clicking an option;
 - several questions are a wizard: one step each, number keys to pick, then a review step and **Send answers**.
 
-The answer resumes the agent's own session, so it carries on from where it stopped with its context intact. Unattended, nobody answering means the recommended options are taken after `--agent-answer-after` — by default twice `--retry-after` and never under 30 minutes, because an agent's design choice (a migration, an API shape) deserves more of your time than a retry — and the answer is marked unattended. The questions stay in the transcript, and the journal records only that the node paused and which options were picked (see [SPEC.md §9.1](SPEC.md)).
+The answer resumes the agent's own session, so it carries on from where it stopped with its context intact. No timer answers it, under `--retry-after` or otherwise: an agent's design choice (a migration, an API shape, what a page shows) waits for you or the run coordinator, which is woken for it and may leave it to you. The questions stay in the transcript, and the journal records only that the node paused and which options were picked (see [SPEC.md §9.1](SPEC.md)).
 
 ## Reviewing a plan before it runs
 

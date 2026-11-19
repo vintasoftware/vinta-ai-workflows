@@ -1156,30 +1156,35 @@ export class RunEffectExecutor implements EffectExecutor {
     for (const gateId of this.#waveGateIds(wave, members, conflicted)) {
       const gate = this.#workflow.gates[gateId]
       if (gate === undefined || isJudgeGate(gate)) continue
-      const logPath = this.#options.journal.gateLogPath(
-        this.#options.runId,
-        WAVE_GATE_NODE,
-        `wave-${wave}-${gateId}`,
-      )
+      const logName = `wave-${wave}-${gateId}`
+      const logPath = this.#options.journal.runLogPath(this.#options.runId, WAVE_GATE_NODE, logName)
       // The longest silent stretch of an `integrate` step: a full suite on the
       // merged tree, with no agent and nothing else to show for minutes.
       const step = { step: 'wave_gate', wave, gate: gateId, log: logPath } as const
       this.#step(nodeId, { ...step, state: 'started' })
-      const run = (chosen: CommandGate) =>
+      const runAt = (log: string) => (chosen: CommandGate) =>
         executeGate({
           gateId,
           gate: chosen,
           cwd: this.#options.integrationPath,
           env: this.#options.integrationEnv ?? {},
-          logPath,
+          logPath: log,
         })
       const freshness = this.#options.integrationFreshness
-      const result = await (
-        freshness === undefined ? run(gate) : freshness.run(gateId, gate, this.#options.integrationPath, run)
-      ).catch((error: unknown) => {
-        this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
-        throw error
-      })
+      const once = (log: string) =>
+        freshness === undefined
+          ? runAt(log)(gate)
+          : freshness.run(gateId, gate, this.#options.integrationPath, runAt(log))
+      const result = await once(logPath)
+        .then((first) =>
+          this.#triaged(nodeId, gateId, first, () =>
+            once(this.#options.journal.runLogPath(this.#options.runId, WAVE_GATE_NODE, logName)),
+          ),
+        )
+        .catch((error: unknown) => {
+          this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
+          throw error
+        })
       this.#step(nodeId, { ...step, state: 'finished', outcome: result.status === 'passed' ? 'ok' : 'failed' })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
       this.#options.journal.append({
@@ -1198,9 +1203,40 @@ export class RunEffectExecutor implements EffectExecutor {
       // First red stops the wave, for `run_gate`'s reason: the merge fails on
       // this gate whatever the rest say, and they are full suites.
       if (exitCode !== 0) {
-        throw new WaveGateError(wave, gateId, exitCode, logPath, gate.fresh_cmd === undefined && (await looksStale(logPath)))
+        const red = result.logPath
+        throw new WaveGateError(wave, gateId, exitCode, red, gate.fresh_cmd === undefined && (await looksStale(red)))
       }
     }
+  }
+
+  /**
+   * §17.5 for a gate on a merged tree: a red result the classifier calls flaky
+   * or environmental is run again, up to `gate_triage.max_reruns`, before it
+   * fails a wave or a base. Returns the last result, whose log is its own.
+   *
+   * It ran for a phase's own gates only. One observed run had the same kind of
+   * flake fail a base gate, fail the attempt, and need an operator to forget
+   * the cached verdict by hand, while the phase gate beside it was rerun and
+   * passed. A timeout is not triaged here, as it is not for a phase's gate.
+   */
+  async #triaged(
+    nodeId: string,
+    gateId: string,
+    first: GateResult,
+    rerun: () => Promise<GateResult>,
+  ): Promise<GateResult> {
+    const config = this.#options.systemOne?.judges.gate_triage
+    const adapter = this.#options.systemOne?.adapter
+    if (first.status !== 'failed' || config === undefined || adapter === undefined) return first
+    let result = first
+    for (let attempt = 0; attempt < config.max_reruns; attempt += 1) {
+      const sorted = await triageGateFailure({ config, adapter, logPath: result.logPath })
+      this.#judged(nodeId, 'gate_triage', gateId, sorted.judgement)
+      if (!sorted.rerun) break
+      result = await rerun()
+      if (result.status !== 'failed') break
+    }
+    return result
   }
 
   /**
@@ -1234,31 +1270,43 @@ export class RunEffectExecutor implements EffectExecutor {
     for (const gateId of ids) {
       const gate = this.#workflow.gates[gateId]
       if (gate === undefined || isJudgeGate(gate)) continue
-      const logPath = this.#options.journal.gateLogPath(this.#options.runId, WAVE_GATE_NODE, `base-${nodeId}-${gateId}`)
+      const logName = `base-${nodeId}-${gateId}`
+      const logPath = this.#options.journal.runLogPath(this.#options.runId, WAVE_GATE_NODE, logName)
       const step = { step: 'base_gate', branch: base.branch, gate: gateId, log: logPath } as const
       this.#step(nodeId, { ...step, state: 'started' })
-      const run = async (chosen: CommandGate) => {
+      // `'red'` replays only a green verdict; a triage rerun asks again
+      // whatever the cache holds, and its verdict replaces the entry.
+      const runAt = (log: string, fresh: boolean | 'red') => async (chosen: CommandGate) => {
         const ran = await this.#gate(gateId, integration, {
           gateId,
           gate: chosen,
           cwd: integration.path,
           env: integration.env,
-          logPath,
-        }, 'red')
+          logPath: log,
+        }, fresh)
         return { ...ran.result, cached: ran.cached }
       }
       const freshness = this.#options.integrationFreshness
-      const result = await (
-        freshness === undefined ? run(gate) : freshness.run(gateId, gate, integration.path, run)
-      ).catch((error: unknown) => {
-        this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
-        throw error
-      })
+      const once = (log: string, fresh: boolean | 'red') =>
+        freshness === undefined
+          ? runAt(log, fresh)(gate)
+          : freshness.run(gateId, gate, integration.path, runAt(log, fresh))
+      const result = await once(logPath, 'red')
+        .then((first) =>
+          this.#triaged(nodeId, gateId, first, () =>
+            once(this.#options.journal.runLogPath(this.#options.runId, WAVE_GATE_NODE, logName), true),
+          ),
+        )
+        .catch((error: unknown) => {
+          this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
+          throw error
+        })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
       this.#step(nodeId, { ...step, state: 'finished', outcome: exitCode === 0 ? 'ok' : 'failed' })
       if (exitCode !== 0) {
-        const stale = gate.fresh_cmd === undefined && (await looksStale(logPath))
-        throw new BaseGateError(nodeId, base.branch, gateId, exitCode, logPath, stale)
+        const red = result.logPath
+        const stale = gate.fresh_cmd === undefined && (await looksStale(red))
+        throw new BaseGateError(nodeId, base.branch, gateId, exitCode, red, stale)
       }
     }
   }

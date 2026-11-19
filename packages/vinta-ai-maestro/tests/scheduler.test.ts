@@ -47,8 +47,6 @@ import { verdictFollowUp } from '../src/prompts/index.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import {
-  AGENT_ANSWER_FLOOR_MS,
-  agentAnswerAfter,
   createScheduler,
   ReassignRefused,
   StepRefused,
@@ -235,6 +233,7 @@ interface Rig {
   readonly scheduler: Scheduler
   readonly pools: ResourcePools
   readonly journal: Journal
+  readonly admission: AdmissionControl
   readonly adapter: MockAdapter
   /** The second harness, when the rig was asked for one. */
   readonly codex: MockAdapter | null
@@ -303,7 +302,6 @@ function rig(
     /** `EffectExecutor.waveInputs`: what the wave a node completes is built from. */
     readonly waveInputs?: (nodeId: string) => { readonly key: string; readonly label: string } | null
   readonly retryAfterMs?: number
-    readonly agentAnswerAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
     /** Told when a session's stream drains, with its turn id. */
@@ -405,7 +403,6 @@ function rig(
     ...(options.onFailure === null ? {} : { onFailure: options.onFailure ?? 'stop' }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
     ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs, clock }),
-    ...(options.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: options.agentAnswerAfterMs, clock }),
   })
 
   cleanups.push(() => {
@@ -418,6 +415,7 @@ function rig(
     scheduler,
     pools,
     journal,
+    admission,
     adapter,
     calls: executor.calls,
     codex,
@@ -912,6 +910,48 @@ describe('capacity', () => {
     // Two spawns: the turn the window closed under, and the one after the wait.
     expect(r.adapter.spawned).toHaveLength(2)
     expectDrained(r)
+  })
+
+  /**
+   * A phase dispatched into a parked harness recycled a lane, cut a branch and
+   * built a base, only to be refused at its first spawn. One observed run
+   * dispatched a phase two minutes into a plan limit announced for an hour
+   * later. It stays pending until the reset.
+   */
+  it('does not dispatch a phase into a parked harness, and dispatches it at the reset', async () => {
+    const r = rig(
+      makeWorkflow([node('a'), node('c', [], { harness: CODEX }), node('b', ['c'])], { lanes: 3 }),
+      { spawns: ['quota'], codex: {} },
+    )
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['c'] === 'done', 'the codex phase')
+    await flush()
+
+    expect(r.scheduler.statuses['a']).toBe('waiting_on_capacity')
+    // Ready, and held: never running, so no lane, no branch, no spawn.
+    expect(r.scheduler.statuses['b']).toBe('pending')
+    expect(
+      r.journal.events('run-1').filter((event) => event.type === 'node_status' && event.nodeId === 'b'),
+    ).toEqual([])
+
+    await r.advance(5_000)
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    expectDrained(r)
+  })
+
+  /** The wait was journalled twice in a row, by admission and again by the scheduler. */
+  it('journals a capacity wait once', async () => {
+    const r = rig(makeWorkflow([node('a')], { lanes: 1 }), { spawns: ['quota'] })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'waiting_on_capacity', 'the refusal')
+    await r.advance(5_000)
+    await running
+
+    const statuses = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_status' && event.nodeId === 'a')
+      .map((event) => (event.payload as { status: string }).status)
+    expect(statuses.filter((status) => status === 'waiting_on_capacity')).toHaveLength(1)
   })
 
   /**
@@ -2032,6 +2072,44 @@ describe('a review that leaves the lane dirty', () => {
     expect(execFileSync('git', ['show', `${payload.ref}:tracked.txt`], { cwd: path, encoding: 'utf8' })).toBe(
       'mutated by the reviewer\n',
     )
+    // Only what the review left: never the scratch index the rescue was made with.
+    const files = execFileSync('git', ['show', '--name-only', '--format=', payload.ref], { cwd: path, encoding: 'utf8' })
+    expect(files.trim().split('\n').sort()).toEqual(['0005_experiment.py', 'tracked.txt'])
+  })
+
+  /**
+   * A review fixed a bug in four files and left the fix uncommitted; it was set
+   * aside, the phase moved lanes, and the next review redid the work from
+   * scratch. Every later turn of the phase is told where the edits are.
+   */
+  it('tells every later turn of the phase where the set-aside edits are', async () => {
+    const r = rig(reviewedWorkflow(['review', 'deslop']), {
+      outcomes: APPROVED,
+      tap: (call) => {
+        if (call.effect !== 'e-review:review') return
+        for (const lane of ['run-1-lane-1', 'run-1-lane-2']) writeFileSync(join(r.laneRoot, lane, 'tracked.txt'), 'pageKey\n')
+      },
+    })
+    for (const lane of ['run-1-lane-1', 'run-1-lane-2']) {
+      const path = join(r.laneRoot, lane)
+      mkdirSync(path, { recursive: true })
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: path, stdio: 'pipe' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 'fixture@example.invalid')
+      git('config', 'user.name', 'fixture')
+      git('config', 'commit.gpgsign', 'false')
+      writeFileSync(join(path, 'tracked.txt'), 'pageIndex\n')
+      writeFileSync(join(path, 'plan.md'), '## a\n\nAdd invoices.\n')
+      git('add', '.')
+      git('commit', '-q', '-m', 'base')
+    }
+
+    await r.scheduler.run()
+
+    const ref = (r.journal.events('run-1').find((event) => event.type === 'review_left_lane_dirty')?.payload as { ref: string }).ref
+    const after = r.adapter.spawned.at(-1)?.prompt ?? ''
+    expect(after).toContain('## Work set aside from this phase')
+    expect(after).toContain(`- ${ref} — left by the review chore: tracked.txt`)
   })
 })
 
@@ -2700,12 +2778,11 @@ describe('§16 the review', () => {
   })
 
   /**
-   * The one chore a capacity refusal does not skip. Skipping is right for a
-   * polish pass, which a phase can merge without; skipping a review merges a
-   * phase nobody reviewed. So the refusal re-drives the node, as it would for
-   * any other turn the phase needs.
+   * A review the harness had no capacity for is never skipped — that merges a
+   * phase nobody reviewed — and no longer re-drives the finished phase either:
+   * it waits in place and runs when the harness answers.
    */
-  it('re-drives the phase rather than skip a review the harness had no capacity for', async () => {
+  it('waits in place for a review the harness had no capacity for, re-running nothing', async () => {
     const r = rig(reviewedWorkflow(), {
       outcomes: APPROVED,
       spawns: ['ok', 'rate_limit'],
@@ -2717,7 +2794,7 @@ describe('§16 the review', () => {
     const report = await running
 
     expect(report.statuses).toEqual({ a: 'done' })
-    expect(countOf(r, 'e-implement')).toBe(2)
+    expect(countOf(r, 'e-implement')).toBe(1)
     expect(choresOf(r, 'a')).toEqual([
       { chore: 'review', status: 'ran', duration_ms: expect.any(Number) },
     ])
@@ -3786,6 +3863,34 @@ describe('session slots', () => {
     expectDrained(r)
   })
 
+  /**
+   * Turns are a guess at size; the harness says the size. A session past the
+   * cap starts over with the whole brief, and so does one the harness
+   * compacted, however small it is now.
+   */
+  it('starts fresh once the session’s context passes its cap, or the harness compacted it', async () => {
+    const said = (extra: MockScript['events'][number]): MockScript => ({
+      events: [{ type: 'assistant_text', text: 'done' }, extra],
+      result: 'ok',
+    })
+    const capped = WorkflowSchema.parse({
+      ...makeWorkflow([node('a', [], { pipeline: 'reuse' })]),
+      defaults: { harness: HARNESS, model: 'opus', pipeline: 'reuse', max_session_context_tokens: 100_000 },
+    })
+
+    const big = rig(capped, { scripts: [said({ type: 'usage', input: 1, output: 1, context: 100_000 })] })
+    await big.scheduler.run()
+    expect((sessionsOf(big, 'a') as { reason?: string }[]).map((row) => row.reason)).toEqual(['no_prior_session', 'context_ceiling'])
+
+    const small = rig(capped, { scripts: [said({ type: 'usage', input: 1, output: 1, context: 99_999 })] })
+    await small.scheduler.run()
+    expect(sessionsOf(small, 'a')[1]).toMatchObject({ disposition: 'reused' })
+
+    const compacted = rig(capped, { scripts: [said({ type: 'context_compacted', trigger: 'auto' })] })
+    await compacted.scheduler.run()
+    expect((sessionsOf(compacted, 'a') as { reason?: string }[]).map((row) => row.reason)).toEqual(['no_prior_session', 'compacted'])
+  })
+
   it('forgets its sessions when a capacity refusal re-drives the node', async () => {
     // The lane usually comes back with the same *name* — the free list hands
     // back what was just released — and is then recycled, so the worktree the
@@ -4126,22 +4231,31 @@ describe('chores', () => {
     expectDrained(r)
   })
 
-  it('skips a chore the harness had no capacity for, rather than re-driving the phase', async () => {
+  /**
+   * One observed run skipped a deslop pass and a review canvas because the
+   * plan's window had closed, and opened the PRs without them; the implement
+   * turn in the same place waits. So the chore waits, in place, and runs.
+   */
+  it('waits for a chore the harness had no capacity for and runs it, re-driving nothing', async () => {
     const r = rig(
       makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop'] })], {
         chores: CHORE_SET,
       }),
       { spawns: ['ok', 'rate_limit'] },
     )
-    const report = await r.scheduler.run()
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'waiting_on_capacity', 'the refusal')
+    // The lane is the phase's still: nothing was released to wait.
+    expect(r.pools.held('lane')).toBe(1)
+    await r.advance(5_000)
+    const report = await running
 
     expect(report.statuses).toEqual({ a: 'done' })
     expect(choresOf(r, 'a')).toEqual([
-      { chore: 'deslop', status: 'skipped', duration_ms: expect.any(Number) },
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
     ])
-    // The implementer ran once and was never asked to do it again: a capacity
-    // refusal on a chore must not throw away a finished phase.
-    expect(r.adapter.spawned).toHaveLength(1)
+    // The implementer once, then the chore once it was let in.
+    expect(r.adapter.spawned).toHaveLength(2)
     expectDrained(r)
   })
 
@@ -5975,44 +6089,25 @@ describe('an agent that stops to ask', () => {
     expectDrained(r)
   })
 
-  it('answers itself with the recommended options under --retry-after, on the record as unattended', async () => {
+  /**
+   * An observed run took the first option on a product question its spec left
+   * open for the project lead, sixty seconds after it was asked. No timer
+   * answers an agent: the question is the coordinator's or a person's.
+   */
+  it('is never answered by a timer, however long it waits under --retry-after', async () => {
     const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], retryAfterMs: 60_000 })
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
 
-    // A design question waits longer than a retry: twice the interval, never
-    // under thirty minutes.
-    await r.advance(60_000)
+    await r.advance(24 * 60 * 60_000)
     expect(r.scheduler.statuses['a']).toBe('awaiting_human')
-    await r.advance(AGENT_ANSWER_FLOOR_MS - 60_000)
-    const report = await running
+    expect(answersOf_(r)).toEqual([])
 
-    expect(report.statuses).toEqual({ a: 'done' })
-    expect(answersOf_(r)).toEqual([
-      { effect_id: 'agent-question:a:1', answer: '[{"selected":[0]}]', unattended: true },
-    ])
-    expect(r.adapter.spawned[1]?.prompt).toMatch(/^Nobody answered your questions/)
-    expect(r.adapter.spawned[1]?.prompt).toContain('Answer: Existing table (Recommended)')
-  })
-
-  it('derives the agent-question wait from --retry-after, longer and never under thirty minutes', () => {
-    expect(agentAnswerAfter(undefined, undefined)).toBeUndefined()
-    expect(agentAnswerAfter(60_000, undefined)).toBe(AGENT_ANSWER_FLOOR_MS)
-    expect(agentAnswerAfter(3_600_000, undefined)).toBe(7_200_000)
-    expect(agentAnswerAfter(60_000, 120_000)).toBe(120_000)
-    expect(agentAnswerAfter(undefined, 120_000)).toBe(120_000)
-  })
-
-  it('waits --agent-answer-after on an agent question, without --retry-after', async () => {
-    const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], agentAnswerAfterMs: 5 * 60_000 })
-    const running = r.scheduler.run()
-    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
-    await r.advance(5 * 60_000 - 1)
-    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
-    await r.advance(1)
+    // The coordinator may answer it.
+    r.scheduler.answer('a', { human: { answer: JSON.stringify([{ selected: [0] }]) } }, 'coordinator', 'the plan says so')
     expect((await running).statuses).toEqual({ a: 'done' })
     expect(answersOf_(r)).toEqual([
-      { effect_id: 'agent-question:a:1', answer: '[{"selected":[0]}]', unattended: true },
+      expect.objectContaining({ effect_id: 'agent-question:a:1', by: 'coordinator' }),
     ])
   })
 
@@ -6098,15 +6193,15 @@ describe('a phase’s decisions', () => {
     expectDrained(r)
   })
 
-  it('marks an answer the run gave itself as unattended', async () => {
+  it('marks an answer the coordinator gave as the coordinator’s', async () => {
     const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], retryAfterMs: 60_000 })
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
-    await r.advance(AGENT_ANSWER_FLOOR_MS)
+    r.scheduler.answer('a', { human: { answer: JSON.stringify([{ selected: [0] }]) } }, 'coordinator', 'settled by the plan')
     await running
 
     expect(keptOf(r)).toEqual([
-      expect.objectContaining({ kind: 'answer', by: 'unattended', text: expect.stringContaining('Existing table') }),
+      expect.objectContaining({ kind: 'answer', by: 'coordinator', text: expect.stringContaining('Existing table') }),
     ])
   })
 
@@ -6462,6 +6557,31 @@ describe('a wave that cannot be assembled', () => {
     expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(1)
     expect(r.calls.filter((call) => call.nodeId === 'a' && call.effect === 'e-gate')).toHaveLength(1)
     expectDrained(r)
+  })
+
+  /**
+   * One observed wave retry fired sixty seconds into a plan limit the run had
+   * been told of, was refused before it did anything, and still counted
+   * against its unchanged inputs. It waits for the reset.
+   */
+  it('holds the unattended retry until a plan limit resets', async () => {
+    const { r, merges } = waveRig(1, { retryAfterMs: 60_000 })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    // The plan's window closes, announced to reset in an hour.
+    r.admission.refusedMidTurn(HARNESS, 'b', {
+      kind: 'quota',
+      reason: 'plan-limit-reached',
+      retryAfter: new Date(60 * 60_000),
+    })
+
+    await r.advance(10 * 60_000)
+    expect(merges()).toBe(1)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+
+    await r.advance(60 * 60_000)
+    await until(() => merges() === 2, 'the retry after the reset')
+    expect((await running).statuses).toMatchObject({ a: 'done' })
   })
 
   it('lets the phase finish without its wave on skip', async () => {

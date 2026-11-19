@@ -37,6 +37,7 @@ import Database from 'better-sqlite3'
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -44,7 +45,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { type Decision, parseDecision } from '../decisions/index.ts'
 import { computeWaves } from '../graph.ts'
 import type { Workflow } from '../types.ts'
@@ -448,6 +449,14 @@ export class Journal {
     return row.id ?? 0
   }
 
+  /** One node's status as journalled, or undefined for a node the run does not have. */
+  nodeStatus(runId: string, nodeId: string): NodeStatus | undefined {
+    const row = this.db
+      .prepare('SELECT status FROM nodes WHERE run_id = ? AND node_id = ?')
+      .get(runId, nodeId) as { status: NodeStatus } | undefined
+    return row?.status
+  }
+
   nodes(runId: string): NodeRow[] {
     return this.db
       .prepare('SELECT * FROM nodes WHERE run_id = ? ORDER BY node_id')
@@ -591,6 +600,30 @@ export class Journal {
     const dir = join(this.nodeDir(runId, nodeId), 'gates')
     mkdirSync(dir, { recursive: true })
     return join(dir, `${gateId}.log`)
+  }
+
+  /**
+   * A log of its own for one run of a gate: `<name>.<n>.log` beside
+   * `gateLogPath`'s, `n` the first number no earlier run took.
+   *
+   * For the integration worktree's gates — a merge's `verify`, a wave's
+   * gates, a base's — whose failures are cited by path in an error, a
+   * question and the journal. One fixed name per gate meant the next run
+   * overwrote the failure being cited: one observed run's three
+   * `wave_failed` messages pointed at logs that by morning held the passing
+   * runs, and the flaky failure that blocked a base was gone the same way.
+   */
+  runLogPath(runId: string, nodeId: string, name: string): string {
+    const dir = dirname(this.gateLogPath(runId, nodeId, name))
+    for (let n = 1; ; n += 1) {
+      const path = join(dir, `${name}.${n}.log`)
+      if (!existsSync(path)) {
+        // Claimed now, so a second run started before this one writes is
+        // handed the next number rather than the same file.
+        writeFileSync(path, '', { flag: 'wx' })
+        return path
+      }
+    }
   }
 
   /**

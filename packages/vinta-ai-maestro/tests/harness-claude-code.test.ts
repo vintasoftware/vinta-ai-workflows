@@ -1142,6 +1142,32 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     const result = (fields: Record<string, unknown> = {}): string =>
       JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, ...fields })
 
+    /**
+     * The turn's `result` sums every call's usage; the session's size is the
+     * last main-thread call's prompt plus its output (§15.5). A sub-agent's
+     * call is its own context and does not count.
+     */
+    it('reports the session’s context from the last main-thread call, not the turn’s sum', async () => {
+      const call = (input: number, read: number, write: number, output: number, parent: string | null = null): string =>
+        JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: parent,
+          message: {
+            content: [{ type: 'text', text: 'working' }],
+            usage: { input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: output },
+          },
+        })
+      const seen = await spawnFake([
+        INIT,
+        call(10, 1_000, 200, 50),
+        call(5, 1_250, 40, 70),
+        call(9, 90_000, 0, 9, 'toolu_sub'),
+        result({ num_turns: 2, usage: { input_tokens: 15, output_tokens: 120 }, total_cost_usd: 0.01 }),
+      ])
+
+      expect(seen.find((event) => event.type === 'usage')).toMatchObject({ context: 5 + 1_250 + 40 + 70 })
+    })
+
     it('stays open until the work reports and the woken turn ends', async () => {
       const seen = await spawnFake([
         INIT,

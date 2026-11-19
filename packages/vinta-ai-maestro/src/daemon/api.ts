@@ -429,7 +429,11 @@ export function createApi(options: ApiOptions): Hono {
       throw error
     }
     const status = c.res.status
-    const fields = { method, path, status, ms: Date.now() - started }
+    // A refusal's own code (`holder_not_running`, `turn_ended`, …), which is
+    // an identifier like the path. The status alone left eight 409s on
+    // `POST /gates` in one run's log that nobody could explain afterwards.
+    const error = status >= 400 ? await refusalCode(c.res) : undefined
+    const fields = { method, path, status, ms: Date.now() - started, ...(error === undefined ? {} : { error }) }
     // A refusal is the interesting one and is kept at the default level; an
     // ordinary 200 is `debug`, because a UI polling four endpoints a second
     // would otherwise be the entire file.
@@ -2682,6 +2686,16 @@ function refusalOf(error: unknown): { readonly code: string; readonly message: s
   }
   if (error instanceof StepRefused) return { code: 'step_refused', message: error.message }
   return null
+}
+
+/** The `error` code of a refusal's JSON body, or undefined when it has none. */
+async function refusalCode(response: Response): Promise<string | undefined> {
+  try {
+    const body = (await response.clone().json()) as { error?: unknown } | null
+    return typeof body?.error === 'string' ? body.error : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function fail(
