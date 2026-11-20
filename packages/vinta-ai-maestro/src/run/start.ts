@@ -101,8 +101,6 @@ export interface StartRunOptions {
    * Absent waits for a person, which is what every run did before the flag.
    */
   readonly retryAfterMs?: number
-  /** Milliseconds an unanswered *agent* question waits (`agentAnswerAfter`). */
-  readonly agentAnswerAfterMs?: number
   /**
    * Pick up a run the journal already holds instead of creating one.
    *
@@ -490,7 +488,6 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
     ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
-    ...(options.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: options.agentAnswerAfterMs }),
     ...(options.coordinatorAuthority === undefined ? {} : { coordinatorAuthority: options.coordinatorAuthority }),
     // A conflict fixer is spawned outside the scheduler, and moves with it.
     onHarnessSwitched: (from, to, model) => {
@@ -526,6 +523,8 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   // A merge commit git refused is the operator's call, asked on the node whose
   // merge it is; `abort` is answered for them under `--retry-after`.
   host.bindCommitDecision?.((failure) => scheduler.decideCommit(failure))
+  // A conflict fixer spawns outside admission, and asks it first.
+  host.bindCapacity?.((harness) => admission.parked(harness))
 
   // §9's amend needs two things this composition owns: the integration worktree
   // a `done` node's branch is moved in, and the live scheduler that hands an

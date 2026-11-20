@@ -103,9 +103,6 @@ export interface RunPolicy {
   readonly retries?: number
   readonly retryAfter?: string
   readonly retryAfterMs?: number
-  /** `--agent-answer-after`: the unattended wait on an agent's own question. */
-  readonly agentAnswerAfter?: string
-  readonly agentAnswerAfterMs?: number
   readonly intervene: boolean
   /** `--harness-profile`, resolved from the operator's profiles file. */
   readonly harnessProfiles: readonly HarnessProfile[]
@@ -166,8 +163,12 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
 
   const retryAfterMs = toRetryAfterMs(values['retry-after'], io)
   if (retryAfterMs === null) return null
-  const agentAnswerAfterMs = toRetryAfterMs(values['agent-answer-after'], io, '--agent-answer-after')
-  if (agentAnswerAfterMs === null) return null
+  if (values['agent-answer-after'] !== undefined) {
+    io.err(
+      'vinta-ai-maestro: --agent-answer-after is ignored: an agent\u2019s question waits for you or the run ' +
+        'coordinator, never for a timer',
+    )
+  }
 
   // Rejected rather than defaulted, like `--permission`: a typo that became
   // `standard` would look like it worked until the coordinator was refused.
@@ -203,8 +204,6 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
     ...(retries === undefined ? {} : { retries }),
     ...(values['retry-after'] === undefined ? {} : { retryAfter: values['retry-after'] }),
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-    ...(values['agent-answer-after'] === undefined ? {} : { agentAnswerAfter: values['agent-answer-after'] }),
-    ...(agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs }),
     // `--no-intervene` is the flag's name from before the monitor became the
     // coordinator, and still works.
     intervene: values['no-intervene'] !== true && values['no-coordinator'] !== true,
@@ -240,6 +239,7 @@ const StoredPolicySchema = z.object({
   'on-failure': z.string().optional(),
   retries: z.string().optional(),
   'retry-after': z.string().optional(),
+  /** Retired: read so a policy saved before it was still loads, and never written. */
   'agent-answer-after': z.string().optional(),
   'coordinator-authority': z.string().optional(),
   'no-coordinator': z.boolean().optional(),
@@ -260,7 +260,6 @@ export function writeStoredPolicy(repoPath: string, runId: string, policy: RunPo
     ...(policy.onFailure === undefined ? {} : { 'on-failure': policy.onFailure }),
     ...(policy.retries === undefined ? {} : { retries: String(policy.retries) }),
     ...(policy.retryAfter === undefined ? {} : { 'retry-after': policy.retryAfter }),
-    ...(policy.agentAnswerAfter === undefined ? {} : { 'agent-answer-after': policy.agentAnswerAfter }),
     ...(policy.coordinatorAuthority === undefined ? {} : { 'coordinator-authority': policy.coordinatorAuthority }),
     ...(policy.intervene ? {} : { 'no-coordinator': true }),
     ...(bind.host === undefined ? {} : { host: bind.host }),
@@ -336,7 +335,6 @@ export function jobArgs(
   if (policy.onFailure !== undefined) args.push('--on-failure', policy.onFailure)
   if (policy.retries !== undefined) args.push('--retries', String(policy.retries))
   if (policy.retryAfter !== undefined) args.push('--retry-after', policy.retryAfter)
-  if (policy.agentAnswerAfter !== undefined) args.push('--agent-answer-after', policy.agentAnswerAfter)
   if (!policy.intervene) args.push('--no-coordinator')
   for (const profile of policy.harnessProfiles) args.push('--harness-profile', profile.name)
   if (policy.coordinatorAuthority !== undefined) args.push('--coordinator-authority', policy.coordinatorAuthority)

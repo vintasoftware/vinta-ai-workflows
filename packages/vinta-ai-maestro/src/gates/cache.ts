@@ -274,6 +274,24 @@ export class GateCache {
     return info.changes
   }
 
+  /**
+   * The tree `gateId`'s most recently stored red verdict is for, when one is
+   * cached: what `gate-cache invalidate` forgets when it is given no tree.
+   *
+   * The verdict being doubted is a red one, and nearly always the last. With
+   * no tree named the command used to forget the gate on every tree: one
+   * operator after one stale typecheck lost 28 verdicts across every lane,
+   * and each lane ran the gate again to say what it had already said.
+   */
+  lastFailedTree(gateId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT tree_hash FROM gate_results WHERE gate_id = ? AND status != 'passed' ORDER BY cached_at DESC LIMIT 1",
+      )
+      .get(gateId) as { tree_hash: string } | undefined
+    return row?.tree_hash
+  }
+
   close(): void {
     this.db.close()
   }

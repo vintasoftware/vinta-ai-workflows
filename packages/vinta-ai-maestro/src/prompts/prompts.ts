@@ -262,6 +262,21 @@ export interface SpawnPromptRequest {
    * replaced after a stale token, a retry. Absent is none.
    */
   readonly decisions?: readonly Decision[]
+  /**
+   * Edits from this phase that maestro set aside under a ref rather than let
+   * reach a gate (`review_left_lane_dirty`), oldest first. Rendered on every
+   * form for `decisions`' reason. Absent is none.
+   */
+  readonly setAside?: readonly SetAsideWork[]
+}
+
+/** One set of uncommitted edits kept under a ref. Identifiers only. */
+export interface SetAsideWork {
+  readonly ref: string
+  /** Who left them: a review chore's id, typically. */
+  readonly by: string
+  readonly paths: readonly string[]
+  readonly count: number
 }
 
 /**
@@ -511,6 +526,7 @@ interface Continuation {
   readonly background: BackgroundTerms | null
   /** What was settled for this phase. Host state, so a delta carries it too. */
   readonly decisions: readonly Decision[]
+  readonly setAside: readonly SetAsideWork[]
 }
 
 /** What a cold turn is composed from: the above, plus everything read off disk. */
@@ -544,6 +560,7 @@ function resume(request: SpawnPromptRequest, workspace: string): Continuation {
         ? (BACKGROUND_TERMS[request.harness ?? ''] ?? GENERIC_TERMS)
         : null,
     decisions: request.decisions ?? [],
+    setAside: request.setAside ?? [],
   }
 }
 
@@ -807,6 +824,7 @@ function renderImplementer(materials: Materials): string {
     `## Your tasks (${node.id} only)`,
     materials.brief,
     ...settled(materials),
+    ...setAsideWork(materials),
     '',
     '## Working instructions',
     '1. Read the code paths your changes touch before you write anything.',
@@ -1512,6 +1530,7 @@ function renderFixer(materials: Materials): string {
     '## The phase this branch is implementing',
     materials.brief,
     ...settled(materials),
+    ...setAsideWork(materials),
     ...fixerProtocol(),
     '',
     '## Verify',
@@ -1982,6 +2001,7 @@ function renderChore(materials: Materials, chore: ChoreMaterials): string {
     '',
     materials.brief,
     ...settled(materials),
+    ...setAsideWork(materials),
     ...choreTail(materials, chore),
   ])
 }
@@ -2006,6 +2026,7 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
     '## The chore',
     chore.instruction,
     ...settled(materials),
+    ...setAsideWork(materials),
     ...choreTail(materials, chore),
   ])
 }
@@ -2045,6 +2066,7 @@ function renderFixerContinuation(materials: Continuation): string {
     '## What came back',
     ...failure(materials),
     ...settled(materials),
+    ...setAsideWork(materials),
     ...fixerProtocol(),
     '',
     '## Verify',
@@ -2083,6 +2105,7 @@ function renderImplementerContinuation(materials: Continuation): string {
     'redoing it — re-implementing what is already committed is the one failure this',
     'message exists to prevent.',
     ...settled(materials),
+    ...setAsideWork(materials),
     '',
     '## What is left',
     'Finish the working instructions you were given, in the order you were given',
@@ -2163,6 +2186,47 @@ function settled(materials: Continuation): string[] {
       const [first, ...rest] = entry.text.split('\n')
       const label = DECIDED[`${entry.kind}:${entry.by}`] ?? `${entry.kind} (${entry.by})`
       return [`- ${label}: ${first}`, ...rest.map((line) => `  ${line}`)]
+    }),
+  ]
+}
+
+/** The most set-aside refs a prompt lists: the newest. */
+const SET_ASIDE_SHOWN = 3
+/** The most paths listed per ref. */
+const SET_ASIDE_PATHS = 8
+
+/**
+ * Edits from this phase that are on no branch, and where they are.
+ *
+ * A review chore that leaves files uncommitted has them set aside, so the
+ * gates judge what was committed. They used to be mentioned nowhere a later
+ * turn would read: one observed phase moved lanes after its review had fixed
+ * a `pageIndex` to `pageKey` bug in four files, never committed, and the next
+ * review redid round one from scratch on the other lane — eighteen minutes —
+ * and the fix never landed. Refs are the repository's, so they reach every
+ * lane the phase moves to. Nothing replays them: what a review leaves behind
+ * is as often an experiment as a fix, which is why it is set aside at all.
+ */
+function setAsideWork(materials: Continuation): string[] {
+  if (materials.setAside.length === 0) return []
+  const shown = materials.setAside.slice(-SET_ASIDE_SHOWN)
+  const omitted = materials.setAside.length - shown.length
+  return [
+    '',
+    '## Work set aside from this phase',
+    'Earlier in this phase, uncommitted edits were taken out of the worktree and kept',
+    'under a ref, so the gates judged only committed work. They are on no branch. Read',
+    'each before redoing work it may already hold: `git diff <ref>^ <ref>` shows it. Take',
+    'back what you still want with `git diff <ref>^ <ref> -- <path> | git apply --3way`,',
+    'then commit it. Leave the rest.',
+    ...(omitted === 0 ? [] : [`(${omitted} older sets are not listed here.)`]),
+    ...shown.map((entry) => {
+      const paths = entry.paths.slice(0, SET_ASIDE_PATHS)
+      const more = entry.count - paths.length
+      return (
+        `- ${entry.ref} — left by ${entry.by}: ${paths.join(', ')}` +
+        `${more > 0 ? ` and ${more} more` : ''}`
+      )
     }),
   ]
 }

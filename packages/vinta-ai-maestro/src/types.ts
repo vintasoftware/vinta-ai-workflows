@@ -1188,6 +1188,17 @@ export const DefaultsSchema = z.strictObject({
         'A shared session only ever grows; without a ceiling a long node eventually dies on a ' +
         'context-window error that reads as a broken harness.',
     ),
+  max_session_context_tokens: z
+    .number()
+    .int()
+    .min(1)
+    .default(300_000)
+    .describe(
+      'How large, in tokens, a reused session\u2019s context may grow before the next turn on it ' +
+        'starts fresh with the full brief (§15.5). Sessions carry across phases on one crew member, ' +
+        'and a session left to grow is re-read in full by every turn and eventually compacted. ' +
+        'Measured from the last model call of each turn where the harness reports it.',
+    ),
 })
 
 export const WorkflowSchema = z

@@ -563,6 +563,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
+        },
+        "max_session_context_tokens": {
+          "default": 300000,
+          "description": "How large, in tokens, a reused session’s context may grow before the next turn on it starts fresh with the full brief (§15.5). Sessions carry across phases on one crew member, and a session left to grow is re-read in full by every turn and eventually compacted. Measured from the last model call of each turn where the harness reports it.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "required": [

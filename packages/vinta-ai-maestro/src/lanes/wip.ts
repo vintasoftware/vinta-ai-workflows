@@ -26,9 +26,16 @@ export async function uncommittedPaths(cwd: string): Promise<string[]> {
     .map((line) => line.slice(3))
 }
 
-/** Commits the worktree's state on top of `HEAD` under `ref`. Throws when git does. */
+/**
+ * Commits the worktree's state on top of `HEAD` under `ref`. Throws when git does.
+ *
+ * The scratch index lives in the worktree's git directory, never in the tree:
+ * it was `.git-wip-index` at the worktree's root, so `add --all` committed
+ * the index file and its lock into every rescue it made.
+ */
 export async function setAsideWork(cwd: string, ref: string, message: string): Promise<string> {
-  const index = join(cwd, '.git-wip-index')
+  const { stdout: gitDir } = await run('git', ['rev-parse', '--absolute-git-dir'], { cwd })
+  const index = join(gitDir.trim(), 'vinta-ai-maestro-wip-index')
   const scratch = { ...process.env, GIT_INDEX_FILE: index }
   try {
     await run('git', ['read-tree', 'HEAD'], { cwd, env: scratch })
@@ -48,6 +55,7 @@ export async function setAsideWork(cwd: string, ref: string, message: string): P
     return commit.trim()
   } finally {
     await rm(index, { force: true })
+    await rm(`${index}.lock`, { force: true })
   }
 }
 

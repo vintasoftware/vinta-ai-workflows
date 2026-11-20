@@ -52,6 +52,16 @@ export interface Attribution {
    * added to fix, one level further down.
    */
   readonly chore?: string
+  /**
+   * The phase whose branch a `conflict-fixer` turn was merging. Absent on
+   * every other role.
+   *
+   * A fix round is written to one transcript, the phase whose turn the merge
+   * is — the one building the wave, or being based — and is usually about
+   * another phase's branch. Without this a reader of that file could not tell:
+   * one phase's digest gave another's fixer as the last thing it had said.
+   */
+  readonly merge?: string
 }
 
 /**

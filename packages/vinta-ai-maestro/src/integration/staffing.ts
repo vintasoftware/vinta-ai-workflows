@@ -34,7 +34,7 @@ import type { ModelFallbacks } from '../harness/fallback.ts'
 import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { CrewMember } from '../types.ts'
-import { createAgentConflictFixer, type ConflictFixer, type ConflictRequest } from './fixer.ts'
+import { type AgentConflictFixerOptions, createAgentConflictFixer, type ConflictFixer, type ConflictRequest } from './fixer.ts'
 
 /** The member a conflict is handed to, resolved from the roster. */
 export interface FixerStaffing {
@@ -150,6 +150,8 @@ export interface CrewConflictFixerOptions {
   readonly record?: (nodeId: string, entry: TranscriptEntry) => void
   /** `defaults.model_fallbacks`, passed straight through. */
   readonly fallbacks?: ModelFallbacks
+  /** `AgentConflictFixerOptions.parked`, passed straight through. */
+  readonly parked?: AgentConflictFixerOptions['parked']
   /** One round's time limit, passed straight through. */
   readonly timeoutMs?: number
 }
@@ -173,6 +175,7 @@ export function createCrewConflictFixer(options: CrewConflictFixerOptions): Conf
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.parked === undefined ? {} : { parked: options.parked }),
     staff: (request: ConflictRequest) => {
       const top = highestTierImplementer(options.crewAssignments(), request.nodes, options.crew)
       if (top === null) return null

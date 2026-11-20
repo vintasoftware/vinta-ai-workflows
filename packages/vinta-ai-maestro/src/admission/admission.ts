@@ -525,6 +525,17 @@ export class AdmissionControl {
     return this.#state(harness).inFlight
   }
 
+  /**
+   * What this harness is parked on and until when, or undefined when it is not
+   * parked. For the spawners outside `admit` — the conflict fixer — and for
+   * what the scheduler holds back while it is (§6.1).
+   */
+  parked(harness: string): { readonly kind: CapacityRefusalKind; readonly wakeAt: number } | undefined {
+    const state = this.#states.get(harness)
+    if (state === undefined || !this.#parked(state)) return undefined
+    return { kind: state.kind, wakeAt: state.wakeAt }
+  }
+
   /** When this harness may be tried again, or undefined if it is not parked. */
   wakeAt(harness: string): number | undefined {
     const state = this.#state(harness)
@@ -570,13 +581,16 @@ export class AdmissionControl {
   /** Journals the node as waiting and hands back the deferred wait. */
   #retry(state: HarnessState, nodeId: string): AdmissionOutcome {
     // `waiting_on_capacity`, not an error: the UI renders it as a wait, and the
-    // run is not failing.
-    this.#options.journal.append({
-      runId: this.#options.runId,
-      nodeId,
-      type: 'node_status',
-      payload: { status: 'waiting_on_capacity' },
-    })
+    // run is not failing. Once: a node already waiting is not news again, and
+    // the scheduler sets the same status as it unwinds.
+    if (this.#options.journal.nodeStatus(this.#options.runId, nodeId) !== 'waiting_on_capacity') {
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        nodeId,
+        type: 'node_status',
+        payload: { status: 'waiting_on_capacity' },
+      })
+    }
     return {
       status: 'retry',
       kind: state.kind,

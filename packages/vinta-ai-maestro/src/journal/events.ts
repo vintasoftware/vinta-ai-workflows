@@ -147,6 +147,13 @@ export type SessionFreshReason =
   | 'no_resume_capability'
   /** The slot hit `defaults.max_session_turns` (§15.5). */
   | 'turn_ceiling'
+  /** The session's context reached `defaults.max_session_context_tokens` (§15.5). */
+  | 'context_ceiling'
+  /**
+   * The harness compacted the session: what it holds is a summary of what it
+   * was told, and a continuation would assume the detail is still there.
+   */
+  | 'compacted'
   /**
    * The last fix round, deliberately handed to an agent that has not seen the
    * work (§15.5). The author already tried and failed; its assumptions are now
@@ -340,7 +347,15 @@ interface RunPayloads {
    */
   gate_cache_invalidated: {
     readonly gate: string
+    /** The tree forgotten: the one named, or the one the gate's last cached failure was on. */
     readonly tree?: string
+    /**
+     * What was asked for: a named `tree`, `all` of them, or — the default —
+     * the `last_failure`'s tree, which with no `tree` means none was cached
+     * and nothing went. Absent on rows from before the default changed, where
+     * no `tree` meant every tree.
+     */
+    readonly scope?: 'tree' | 'all' | 'last_failure'
     readonly removed: number
     /**
      * `--databases`: whether the gate's next integration-worktree run will
@@ -728,14 +743,31 @@ interface NodePayloads {
    * the node read `running` with no agent process, and three phases queued
    * behind one looping fixer looked like a frozen run. `queued` names the
    * holder; `granted` closes the wait. Identifiers only.
+   *
+   * **Or behind a crew member** (`on: 'crew'`). A staffed phase is dispatched
+   * — `running` — before it has anybody to run it, and waits for the member it
+   * was planned for when no one else qualifies. One observed phase read
+   * `running` for thirteen hours with no lane, no agent and no line anywhere:
+   * its only member was held by a finished phase parked on a question.
+   * `member` is who it waits for (null when the plan named nobody and every
+   * qualified member is busy), `holder` the phase that has them. Written again
+   * when either changes; `granted` when the phase is staffed.
    */
-  node_wait: {
-    readonly on: 'integration_worktree'
-    /** `paused`: passed over in the queue because the node is paused, until it is resumed. */
-    readonly state: 'queued' | 'granted' | 'paused'
-    /** The node holding the worktree when this one queued, or null when it was unknown. */
-    readonly holder: string | null
-  }
+  node_wait:
+    | {
+        readonly on: 'integration_worktree'
+        /** `paused`: passed over in the queue because the node is paused, until it is resumed. */
+        readonly state: 'queued' | 'granted' | 'paused'
+        /** The node holding the worktree when this one queued, or null when it was unknown. */
+        readonly holder: string | null
+      }
+    | {
+        readonly on: 'crew'
+        readonly state: 'queued' | 'granted'
+        readonly member: string | null
+        /** The phase holding that member when this one queued, or null when none was found. */
+        readonly holder: string | null
+      }
   /**
    * The pipeline state an attempt at a node entered — `implement`, `gate`,
    * `review`, `integrate` — written as the state's first effect starts.

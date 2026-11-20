@@ -189,6 +189,31 @@ describe('the digest', () => {
     expect(node?.lastWord?.length).toBeLessThanOrEqual(600)
   })
 
+  /**
+   * A fix round is written to the phase building the wave as well as to the
+   * incoming one. The builder's digest gave the fixer of a sibling's merge as
+   * what the phase itself had last said.
+   */
+  it('keeps a conflict fixer’s words apart from the phase’s own, naming the merge', () => {
+    const workflow = workflowOf()
+    const journal = journalWith(workflow)
+    journal.appendTranscript(RUN, 'p0', { type: 'assistant_text', text: 'Phase 0 is implemented.', by: { role: 'implementer' } })
+    journal.appendTranscript(RUN, 'p0', {
+      type: 'assistant_text',
+      text: 'The gate belongs to a phase that is not in this tree.',
+      by: { role: 'conflict-fixer', merge: 'p1' },
+    })
+
+    const digest = runDigest(journal, RUN, workflow)
+    const node = digest?.nodes.find((n) => n.nodeId === 'p0')
+
+    expect(node?.lastWord).toBe('Phase 0 is implemented.')
+    expect(node?.fixerWord).toEqual({ text: 'The gate belongs to a phase that is not in this tree.', merging: 'p1' })
+    const prose = describeRun(digest as NonNullable<typeof digest>)
+    expect(prose).toContain('last said: Phase 0 is implemented.')
+    expect(prose).toContain('conflict fixer last said (not this phase’s agent; a merge of p1 in the integration worktree)')
+  })
+
   it('is nothing at all for a run the journal has never heard of', () => {
     expect(runDigest(journalWith(workflowOf()), 'no-such-run', workflowOf())).toBeNull()
   })

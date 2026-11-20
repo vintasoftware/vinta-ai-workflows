@@ -3025,6 +3025,36 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
   })
 
   /**
+   * A staffed phase is `running` before it has anybody to run it. One waited
+   * thirteen hours for a member a parked phase held, and `status` showed a
+   * running phase with nothing to say about it.
+   */
+  it('says which crew member a running phase waits for, and that its holder is parked', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'staffing')
+    writeJob(dir, { runId: 'staffing', pid: process.pid, url: 'http://127.0.0.1:9', token: 't', state: 'running', startedAt: 0 })
+    const journal = openJournal(dir)
+    const append = (nodeId: string, type: 'node_wait' | 'node_status', payload: object) =>
+      journal.append({ runId: 'staffing', nodeId, type, payload } as Parameters<typeof journal.append>[0])
+    append('a', 'node_status', { status: 'awaiting_human' })
+    append('b', 'node_status', { status: 'running' })
+    append('b', 'node_wait', { on: 'crew', state: 'queued', member: 'tier4', holder: 'a' })
+    journal.close()
+
+    const io = recorder()
+    expect(await statusCommand(['staffing', '--repo', dir], io.io)).toBe(OK)
+    const text = io.out.join('\n')
+    expect(text).toMatch(/waiting \S+ for crew member tier4 \(held by a, which is parked on a question\)/)
+    // Not read as a wait for the integration worktree.
+    expect(text).not.toContain('waiting for the integration worktree')
+
+    const json = recorder()
+    expect(await statusCommand(['staffing', '--repo', dir, '--json'], json.io)).toBe(OK)
+    const parsed = JSON.parse(json.out.join('')) as { nodes: { nodeId: string }[] }
+    expect(parsed.nodes.find((row) => row.nodeId === 'b')).toMatchObject({ waitingOn: 'crew', heldBy: 'a', crewMember: 'tier4' })
+  })
+
+  /**
    * `status --json` said `asking: true` and nothing else: the question, its
    * choices and the effect it parked on had to be read out of `flow.db`.
    */

@@ -202,6 +202,18 @@ export type AgentEvent =
        */
       readonly cacheRead?: number
       readonly cacheWrite?: number
+      /**
+       * How big the session's context is at the end of this turn, in tokens:
+       * the last model call's whole prompt plus what it wrote. Not a sum over
+       * the turn — every call re-sends the context, so the turn's totals say
+       * what was paid, not what is held.
+       *
+       * What decides whether the next turn continues this session
+       * (`defaults.max_session_context_tokens`, §15.5). Absent where the
+       * harness does not report one call's usage on its own, and then that
+       * cap does not apply; a compaction still retires the session.
+       */
+      readonly context?: number
     }
   /**
    * The harness replaced this session's history with a summary of it.

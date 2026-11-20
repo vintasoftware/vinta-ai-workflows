@@ -429,7 +429,11 @@ export function createApi(options: ApiOptions): Hono {
       throw error
     }
     const status = c.res.status
-    const fields = { method, path, status, ms: Date.now() - started }
+    // A refusal's own code (`holder_not_running`, `turn_ended`, …), which is
+    // an identifier like the path. The status alone left eight 409s on
+    // `POST /gates` in one run's log that nobody could explain afterwards.
+    const error = status >= 400 ? await refusalCode(c.res) : undefined
+    const fields = { method, path, status, ms: Date.now() - started, ...(error === undefined ? {} : { error }) }
     // A refusal is the interesting one and is kept at the default level; an
     // ordinary 200 is `debug`, because a UI polling four endpoints a second
     // would otherwise be the entire file.
@@ -904,9 +908,11 @@ export function createApi(options: ApiOptions): Hono {
   })
 
   /**
-   * Forgets one gate's cached results (§13.4) — for one lane tree, or for every
-   * tree when the body names none. The next run of that gate, by the gate node
-   * or an agent, runs it.
+   * Forgets one gate's cached results (§13.4): for the tree the body names,
+   * for every tree when it says `all`, and otherwise for the tree the gate's
+   * last cached failure is on — the verdict being doubted, and nothing a lane
+   * that passed would have to run again. The next run of that gate on what
+   * was forgotten, by the gate node or an agent, runs it.
    *
    * For a verdict the key cannot see is wrong: a red one whose cause was an
    * ignored file, the lane's database, something installed. The operator's and
@@ -926,12 +932,18 @@ export function createApi(options: ApiOptions): Hono {
     const body = await readBody(c, GateCacheInvalidateSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
 
-    const { tree, databases } = body.value
+    const { tree, all, databases } = body.value
+    if (tree !== undefined && all === true) return fail(c, 400, 'tree_and_all')
     const actor = actorOf(c)
     const reason = reasonOf(c)
     if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
     if (databases === true && run.gateCache.forgetDatabases === undefined) return fail(c, 501, 'fresh_state_unavailable')
-    const removed = run.gateCache.invalidate(gateId, tree)
+    const scope = tree !== undefined ? 'tree' : all === true ? 'all' : 'last_failure'
+    // Never widened to every tree by a host that cannot name the failing one.
+    if (scope === 'last_failure' && run.gateCache.lastFailedTree === undefined) return fail(c, 400, 'tree_or_all_required')
+    const target = scope === 'last_failure' ? run.gateCache.lastFailedTree?.(gateId) : tree
+    // No failure cached: nothing is the verdict being doubted, so nothing goes.
+    const removed = scope !== 'all' && target === undefined ? 0 : run.gateCache.invalidate(gateId, target)
     // A gate with no `fresh_cmd` has no fresh form to run: said in the answer,
     // so the caller is not left believing the databases will be recreated.
     const fresh = databases === true ? (run.gateCache.forgetDatabases?.(gateId) ?? false) : undefined
@@ -940,15 +952,22 @@ export function createApi(options: ApiOptions): Hono {
       type: 'gate_cache_invalidated',
       payload: {
         gate: gateId,
-        ...(tree === undefined ? {} : { tree }),
+        ...(target === undefined ? {} : { tree: target }),
+        scope,
         removed,
         ...(fresh === undefined ? {} : { databases: fresh }),
         ...(actor === 'coordinator' ? { by: actor } : {}),
         ...(reason === undefined ? {} : { reason }),
       },
     })
-    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed, databases: fresh })
-    return c.json({ gate: gateId, removed, ...(fresh === undefined ? {} : { databases: fresh }) })
+    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, scope, removed, databases: fresh })
+    return c.json({
+      gate: gateId,
+      removed,
+      scope,
+      ...(target === undefined ? {} : { tree: target }),
+      ...(fresh === undefined ? {} : { databases: fresh }),
+    })
   })
 
   /**
@@ -2667,6 +2686,16 @@ function refusalOf(error: unknown): { readonly code: string; readonly message: s
   }
   if (error instanceof StepRefused) return { code: 'step_refused', message: error.message }
   return null
+}
+
+/** The `error` code of a refusal's JSON body, or undefined when it has none. */
+async function refusalCode(response: Response): Promise<string | undefined> {
+  try {
+    const body = (await response.clone().json()) as { error?: unknown } | null
+    return typeof body?.error === 'string' ? body.error : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function fail(

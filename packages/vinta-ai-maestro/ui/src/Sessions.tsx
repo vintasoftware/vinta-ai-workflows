@@ -275,6 +275,10 @@ function sessionReason(reason: string): string {
       return 'This harness cannot continue a session.'
     case 'turn_ceiling':
       return 'The slot reached its turn limit, so the context starts over.'
+    case 'context_ceiling':
+      return 'The session’s context reached its size limit, so it starts over.'
+    case 'compacted':
+      return 'The harness had compacted the session to a summary, so it starts over.'
     case 'final_fix_round':
       return 'Last fix round — deliberately an agent that has not seen the work.'
     case 'stale_session':

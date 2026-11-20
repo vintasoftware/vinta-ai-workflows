@@ -609,7 +609,8 @@ describe('spawn against a fake app server', () => {
       { type: 'tool_result', id: 'exec-1', ok: true, summary: 'a.txt\n' },
       { type: 'assistant_text', text: 'ok' },
       // One usage for the turn, from the running total — not one per response.
-      { type: 'usage', input: 38307 - 29184, output: 123, cacheRead: 29184, cacheWrite: 0 },
+      // Its context is the last response's prompt and output, not a sum (§15.5).
+      { type: 'usage', input: 38307 - 29184, output: 123, cacheRead: 29184, cacheWrite: 0, context: 38307 + 123 },
       { type: 'session_ended', result: 'ok' },
     ])
 
@@ -666,7 +667,7 @@ describe('spawn against a fake app server', () => {
     expect(resume).toMatchObject({ threadId: 'thread-old', ...codexThreadPolicy('full') })
     expect(fake.sent('thread/start').length).toBe(0)
     expect(events.filter((event) => event.type === 'usage')).toEqual([
-      { type: 'usage', input: 1_000, output: 50, cacheRead: 9_000, cacheWrite: 0 },
+      { type: 'usage', input: 1_000, output: 50, cacheRead: 9_000, cacheWrite: 0, context: 60_950 },
     ])
   })
 
@@ -1067,7 +1068,7 @@ describe('a session with background work still running', () => {
       ],
     })
     const usage = (await drain(await start(fake))).filter((event) => event.type === 'usage')
-    expect(usage).toEqual([{ type: 'usage', input: 500, output: 30, cacheRead: 1_500, cacheWrite: 0 }])
+    expect(usage).toEqual([{ type: 'usage', input: 500, output: 30, cacheRead: 1_500, cacheWrite: 0, context: 2_030 }])
   })
 })
 

@@ -573,7 +573,6 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       ...(policy.onFailure === undefined ? {} : { onFailure: policy.onFailure }),
       ...(policy.retries === undefined ? {} : { retries: policy.retries }),
       ...(policy.retryAfterMs === undefined ? {} : { retryAfterMs: policy.retryAfterMs }),
-      ...(policy.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: policy.agentAnswerAfterMs }),
       ...(policy.coordinatorAuthority === undefined ? {} : { coordinatorAuthority: policy.coordinatorAuthority }),
       ...(deps.executor === undefined ? {} : { executor: deps.executor }),
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),

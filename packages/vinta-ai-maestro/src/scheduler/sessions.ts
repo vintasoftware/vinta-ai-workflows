@@ -40,6 +40,14 @@ export interface SessionEntry {
   readonly nodeId: string
   /** Turns taken on this slot, against `defaults.max_session_turns`. */
   readonly turns: number
+  /**
+   * The session's context at the end of its last turn, in tokens (the `usage`
+   * event's `context`), against `defaults.max_session_context_tokens`.
+   * Absent until a turn reports it, or on a harness that does not.
+   */
+  readonly contextTokens?: number
+  /** The harness compacted this session: its memory is now a summary of itself. */
+  readonly compacted?: boolean
 }
 
 /**
@@ -84,6 +92,8 @@ export interface SessionPlanInput {
   readonly nodeId: string
   /** `defaults.max_session_turns`. */
   readonly maxTurns: number
+  /** `defaults.max_session_context_tokens`. */
+  readonly maxContextTokens: number
   /**
    * The actor's previous phase failed, so its session is the context that
    * failed with it. Only reachable once sessions outlive a phase.
@@ -194,6 +204,16 @@ export function planSession(input: SessionPlanInput): SessionPlan {
   // a resumed agent is ever caught confidently describing work it has
   // forgotten.
   if (entry.turns >= input.maxTurns) return fresh('turn_ceiling')
+  // The size, measured rather than guessed from a turn count. Sessions outlive
+  // a phase (a member's warm session), and one observed run's review chore
+  // auto-compacted at 968k tokens on a session four phases old: it had been
+  // continued from phase to phase because nothing asked how big it was. Past
+  // the cap the next turn starts fresh, with the full brief; the cost is one
+  // cold prompt, against every later turn re-reading a context that size.
+  if (entry.compacted === true) return fresh('compacted')
+  if (entry.contextTokens !== undefined && entry.contextTokens >= input.maxContextTokens) {
+    return fresh('context_ceiling')
+  }
 
   return {
     slot,

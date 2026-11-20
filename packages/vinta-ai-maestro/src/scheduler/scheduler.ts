@@ -136,6 +136,7 @@ import {
   verdictFollowUp,
   type ChorePrompt,
   type Reorientation,
+  type SetAsideWork,
 } from '../prompts/index.ts'
 import { choresFor } from '../chores.ts'
 import {
@@ -149,10 +150,8 @@ import {
 import {
   AGENT_QUESTION_TEXT,
   decodeAnswers,
-  encodeAnswers,
   formatAnswers,
   QuestionWatch,
-  recommendedAnswers,
 } from '../questions/agent-questions.ts'
 import { killLiveGates } from '../gates/runner.ts'
 import { AcquireAborted, type Lease, type ResourcePools } from '../resources/pools.ts'
@@ -265,25 +264,6 @@ const RETRY_WITH = 'retry with '
  */
 const UNATTENDED_BACKOFF_CAP = 8
 
-/**
- * The least an agent's own question waits unattended when only `retryAfterMs`
- * set the pace. An observed run answered a design question after sixty
- * seconds, and an answer given that way added a database migration: a retry
- * costs an attempt, an agent's choice can cost a schema.
- */
-export const AGENT_ANSWER_FLOOR_MS = 30 * 60_000
-
-/**
- * How long an agent's question waits before it takes its recommended options:
- * the explicit `agentAnswerAfterMs`, else twice `retryAfterMs` and never less
- * than `AGENT_ANSWER_FLOOR_MS`, else never (a person answers).
- */
-export function agentAnswerAfter(retryAfterMs: number | undefined, explicit: number | undefined): number | undefined {
-  if (explicit !== undefined) return explicit > 0 ? explicit : undefined
-  if (retryAfterMs === undefined || retryAfterMs <= 0) return undefined
-  return Math.max(2 * retryAfterMs, AGENT_ANSWER_FLOOR_MS)
-}
-
 export interface SchedulerOptions {
   /** The frozen snapshot the run executes. Its `run_started` is already journalled. */
   readonly workflow: Workflow
@@ -390,12 +370,6 @@ export interface SchedulerOptions {
    * asked, which is the budget for a failure nobody has seen yet.
    */
   readonly retryAfterMs?: number
-  /**
-   * The unattended wait on an agent's own question (`#agentQuestions`), which
-   * is a design choice rather than a retry and so waits longer. Absent derives
-   * it from `retryAfterMs` (`agentAnswerAfter`).
-   */
-  readonly agentAnswerAfterMs?: number
   /** Drives `retryAfterMs`. Injected in tests; the real one is `systemClock`. */
   readonly clock?: Clock
   /**
@@ -925,6 +899,8 @@ interface NodeState {
   parkKind: 'hold' | 'pipeline' | null
   /** Ends a capacity wait early: the node was reassigned off the harness it waits on. */
   nudge: (() => void) | null
+  /** The crew wait this node last journalled (`node_wait` on `crew`), while it is in one. */
+  crewWait: { readonly member: string | null; readonly holder: string | null } | null
   /** The effect the node is parked on, for the answer event that closes it. */
   parkedEffectId: string | null
   /**
@@ -1294,6 +1270,8 @@ export class Scheduler {
   /** Critical-path priority per node, handed to admission (§6.1). */
   #heights = new Map<string, number>()
   #waiters: (() => void)[] = []
+  /** Loop wake-ups booked at a harness reset (`#wakeAt`), by time. */
+  readonly #wakeTimers = new Set<number>()
   #iterations = 0
   /** Set once `run()` has left its loop: there is nothing left to dispatch into. */
   #ended = false
@@ -1420,6 +1398,7 @@ export class Scheduler {
       heldBy: null,
       parkKind: null,
       nudge: null,
+      crewWait: null,
       parkedEffectId: null,
       unattendedAnswer: null,
       rearm: null,
@@ -2597,6 +2576,16 @@ export class Scheduler {
         return upstream?.status === 'done' || upstream?.landed === true
       })
       if (!ready) continue
+      // Not dispatched into a harness that is parked (§6.1). Dispatching meant
+      // recycling a lane, cutting a branch, building and gating a base, only
+      // for the first spawn to be refused and all of it unwound: one observed
+      // run dispatched a phase two minutes into a plan limit announced for
+      // an hour later. It stays pending, and is looked at again at the reset.
+      const parked = this.#options.admission.wakeAt(this.#harnessOf(state))
+      if (parked !== undefined) {
+        this.#wakeAt(parked)
+        continue
+      }
       // A deferred phase (`node.deferred`) waits for a person, not for its
       // dependencies: the plan said when it may run and this is not the
       // scheduler's call. Asked once; the answer releases it into this same
@@ -2711,6 +2700,36 @@ export class Scheduler {
     return [...harnesses].filter((id) => this.#options.admission.wakeAt(id) !== undefined)
   }
 
+  /**
+   * Wakes the loop at `at`, once per distinct time: the loop waits only on
+   * state changes, and a harness waking from a park is not one.
+   */
+  #wakeAt(at: number): void {
+    if (this.#wakeTimers.has(at)) return
+    const clock = this.#options.clock ?? systemClock
+    this.#wakeTimers.add(at)
+    clock.at(at, () => {
+      this.#wakeTimers.delete(at)
+      this.#wake()
+    })
+  }
+
+  /**
+   * The reset an unattended answer to this node should wait for, or undefined
+   * when nothing it would start is parked: the node's own harness, or any
+   * harness parked on `quota` — a plan window is the account's, and a wave
+   * or base retry spawns a conflict fixer whichever harness the phase is on.
+   */
+  #capacityHold(state: NodeState): number | undefined {
+    const admission = this.#options.admission
+    let until = admission.wakeAt(this.#harnessOf(state))
+    for (const harness of Object.keys(this.#options.adapters)) {
+      const parked = admission.parked(harness)
+      if (parked?.kind === 'quota') until = Math.max(until ?? 0, parked.wakeAt)
+    }
+    return until
+  }
+
   /** Resolves on the next state change. The only thing the loop ever waits on. */
   #changed(): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -2815,6 +2834,19 @@ export class Scheduler {
             ? error
             : this.#capacityRetryFor(error as ConflictFixerRefused, state, refusal)
 
+        // The plan names a harness to move to when this one is out: the
+        // fixer moves with the run, and the attempt goes again now.
+        if (
+          retry instanceof CapacityRetry &&
+          refusal !== null &&
+          (await this.#fixerFellBack(error as ConflictFixerRefused, refusal))
+        ) {
+          if (state.aborted) return
+          this.#restartAttempt(state)
+          this.#setStatus(state, 'running')
+          continue
+        }
+
         if (retry instanceof CapacityRetry) {
           const error = retry
           // §15's ledger does not survive a *re-attempt*. A capacity refusal
@@ -2886,6 +2918,7 @@ export class Scheduler {
       // warm session, and neither a cover nor a spare is worth what a cold one
       // costs.
       if (target !== undefined && this.#finishing(target)) {
+        this.#crewQueued(state, target)
         await this.#changed()
         continue
       }
@@ -2908,7 +2941,10 @@ export class Scheduler {
         substitution: this.#workflow.defaults.substitution,
       })
 
-      if (decision.kind === 'unstaffed') return
+      if (decision.kind === 'unstaffed') {
+        state.crewWait = null
+        return
+      }
 
       // The plan's own member, or somebody no pending phase is planned for.
       if (decision.kind === 'assigned' && (decision.member === state.node.crew || !this.#needed(decision.member, state))) {
@@ -2935,12 +2971,53 @@ export class Scheduler {
       // Every member at or above the floor is working. A member frees only when
       // a node settles, and that is a state change — so this waits on the same
       // signal the dispatch loop does rather than polling.
+      this.#crewQueued(state, target)
       await this.#changed()
     }
+    // Aborted or halted while waiting: the status change that follows closes
+    // the wait for whoever reads the journal.
+    state.crewWait = null
+  }
+
+  /**
+   * Journals that this node is waiting for a crew member, and behind whom
+   * (`node_wait` on `crew`): once per wait, and again when who it waits for,
+   * or who holds them, changes. The loop above goes round on every state
+   * change in the run, so writing each pass would bury the fact in repeats.
+   */
+  #crewQueued(state: NodeState, member: string | undefined): void {
+    let holder: string | null = null
+    if (member !== undefined) {
+      for (const other of this.#states.values()) {
+        if (other !== state && (other.crew?.member === member || other.desk === member)) {
+          holder = other.node.id
+          break
+        }
+      }
+    }
+    const wait = { member: member ?? null, holder }
+    if (state.crewWait?.member === wait.member && state.crewWait.holder === wait.holder) return
+    state.crewWait = wait
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_wait',
+      payload: { on: 'crew', state: 'queued', ...wait },
+    })
+    this.#log.info('node.crew_wait', { node: state.node.id, member: wait.member, holder })
   }
 
   /** Claims the member `decision` names for this node, and journals who it is. */
   #take(state: NodeState, decision: Extract<CrewDecision, { kind: 'assigned' }>): void {
+    if (state.crewWait !== null) {
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        nodeId: state.node.id,
+        type: 'node_wait',
+        payload: { on: 'crew', state: 'granted', ...state.crewWait },
+      })
+      state.crewWait = null
+    }
     this.#busyCrew.add(decision.member)
     state.crew = {
       member: decision.member,
@@ -2987,11 +3064,22 @@ export class Scheduler {
     return false
   }
 
-  /** `member` is busy, and only with a landed phase's PR chores. */
+  /**
+   * `member` is busy, and only with a landed phase's PR chores.
+   *
+   * **Landed and working, not landed and parked.** A phase is also landed
+   * while it waits on its wave's question (`#offerWaveRetry`) or on the
+   * harness its wave's fixer was refused by (`#awaitFixerCapacity`), and
+   * neither is a short wait: one observed phase held its member for thirteen
+   * hours that way, and the phase planned for the same member waited here the
+   * whole time — before the substitute and the spare below were ever
+   * considered, since this check comes first. A parked holder is busy like
+   * any other, and the waiter gets a cover or a spare.
+   */
   #finishing(member: string): boolean {
     if (!this.#busyCrew.has(member)) return false
     for (const state of this.#states.values()) {
-      if (state.crew?.member === member) return state.landed
+      if (state.crew?.member === member) return state.landed && state.status === 'running'
     }
     return false
   }
@@ -3133,6 +3221,7 @@ export class Scheduler {
             ledger,
             nodeId: state.node.id,
             maxTurns: this.#workflow.defaults.max_session_turns,
+            maxContextTokens: this.#workflow.defaults.max_session_context_tokens,
             poisoned: this.#poisoned.has(member.id),
             fixRounds: 0,
             maxFixRounds: state.node.max_fix_rounds ?? null,
@@ -4172,13 +4261,15 @@ export class Scheduler {
    * comment pass timed out is a far worse trade than merging comments nobody
    * tidied.
    *
-   * **A capacity refusal is the same answer, and this is the surprising half.**
-   * Everywhere else a `CapacityRetry` re-drives the node from its initial state
-   * — correct for a fixer, since the alternative is losing the fix — but here
-   * it would re-implement an entire finished phase to get a polish turn in. So
-   * an `on_failure: 'continue'` chore is skipped when the harness is full, and
-   * only a chore the phase is declared incorrect without is worth the re-drive.
-   * A review is never skipped: skipping it would merge a phase nobody reviewed.
+   * **A capacity refusal is waited out, here.** Everywhere else a
+   * `CapacityRetry` re-drives the node from its initial state, which here would
+   * re-implement a finished phase to get a polish turn in. It used to skip an
+   * `on_failure: 'continue'` chore instead, and one observed run opened two
+   * PRs with no review canvas and no deslop pass because the plan's window
+   * had closed for an hour — while the implement turn in the same place waits.
+   * So the chore waits too, in place, with the lane (`#waitInPlace`), and runs
+   * when the harness answers. No chore is skipped for capacity, and a review
+   * never was.
    *
    * `Aborted` is never swallowed by either: the run is being torn down, and
    * there is nothing left for the next chore to run in.
@@ -4217,7 +4308,8 @@ export class Scheduler {
       this.#wake()
     }
 
-    for (const entry of chores) {
+    for (let index = 0; index < chores.length; index += 1) {
+      const entry = chores[index] as (typeof chores)[number]
       const startedAt = Date.now()
       if (entry.chore.when === 'after_pr' && !prOpened) {
         this.#choreResult(state, entry.id, 'skipped', startedAt)
@@ -4260,8 +4352,9 @@ export class Scheduler {
       } catch (error) {
         if (error instanceof Aborted) throw error
         if (error instanceof CapacityRetry) {
-          if (review || entry.chore.on_failure === 'fail') throw error
-          this.#choreResult(state, entry.id, 'skipped', startedAt)
+          await this.#waitInPlace(state, error)
+          // The same chore again, once the harness answers.
+          index -= 1
           continue
         }
         if (!review && entry.chore.on_failure === 'fail') throw error
@@ -4287,6 +4380,24 @@ export class Scheduler {
     return {
       facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict, ...(stated ? {} : { stated: false }) } },
     }
+  }
+
+  /**
+   * The edits this phase had set aside (`review_left_lane_dirty`), oldest
+   * first, for every later prompt of the phase (`SetAsideWork`).
+   */
+  #setAsideFor(state: NodeState): SetAsideWork[] {
+    const found: SetAsideWork[] = []
+    for (const event of this.#options.journal.events(this.#options.runId)) {
+      if (event.type !== 'review_left_lane_dirty' || event.payload.node !== state.node.id) continue
+      found.push({
+        ref: event.payload.ref,
+        by: `the ${event.payload.chore} chore`,
+        paths: event.payload.paths,
+        count: event.payload.count,
+      })
+    }
+    return found
   }
 
   /**
@@ -4495,6 +4606,8 @@ export class Scheduler {
         // On every form, a delta included: a decision made in another session
         // — a reviewer's, a replaced one's — is not in this one.
         decisions: state.decisions,
+        // Read from the journal, so it holds across a lane move and a resume.
+        setAside: this.#setAsideFor(state),
       }),
       model: this.#modelFor(state, params),
       ...envField(),
@@ -4786,6 +4899,10 @@ export class Scheduler {
           // resume has to name.
           this.#remember(state, plan, adapter, event.sessionId)
         }
+        if (event.type === 'usage' && event.context !== undefined) {
+          this.#measure(state, plan, sessionId, { context: event.context })
+        }
+        if (event.type === 'context_compacted') this.#measure(state, plan, sessionId, { compacted: true })
       }
     } finally {
       withdraw()
@@ -4879,10 +4996,16 @@ export class Scheduler {
    * journalled as option indices plus the operator's own words, and reaches
    * the agent as a `user_message` restating each question with its answer.
    *
-   * An unattended run answers with the recommended options after
-   * `retryAfterMs`, through the same `answer` path a click takes. A harness
-   * that cannot resume has no way to deliver an answer, so its question is left
-   * in the transcript and the turn ends as it would have.
+   * **No timer answers it.** An agent stops to ask about a design choice —
+   * what the product shows, which table a record lives in — and the
+   * recommended option is the agent's guess, not a decision. One observed run
+   * took the first option after sixty seconds on a question its spec named as
+   * open and owned by the project lead, and nothing woke the coordinator. So
+   * the phase parks until a person answers, or the run coordinator does: it is
+   * woken for every agent question (`question_waiting`) and may answer, or
+   * leave it to a person. A harness that cannot resume has no way to deliver
+   * an answer, so its question is left in the transcript and the turn ends as
+   * it would have.
    *
    * Returns the watch over the turn's last session, whose prose is the report
    * the turn closed on.
@@ -4918,18 +5041,10 @@ export class Scheduler {
       })
       this.#ask(state, effectId, { question: AGENT_QUESTION_TEXT, kind: 'agent' })
       state.parkedEffectId = effectId
-      state.unattendedAnswer = encodeAnswers(recommendedAnswers(ask))
-
-      const cancel = this.#armUnattendedAnswer(
-        state,
-        agentAnswerAfter(this.#options.retryAfterMs, this.#options.agentAnswerAfterMs),
-      )
-      let facts: GuardContext
-      try {
-        facts = await this.#park(state)
-      } finally {
-        cancel()
-      }
+      // The coordinator's to answer, never a timer's.
+      state.unattendedAnswer = null
+      state.delegable = true
+      const facts = await this.#park(state)
 
       const answers = decodeAnswers(facts.human?.['answer'], ask)
       const unattended = facts.human?.['unattended'] === true
@@ -5013,12 +5128,92 @@ export class Scheduler {
         state.waveInputs = null
         return outcome
       } catch (error) {
+        // A fixer the harness refused, or stopped under its window. Waited
+        // out here, with the lane: thrown on, it would re-drive this finished
+        // phase from its implementer once the window opened (`CapacityRetry`),
+        // and counted as a failed wave it would be retried on a timer against
+        // a limit no retry moves.
+        if (error instanceof ConflictFixerRefused && error.refusal !== null) {
+          await this.#awaitFixerCapacity(state, error, error.refusal)
+          continue
+        }
         if (!(error instanceof Error && error.name === 'WaveBuildError')) throw error
         const answer = await this.#offerWaveRetry(state, error)
         if (answer === SKIP_WAVE) return {}
         if (answer !== RETRY) throw new WaveStopped(error.message)
       }
     }
+  }
+
+  /**
+   * Waits, in place, for the harness that refused a wave's conflict fixer:
+   * the phase is finished, so it is landed and its dependents start, and it
+   * keeps its lane for the push and the PR that follow the wave. Returns when
+   * the wave should be tried again — the window reopened, the run moved to a
+   * fallback harness, or an operator switched it.
+   */
+  async #awaitFixerCapacity(
+    state: NodeState,
+    refused: ConflictFixerRefused,
+    refusal: NonNullable<ConflictFixerRefused['refusal']>,
+  ): Promise<void> {
+    if (state.aborted) throw new Aborted()
+    const retry = this.#capacityRetryFor(refused, state, refusal)
+    if (!(retry instanceof CapacityRetry)) throw refused
+    if (!state.landed) {
+      state.landed = true
+      this.#wake()
+    }
+    if (await this.#fixerFellBack(refused, refusal)) {
+      if (state.aborted) throw new Aborted()
+      // Admission wrote the wait; the node never took it.
+      this.#setStatus(state, 'running')
+      return
+    }
+    await this.#waitInPlace(state, retry)
+  }
+
+  /**
+   * Waits out a capacity refusal without giving anything up: the lane, the
+   * branch and the session stay as they are, and the caller tries the same
+   * turn again when the harness answers — or a reassignment moves the phase
+   * off it (`nudge`). A halt or an abort ends the wait.
+   */
+  async #waitInPlace(state: NodeState, retry: CapacityRetry): Promise<void> {
+    this.#setStatus(state, 'waiting_on_capacity')
+    const nudged = deferred()
+    state.nudge = nudged.resolve
+    await Promise.race([retry.waitFor(), this.#halting.promise, nudged.promise])
+    state.nudge = null
+    if (state.aborted) throw new Aborted()
+    if (this.#halt !== null) throw new Halted()
+    this.#setStatus(state, 'running')
+  }
+
+  /**
+   * `defaults.harness_fallbacks` for a conflict fixer: its harness is parked
+   * on a quota refusal and the plan names another. Switches the run — fix
+   * rounds are rerouted with it (`onHarnessSwitched`), and phases in flight
+   * on the harness move when their turn ends. True when the merge should be
+   * tried again at once. A harness switches once.
+   */
+  async #fixerFellBack(
+    refused: ConflictFixerRefused,
+    refusal: NonNullable<ConflictFixerRefused['refusal']>,
+  ): Promise<boolean> {
+    const harness = refused.harness
+    if (refusal.kind !== 'quota' || this.#options.admission.wakeAt(harness) === undefined) return false
+    if (this.#switches.has(harness)) return false
+    const fallbacks: Readonly<Record<string, { readonly harness: string; readonly model: string } | undefined>> =
+      this.#workflow.defaults.harness_fallbacks
+    const fallback = fallbacks[harness]
+    if (fallback === undefined || this.#options.adapters[fallback.harness] === undefined) return false
+    await this.switchHarness(harness, fallback.harness, fallback.model, {
+      cause: 'harness_fallback',
+      when: 'after_turn',
+      reason: `${harness} is out of quota`,
+    })
+    return true
   }
 
   async #offerWaveRetry(state: NodeState, error: Error): Promise<string> {
@@ -5174,6 +5369,7 @@ export class Scheduler {
       ledger: this.#ledgerOf(state),
       nodeId: state.node.id,
       maxTurns: this.#workflow.defaults.max_session_turns,
+      maxContextTokens: this.#workflow.defaults.max_session_context_tokens,
       poisoned: this.#poisoned.has(state.crew?.member ?? ''),
       fixRounds: state.fixRounds,
       maxFixRounds: state.node.max_fix_rounds ?? null,
@@ -5190,12 +5386,37 @@ export class Scheduler {
   ): void {
     const lane = state.lane
     if (plan.slot === null || lane === null) return
-    this.#ledgerOf(state).set(plan.slot, {
+    const ledger = this.#ledgerOf(state)
+    // The same session, continued: what it was measured at carries until this
+    // turn reports again.
+    const before = ledger.get(plan.slot)
+    const measured =
+      before?.sessionId === sessionId
+        ? {
+            ...(before.contextTokens === undefined ? {} : { contextTokens: before.contextTokens }),
+            ...(before.compacted === true ? { compacted: true } : {}),
+          }
+        : {}
+    ledger.set(plan.slot, {
       harnessId: adapter.id,
       sessionId,
       lane,
       nodeId: state.node.id,
       turns: plan.turns,
+      ...measured,
+    })
+  }
+
+  /** How big the slot's session is now, or that it was compacted (§15.5). */
+  #measure(state: NodeState, plan: SessionPlan, sessionId: string | null, seen: { context?: number; compacted?: true }): void {
+    if (plan.slot === null || sessionId === null) return
+    const ledger = this.#ledgerOf(state)
+    const entry = ledger.get(plan.slot)
+    if (entry === undefined || entry.sessionId !== sessionId) return
+    ledger.set(plan.slot, {
+      ...entry,
+      ...(seen.context === undefined ? {} : { contextTokens: seen.context }),
+      ...(seen.compacted === true ? { compacted: true } : {}),
     })
   }
 
@@ -5419,10 +5640,18 @@ export class Scheduler {
       model: refused.model,
       kind: refused.kind,
     })
-    const parked = this.#options.admission.refusedMidTurn(refused.harness, state.node.id, refusal, {
-      model: refused.model,
-      fallbacks: this.#workflow.defaults.model_fallbacks,
-    })
+    const parked = this.#options.admission.refusedMidTurn(
+      refused.harness,
+      state.node.id,
+      refusal,
+      // A refused spawn already went down the model's fallbacks
+      // (`spawnWithFallbacks`). A round stopped mid-turn did not, and nothing
+      // would make its next spawn: the fixer runs outside admission, which is
+      // where an exhausted model is remembered. Told about the fallbacks,
+      // admission would answer "go again now" to a round that goes again on
+      // the same model, and is stopped again, in a loop. So the harness parks.
+      refused.midTurn ? undefined : { model: refused.model, fallbacks: this.#workflow.defaults.model_fallbacks },
+    )
     return parked.status === 'retry' ? new CapacityRetry(parked.wait) : refused
   }
 
@@ -5663,6 +5892,14 @@ export class Scheduler {
         }
         return
       }
+      // An answer that would start work on a parked harness waits for its
+      // reset: given now, it only buys the refusal again.
+      const hold = this.#capacityHold(state)
+      if (hold !== undefined) {
+        this.#log.info('node.unattended_deferred', { node: state.node.id, until: hold })
+        cancel = clock.at(hold, fire)
+        return
+      }
       this.#log.info('node.unattended_answer', { node: state.node.id, after_ms: after })
       if (effect !== null) state.unattendedGiven.set(effect, (state.unattendedGiven.get(effect) ?? 0) + 1)
       this.answer(state.node.id, { human: { answer, unattended: true } })
@@ -5725,6 +5962,16 @@ export class Scheduler {
         }
         return
       }
+      // A retry into a parked harness is refused before it does anything, and
+      // used to be spent anyway: one observed wave retry fired sixty seconds
+      // into a plan limit and counted against its unchanged inputs. It waits
+      // for the reset instead, and is not counted until it runs.
+      const hold = this.#capacityHold(state)
+      if (hold !== undefined) {
+        this.#log.info('node.unattended_deferred', { node: state.node.id, until: hold })
+        cancel = clock.at(hold, fire)
+        return
+      }
       state.unattended += 1
       this.#log.info('node.unattended_retry', {
         node: state.node.id,
@@ -5755,6 +6002,15 @@ export class Scheduler {
       ...(state.lane === null ? {} : { lane: state.lane }),
     })
     state.status = status
+    // Admission journals the wait as it parks the node, and the scheduler sets
+    // the same status as it unwinds: one row, not two in a row.
+    if (
+      status === 'waiting_on_capacity' &&
+      this.#options.journal.nodeStatus(this.#options.runId, state.node.id) === status
+    ) {
+      this.#wake()
+      return
+    }
     this.#options.journal.append({
       runId: this.#options.runId,
       nodeId: state.node.id,

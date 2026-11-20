@@ -37,6 +37,7 @@ import Database from 'better-sqlite3'
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -44,7 +45,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { type Decision, parseDecision } from '../decisions/index.ts'
 import { computeWaves } from '../graph.ts'
 import type { Workflow } from '../types.ts'
@@ -105,6 +106,15 @@ export interface IntegrationStepRow {
 /** One row of `integrationHistory`: a step, and the node whose turn took it. */
 export interface IntegrationHistoryRow extends IntegrationStepRow {
   readonly nodeId: string
+}
+
+/** A staffed node waiting for a crew member, as `crewWaits` folds it. */
+export interface CrewWait {
+  /** Who it waits for; null when the plan named nobody and everyone qualified is busy. */
+  readonly member: string | null
+  /** The phase holding that member when it queued. */
+  readonly holder: string | null
+  readonly since: number
 }
 
 /** A node queued behind the integration worktree, as `integrationWaits` folds it. */
@@ -439,6 +449,14 @@ export class Journal {
     return row.id ?? 0
   }
 
+  /** One node's status as journalled, or undefined for a node the run does not have. */
+  nodeStatus(runId: string, nodeId: string): NodeStatus | undefined {
+    const row = this.db
+      .prepare('SELECT status FROM nodes WHERE run_id = ? AND node_id = ?')
+      .get(runId, nodeId) as { status: NodeStatus } | undefined
+    return row?.status
+  }
+
   nodes(runId: string): NodeRow[] {
     return this.db
       .prepare('SELECT * FROM nodes WHERE run_id = ? ORDER BY node_id')
@@ -585,6 +603,30 @@ export class Journal {
   }
 
   /**
+   * A log of its own for one run of a gate: `<name>.<n>.log` beside
+   * `gateLogPath`'s, `n` the first number no earlier run took.
+   *
+   * For the integration worktree's gates — a merge's `verify`, a wave's
+   * gates, a base's — whose failures are cited by path in an error, a
+   * question and the journal. One fixed name per gate meant the next run
+   * overwrote the failure being cited: one observed run's three
+   * `wave_failed` messages pointed at logs that by morning held the passing
+   * runs, and the flaky failure that blocked a base was gone the same way.
+   */
+  runLogPath(runId: string, nodeId: string, name: string): string {
+    const dir = dirname(this.gateLogPath(runId, nodeId, name))
+    for (let n = 1; ; n += 1) {
+      const path = join(dir, `${name}.${n}.log`)
+      if (!existsSync(path)) {
+        // Claimed now, so a second run started before this one writes is
+        // handed the next number rather than the same file.
+        writeFileSync(path, '', { flag: 'wx' })
+        return path
+      }
+    }
+  }
+
+  /**
    * Nodes queued behind the integration worktree right now, with the holder
    * each one was told about: the last `node_wait` per node, where it says
    * `queued` or `paused`. For `status`, which otherwise shows such a node as
@@ -596,7 +638,9 @@ export class Journal {
       .all(runId) as { node_id: string; payload_json: string }[]
     const waits = new Map<string, IntegrationWait>()
     for (const row of rows) {
-      const payload = JSON.parse(row.payload_json) as { state?: string; holder?: string | null }
+      const payload = JSON.parse(row.payload_json) as { on?: string; state?: string; holder?: string | null }
+      // A wait for a crew member is `crewWaits`'.
+      if (payload.on === 'crew') continue
       if (payload.state === 'queued') waits.set(row.node_id, { holder: payload.holder ?? null, paused: false })
       // A paused waiter is still in the queue, passed over until it is
       // resumed. The holder it queued behind is not what keeps it there, and
@@ -702,6 +746,48 @@ export class Journal {
   }
 
   /**
+   * Staffed nodes waiting for a crew member right now: the last `node_wait`
+   * on `crew` per node, where it says `queued`. A status that is no longer
+   * `running`, a resume and the run's end each close it, since the wait does
+   * not outlive the dispatch that was making it. For `status`.
+   */
+  crewWaits(runId: string): Map<string, CrewWait> {
+    const rows = this.db
+      .prepare(
+        'SELECT node_id, type, ts, payload_json FROM events WHERE run_id = ? AND type IN ' +
+          "('node_wait', 'node_status', 'run_resumed', 'run_ended') ORDER BY id",
+      )
+      .all(runId) as { node_id: string | null; type: string; ts: number; payload_json: string }[]
+    const waits = new Map<string, CrewWait>()
+    for (const row of rows) {
+      if (row.type === 'run_resumed' || row.type === 'run_ended') {
+        waits.clear()
+        continue
+      }
+      if (row.node_id === null) continue
+      const payload = JSON.parse(row.payload_json) as {
+        on?: string
+        state?: string
+        status?: string
+        member?: string | null
+        holder?: string | null
+      }
+      if (row.type === 'node_status') {
+        if (payload.status !== 'running') waits.delete(row.node_id)
+        continue
+      }
+      if (payload.on !== 'crew') continue
+      if (payload.state === 'queued') {
+        // The first `queued` of a wait is when it began; a later one only
+        // says the holder changed.
+        const since = waits.get(row.node_id)?.since ?? row.ts
+        waits.set(row.node_id, { member: payload.member ?? null, holder: payload.holder ?? null, since })
+      } else waits.delete(row.node_id)
+    }
+    return waits
+  }
+
+  /**
    * The integration worktree now: the node holding it and since when, the
    * step it is on, and the nodes queued behind it — folded from `hold` steps
    * and `node_wait`. Empty again whenever the run resumes or ends, because a
@@ -720,6 +806,7 @@ export class Journal {
       }
       if (event.nodeId === null) continue
       if (event.type === 'node_wait') {
+        if (event.payload['on'] === 'crew') continue
         if (event.payload['state'] === 'queued') queue.set(event.nodeId, (event.payload['holder'] as string | null) ?? null)
         else if (event.payload['state'] !== 'paused') queue.delete(event.nodeId)
         continue

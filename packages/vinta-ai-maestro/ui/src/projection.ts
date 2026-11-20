@@ -44,6 +44,11 @@ export interface Projection {
    */
   readonly waits: ReadonlyMap<string, string | null>
   /**
+   * Staffed nodes waiting for a crew member, with who they wait for and the
+   * phase holding that member. `running` with nobody to run them.
+   */
+  readonly crewWaits: ReadonlyMap<string, { readonly member: string | null; readonly holder: string | null }>
+  /**
    * Nodes paused by the operator while parked on a question: no unattended
    * timer answers them, and the next answer releases them.
    */
@@ -55,19 +60,23 @@ export const EMPTY_PROJECTION: Projection = {
   statuses: new Map(),
   runStatus: null,
   waits: new Map(),
+  crewWaits: new Map(),
   held: new Set(),
 }
 
 const NodeOperationPayloadSchema = z.object({ op: z.string(), delivery: z.string() })
 
 const NodeWaitPayloadSchema = z.object({
-  state: z.enum(['queued', 'granted']),
+  on: z.string().optional(),
+  state: z.enum(['queued', 'granted', 'paused']),
   holder: z.string().nullable(),
+  member: z.string().nullable().optional(),
 })
 
 export function applyFrame(projection: Projection, frame: EventFrame): Projection {
   const statuses = new Map(projection.statuses)
   const waits = new Map(projection.waits)
+  const crewWaits = new Map(projection.crewWaits)
   const held = new Set(projection.held)
   let runStatus = projection.runStatus
   let applied = 0
@@ -96,10 +105,15 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
       // still reads "failed", and the only way out is a reload.
       runStatus = 'running'
       waits.clear()
+      crewWaits.clear()
       held.clear()
     } else if (event.type === 'node_wait' && event.nodeId !== null) {
       const payload = NodeWaitPayloadSchema.safeParse(event.payload)
-      if (payload.success) {
+      if (payload.success && payload.data.on === 'crew') {
+        if (payload.data.state === 'queued') {
+          crewWaits.set(event.nodeId, { member: payload.data.member ?? null, holder: payload.data.holder })
+        } else crewWaits.delete(event.nodeId)
+      } else if (payload.success) {
         if (payload.data.state === 'queued') waits.set(event.nodeId, payload.data.holder)
         else waits.delete(event.nodeId)
       }
@@ -107,5 +121,5 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
   }
 
   if (applied === 0) return projection
-  return { cursor: Math.max(projection.cursor, frame.cursor), statuses, runStatus, waits, held }
+  return { cursor: Math.max(projection.cursor, frame.cursor), statuses, runStatus, waits, crewWaits, held }
 }

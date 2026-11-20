@@ -48,7 +48,7 @@ import type { AgentTask, HarnessAdapter, SpawnOutcome } from '../harness/adapter
 import { type ModelFallbacks, spawnWithFallbacks } from '../harness/fallback.ts'
 import type { NodeStatus, StoredEvent } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
-import { MONITOR_ROLE, OPERATOR_ROLE } from '../journal/transcript.ts'
+import { CONFLICT_FIXER_ROLE, MONITOR_ROLE, OPERATOR_ROLE } from '../journal/transcript.ts'
 import type { Workflow } from '../types.ts'
 
 /** How much of an agent's last word to carry. A gist, not a transcript. */
@@ -72,8 +72,16 @@ export interface NodeDigest {
   readonly question: string | null
   /** Refusals and errors from its transcript, oldest first. */
   readonly trouble: readonly string[]
-  /** The last thing the agent said, trimmed. */
+  /** The last thing the phase's own agents said, trimmed. Never a conflict fixer's words. */
   readonly lastWord: string | null
+  /**
+   * The last thing a conflict fixer said in this phase's transcript, when that
+   * is more recent than `lastWord`, and the phase whose branch it was
+   * merging. Apart, because a fix round is filed under the phase whose turn
+   * the merge is as well as the incoming one: a wave's builder used to show
+   * the fixer of a sibling's merge as what it had last said itself.
+   */
+  readonly fixerWord: { readonly text: string; readonly merging: string | null } | null
   /** Where this phase's brief lives, in the plan document. */
   readonly promptRef: string | null
   /** The worktree its agent worked in — an absolute path, or null before it started. */
@@ -119,6 +127,7 @@ export function runDigest(journal: Journal, runId: string, workflow: Workflow): 
   const nodes = journal.nodes(runId).map((node): NodeDigest => {
     const entries = journal.tailTranscript(runId, node.node_id, SCAN_LIMIT) as readonly unknown[]
     const spec = declared.get(node.node_id)
+    const said = lastWordsOf(entries)
     return {
       nodeId: node.node_id,
       name: spec?.name ?? node.node_id,
@@ -128,7 +137,8 @@ export function runDigest(journal: Journal, runId: string, workflow: Workflow): 
       failure: failures.get(node.node_id) ?? null,
       question: journal.pendingQuestion(runId, node.node_id)?.question.question ?? null,
       trouble: troubleOf(entries),
-      lastWord: lastWordOf(entries),
+      lastWord: said.own,
+      fixerWord: said.fixer,
       promptRef: spec?.prompt_ref ?? null,
       // The name is what the journal records; the path is what a shell needs.
       lanePath: node.lane === null ? null : join(storePath, 'lanes', node.lane),
@@ -227,14 +237,24 @@ export function troubleOf(entries: readonly unknown[]): readonly string[] {
   return found.slice(-TROUBLE_LIMIT)
 }
 
-function lastWordOf(entries: readonly unknown[]): string | null {
+/**
+ * The phase's own last words, and a conflict fixer's when those came after.
+ * Lines from before attribution existed carry no `by` and read as the
+ * phase's own, as they always did.
+ */
+function lastWordsOf(entries: readonly unknown[]): {
+  readonly own: string | null
+  readonly fixer: NodeDigest['fixerWord']
+} {
+  let fixer: NodeDigest['fixerWord'] = null
   for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const row = entries[i] as { type?: string; text?: string }
-    if (row.type === 'assistant_text' && typeof row.text === 'string' && row.text.trim() !== '') {
-      return row.text.slice(0, LAST_WORD_LIMIT)
-    }
+    const row = entries[i] as { type?: string; text?: string; by?: { role?: string; merge?: unknown } }
+    if (row.type !== 'assistant_text' || typeof row.text !== 'string' || row.text.trim() === '') continue
+    const text = row.text.slice(0, LAST_WORD_LIMIT)
+    if (row.by?.role !== CONFLICT_FIXER_ROLE) return { own: text, fixer }
+    fixer ??= { text, merging: typeof row.by.merge === 'string' ? row.by.merge : null }
   }
-  return null
+  return { own: null, fixer }
 }
 
 /**
@@ -265,6 +285,13 @@ export function describe(digest: RunDigest): string {
     if (node.question !== null) lines.push(`waiting on the operator: ${node.question}`)
     for (const line of node.trouble) lines.push(`- ${line}`)
     if (node.lastWord !== null) lines.push(`last said: ${node.lastWord}`)
+    if (node.fixerWord !== null) {
+      const merging = node.fixerWord.merging
+      lines.push(
+        `conflict fixer last said (not this phase’s agent; a merge${merging === null ? '' : ` of ${merging}`} in the integration worktree): ` +
+          node.fixerWord.text,
+      )
+    }
     lines.push('')
   }
   return lines.join('\n')
@@ -386,10 +413,12 @@ function powers(run: string): string[] {
     '  until the command ends, and ending it cancels the command. `--detach` returns at once',
     `  with an id; \`exec list ${run}\` shows what is queued or running and \`exec cancel ${run} <id>\``,
     '  ends one. Lane names are in `status` and in the run state below.',
-    `- \`vinta-ai-maestro gate-cache invalidate ${run} <gate> [--tree <hash>]\` — forget a gate’s`,
-    '  cached results, so its next run runs the command. For a verdict whose cause was outside',
-    '  the lane’s tracked files (an ignored file, a tool cache, the database) and is now fixed.',
-    '  It can only make a gate run again, never make one pass.',
+    `- \`vinta-ai-maestro gate-cache invalidate ${run} <gate> [--tree <hash> | --all]\` — forget a`,
+    '  gate’s cached result, so its next run runs the command. For a verdict whose cause was',
+    '  outside the lane’s tracked files (an ignored file, a tool cache, the database) and is now',
+    '  fixed. Alone it forgets the result on the tree the gate last failed on; `--all` forgets',
+    '  every lane’s, and every lane then runs the gate again, so use it only when the cause was',
+    '  shared. It can only make a gate run again, never make one pass.',
     '',
     '--- how to act ---',
     '- Look before you act, and make the smallest change that fixes the cause. Most slow',

@@ -933,8 +933,13 @@ describe('execPort', () => {
 describe('gate cache invalidation', () => {
   const TREE = 'a'.repeat(40)
 
-  /** Records what it was asked to forget, and says one entry went each time. */
-  const recordingCache = () => {
+  const LAST_FAILED = 'c'.repeat(40)
+
+  /**
+   * Records what it was asked to forget, and says one entry went each time.
+   * `lastFailed` is the tree its last red verdict is cached for, if any.
+   */
+  const recordingCache = (lastFailed?: string) => {
     const calls: { gateId: string; tree: string | undefined }[] = []
     return {
       calls,
@@ -942,13 +947,14 @@ describe('gate cache invalidation', () => {
         calls.push({ gateId, tree })
         return 1
       },
+      lastFailedTree: () => lastFailed,
     }
   }
   const path = (gate: string): string => `/api/runs/${RUN_ID}/gates/${gate}/invalidate`
 
   it('is the coordinator’s as well as the operator’s, and journals who asked', async () => {
     const r = await rig()
-    const cache = recordingCache()
+    const cache = recordingCache(LAST_FAILED)
     r.register({ gateCache: cache })
 
     const byCoordinator = await call(r.daemon, path('unit'), {
@@ -956,19 +962,54 @@ describe('gate cache invalidation', () => {
       token: r.daemon.coordinatorToken,
       body: { tree: TREE },
     })
-    const byOperator = await call(r.daemon, path('unit'), { method: 'POST', body: {} })
+    const byOperator = await call(r.daemon, path('unit'), { method: 'POST', body: { all: true } })
 
-    expect(byCoordinator).toEqual({ status: 200, body: { gate: 'unit', removed: 1 } })
-    expect(byOperator.status).toBe(200)
+    expect(byCoordinator).toEqual({ status: 200, body: { gate: 'unit', removed: 1, scope: 'tree', tree: TREE } })
+    expect(byOperator).toEqual({ status: 200, body: { gate: 'unit', removed: 1, scope: 'all' } })
     expect(cache.calls).toEqual([
       { gateId: 'unit', tree: TREE },
       { gateId: 'unit', tree: undefined },
     ])
     const rows = r.journal.events(RUN_ID).filter((event) => event.type === 'gate_cache_invalidated')
     expect(rows.map((event) => event.payload)).toEqual([
-      { gate: 'unit', tree: TREE, removed: 1, by: 'coordinator', reason: 'the coordinator’s reason' },
-      { gate: 'unit', removed: 1 },
+      { gate: 'unit', tree: TREE, scope: 'tree', removed: 1, by: 'coordinator', reason: 'the coordinator’s reason' },
+      { gate: 'unit', scope: 'all', removed: 1 },
     ])
+  })
+
+  /**
+   * Every tree used to be what a request naming none forgot: one stale
+   * typecheck, one invalidation, and 28 verdicts gone across every lane.
+   */
+  it('forgets only the tree of the last failure when the request names no tree', async () => {
+    const r = await rig()
+    const cache = recordingCache(LAST_FAILED)
+    r.register({ gateCache: cache })
+
+    const answered = await call(r.daemon, path('unit'), { method: 'POST', body: {} })
+
+    expect(answered).toEqual({
+      status: 200,
+      body: { gate: 'unit', removed: 1, scope: 'last_failure', tree: LAST_FAILED },
+    })
+    expect(cache.calls).toEqual([{ gateId: 'unit', tree: LAST_FAILED }])
+    const rows = r.journal.events(RUN_ID).filter((event) => event.type === 'gate_cache_invalidated')
+    expect(rows.map((event) => event.payload)).toEqual([
+      { gate: 'unit', tree: LAST_FAILED, scope: 'last_failure', removed: 1 },
+    ])
+  })
+
+  it('forgets nothing when no failure is cached, and never widens to every tree', async () => {
+    const r = await rig()
+    const cache = recordingCache()
+    r.register({ gateCache: cache })
+
+    const answered = await call(r.daemon, path('unit'), { method: 'POST', body: {} })
+    const both = await call(r.daemon, path('unit'), { method: 'POST', body: { tree: TREE, all: true } })
+
+    expect(answered).toEqual({ status: 200, body: { gate: 'unit', removed: 0, scope: 'last_failure' } })
+    expect(ErrorResponseSchema.parse(both.body).error).toBe('tree_and_all')
+    expect(cache.calls).toEqual([])
   })
 
   it('is not an agent’s: its way past a stale verdict is `gate --no-cache`', async () => {

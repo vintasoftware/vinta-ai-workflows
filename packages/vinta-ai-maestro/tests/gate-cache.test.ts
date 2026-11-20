@@ -458,4 +458,21 @@ describe('escaping a stale verdict', () => {
     expect(cache.lookup('lint', first, config)).toBeDefined()
     expect(cache.invalidate('suite')).toBe(0)
   })
+
+  /** What an invalidation that names no tree forgets: the red verdict in doubt, not every lane's green. */
+  it('names the tree a gate’s last cached failure is on, and none when every result passed', async () => {
+    const green = laneTreeHash(repo)
+    await run({ gateId: 'suite' })
+    expect(cache.lastFailedTree('suite')).toBeUndefined()
+
+    await writeFile(join(repo, 'src.txt'), 'v2\n')
+    const red = laneTreeHash(repo)
+    staleRed(red, gateConfigKey(gate()))
+
+    expect(cache.lastFailedTree('suite')).toBe(red)
+    // Forgetting it leaves the green result on the other tree where it was.
+    expect(cache.invalidate('suite', cache.lastFailedTree('suite'))).toBe(1)
+    expect(cache.lookup('suite', green, gateConfigKey(gate()))).toBeDefined()
+    expect(cache.lastFailedTree('suite')).toBeUndefined()
+  })
 })

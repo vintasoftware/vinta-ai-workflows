@@ -64,6 +64,26 @@ export const DEFAULT_COLD_RUN_MS = 20 * 60 * 1000
 /** A phase queued behind the integration worktree this long is stuck behind something. */
 export const DEFAULT_INTEGRATION_WAIT_MS = 20 * 60 * 1000
 
+/**
+ * A question unanswered this long is worth a look — longer than the default
+ * `--retry-after`, so a failure question the timer is about to answer does
+ * not wake anybody. An agent's question wakes at once: no timer answers it.
+ *
+ * Questions woke nothing before. One observed wave's question sat eleven
+ * hours, from one in the morning to past noon, while the only wakes were for
+ * errors and elapsed phases: a retry withheld for unchanged inputs, a lane
+ * left dirty, a merge commit a hook refused all wait for an answer, and the
+ * coordinator is the one thing that can give it overnight.
+ */
+export const DEFAULT_QUESTION_WAIT_MS = 30 * 60 * 1000
+
+/**
+ * A phase waiting on harness capacity this long: a plan window, a rate limit
+ * that does not lift. Most of these end by themselves; one that does not may
+ * want the run moved to another harness (`switch-harness`).
+ */
+export const DEFAULT_CAPACITY_WAIT_MS = 30 * 60 * 1000
+
 export type CoordinatorTrigger =
   | {
       readonly kind: 'phase_elapsed'
@@ -130,6 +150,37 @@ export type CoordinatorTrigger =
       readonly holder: string | null
       readonly observedMs: number
     }
+  /**
+   * A phase parked on a question nobody has answered: an agent's at once, any
+   * other past `DEFAULT_QUESTION_WAIT_MS`. `question` is the journal's
+   * fixed sentence, never an agent's prose (§11).
+   */
+  | {
+      readonly kind: 'question_waiting'
+      readonly key: string
+      readonly nodeId: string
+      readonly effectId: string
+      readonly questionKind: string
+      readonly question: string
+      readonly choices: readonly string[]
+      readonly observedMs: number
+    }
+  /** A phase in `waiting_on_capacity` past `DEFAULT_CAPACITY_WAIT_MS`. */
+  | {
+      readonly kind: 'capacity_wait'
+      readonly key: string
+      readonly nodeId: string
+      readonly observedMs: number
+    }
+  /** A staffed phase dispatched and still waiting for a crew member (`node_wait` on `crew`). */
+  | {
+      readonly kind: 'crew_wait'
+      readonly key: string
+      readonly nodeId: string
+      readonly member: string | null
+      readonly holder: string | null
+      readonly observedMs: number
+    }
   | {
       readonly kind: 'maestro_error'
       readonly key: string
@@ -144,6 +195,8 @@ export interface TriggerOptions {
   readonly gateCostCeilingMs?: number
   readonly gateCostPerPhaseMs?: number
   readonly integrationWaitMs?: number
+  readonly questionWaitMs?: number
+  readonly capacityWaitMs?: number
   /** A single uncached run this long reads as a cold lane (`DEFAULT_COLD_RUN_MS`). */
   readonly coldRunMs?: number
   /**
@@ -174,6 +227,8 @@ export function triggersFrom(
     options.workflow === undefined ? [] : unscopedGates(options.workflow, null).map((finding) => finding.gateId),
   )
   const integrationWaitMs = options.integrationWaitMs ?? DEFAULT_INTEGRATION_WAIT_MS
+  const questionWaitMs = options.questionWaitMs ?? DEFAULT_QUESTION_WAIT_MS
+  const capacityWaitMs = options.capacityWaitMs ?? DEFAULT_CAPACITY_WAIT_MS
   const coldRunMs = options.coldRunMs ?? DEFAULT_COLD_RUN_MS
 
   const found: CoordinatorTrigger[] = []
@@ -254,6 +309,44 @@ export function triggersFrom(
     }
   }
 
+  for (const [nodeId, asked] of openQuestions(events)) {
+    const observedMs = now - asked.since
+    if (asked.kind === 'agent' || observedMs >= questionWaitMs) {
+      found.push({
+        kind: 'question_waiting',
+        key: `question:${nodeId}:${asked.effectId}@${asked.since}`,
+        nodeId,
+        effectId: asked.effectId,
+        questionKind: asked.kind,
+        question: asked.question,
+        choices: asked.choices,
+        observedMs,
+      })
+    }
+  }
+
+  for (const [nodeId, since] of statusSince(events, 'waiting_on_capacity')) {
+    const observedMs = now - since
+    if (observedMs >= capacityWaitMs) {
+      found.push({ kind: 'capacity_wait', key: `capacity:${nodeId}@${since}`, nodeId, observedMs })
+    }
+  }
+
+  // The same threshold: either way a phase reads `running` and nothing runs.
+  for (const [nodeId, wait] of crewWaits(events)) {
+    const observedMs = now - wait.since
+    if (observedMs >= integrationWaitMs) {
+      found.push({
+        kind: 'crew_wait',
+        key: `crew:${nodeId}@${wait.since}`,
+        nodeId,
+        member: wait.member,
+        holder: wait.holder,
+        observedMs,
+      })
+    }
+  }
+
   return found
 }
 
@@ -313,6 +406,29 @@ function describeTrigger(trigger: CoordinatorTrigger): string {
       return (
         `- phase ${trigger.nodeId} has waited ${minutes(trigger.observedMs)} minutes for the integration ` +
         `worktree${trigger.holder === null ? '' : `, held by ${trigger.holder}`}`
+      )
+    case 'question_waiting':
+      return trigger.questionKind === 'agent'
+        ? `- phase ${trigger.nodeId}'s agent stopped to ask for a decision (${trigger.effectId}). No timer ` +
+            'answers it. Read the questions on the phase (`node`), and answer them (`node answer`) only when ' +
+            'the plan, the spec or a decision already made settles them; a question the spec leaves open, or ' +
+            'names as somebody\u2019s to decide, is a person\u2019s: leave it, and say so'
+        : `- phase ${trigger.nodeId} has waited ${minutes(trigger.observedMs)} minutes on a question ` +
+            `(${trigger.effectId}): "${trigger.question}"` +
+            `${trigger.choices.length === 0 ? '' : ` [${trigger.choices.join(' | ')}]`}. ` +
+            'Nothing moves the phase until it is answered; if no timer will, find out why it was asked'
+    case 'capacity_wait':
+      return (
+        `- phase ${trigger.nodeId} has waited ${minutes(trigger.observedMs)} minutes on harness capacity ` +
+        '(a plan window or a rate limit). It resumes by itself when the harness answers; if the reset is ' +
+        'hours away and the plan can run elsewhere, the run can move (`switch-harness`)'
+      )
+    case 'crew_wait':
+      return (
+        `- phase ${trigger.nodeId} has waited ${minutes(trigger.observedMs)} minutes for ` +
+        `${trigger.member === null ? 'a crew member' : `crew member ${trigger.member}`}` +
+        `${trigger.holder === null ? '' : `, held by ${trigger.holder}`}: nothing runs for it until one is free. ` +
+        'If the holder is parked on a question, answer it; or put the phase on another member (`node reassign`)'
       )
     case 'maestro_error':
       return (
@@ -435,7 +551,8 @@ function integrationWaits(
     const nodeId = nodeOf(event)
     if (nodeId === null) continue
     if (event.type === 'node_wait') {
-      const payload = event.payload as { state?: string; holder?: string | null }
+      const payload = event.payload as { on?: string; state?: string; holder?: string | null }
+      if (payload.on === 'crew') continue
       if (payload.state === 'queued') waits.set(nodeId, { since: event.ts, holder: payload.holder ?? null })
       else waits.delete(nodeId)
     } else if (event.type === 'node_status') {
@@ -446,6 +563,100 @@ function integrationWaits(
     }
   }
   return waits
+}
+
+/** Staffed nodes still waiting for a crew member: since when, for whom, and behind which phase. */
+function crewWaits(
+  events: readonly StoredEvent[],
+): ReadonlyMap<string, { readonly since: number; readonly member: string | null; readonly holder: string | null }> {
+  const waits = new Map<string, { readonly since: number; readonly member: string | null; readonly holder: string | null }>()
+  for (const event of events) {
+    if (event.type === 'run_resumed') {
+      waits.clear()
+      continue
+    }
+    const nodeId = nodeOf(event)
+    if (nodeId === null) continue
+    if (event.type === 'node_wait') {
+      const payload = event.payload as { on?: string; state?: string; member?: string | null; holder?: string | null }
+      if (payload.on !== 'crew') continue
+      if (payload.state === 'queued') {
+        waits.set(nodeId, {
+          since: waits.get(nodeId)?.since ?? event.ts,
+          member: payload.member ?? null,
+          holder: payload.holder ?? null,
+        })
+      } else waits.delete(nodeId)
+    } else if (event.type === 'node_status') {
+      if ((event.payload as { status?: string }).status !== 'running') waits.delete(nodeId)
+    }
+  }
+  return waits
+}
+
+/**
+ * Questions asked and not answered, one per node: the last `human_question`
+ * with no `human_answered` for its effect since, on a node still
+ * `awaiting_human`. A resume asks again, so it starts the fold over.
+ */
+function openQuestions(events: readonly StoredEvent[]): ReadonlyMap<
+  string,
+  {
+    readonly effectId: string
+    readonly kind: string
+    readonly question: string
+    readonly choices: readonly string[]
+    readonly since: number
+  }
+> {
+  const open = new Map<
+    string,
+    { effectId: string; kind: string; question: string; choices: readonly string[]; since: number }
+  >()
+  for (const event of events) {
+    if (event.type === 'run_resumed') {
+      open.clear()
+      continue
+    }
+    const nodeId = nodeOf(event)
+    if (nodeId === null) continue
+    if (event.type === 'human_question') {
+      const payload = event.payload as { effect_id?: string; kind?: string; question?: string; choices?: readonly string[] }
+      if (payload.effect_id === undefined) continue
+      open.set(nodeId, {
+        effectId: payload.effect_id,
+        kind: payload.kind ?? 'choice',
+        question: payload.question ?? '',
+        choices: payload.choices ?? [],
+        since: event.ts,
+      })
+    } else if (event.type === 'human_answered') {
+      const payload = event.payload as { effect_id?: string }
+      if (open.get(nodeId)?.effectId === payload.effect_id) open.delete(nodeId)
+    } else if (event.type === 'node_status') {
+      const status = (event.payload as { status?: string }).status
+      if (status !== 'awaiting_human') open.delete(nodeId)
+    }
+  }
+  return open
+}
+
+/** Since when each node has been in `status` without a break, a repeated row not counting as one. */
+function statusSince(events: readonly StoredEvent[], status: string): ReadonlyMap<string, number> {
+  const since = new Map<string, number>()
+  for (const event of events) {
+    if (event.type === 'run_resumed') {
+      since.clear()
+      continue
+    }
+    if (event.type !== 'node_status') continue
+    const nodeId = nodeOf(event)
+    if (nodeId === null) continue
+    if ((event.payload as { status?: string }).status === status) {
+      if (!since.has(nodeId)) since.set(nodeId, event.ts)
+    } else since.delete(nodeId)
+  }
+  return since
 }
 
 function nodeOf(event: StoredEvent): string | null {
