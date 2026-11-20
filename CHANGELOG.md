@@ -94,7 +94,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   phase's own.** The run digest keeps a fixer's last line apart from the
   phase's, with the phase whose branch it was merging.
 
-## [0.7.1] — YYYY-MM-DD
+## [0.7.1] — 2026-11-04
 
 ### Added
 
