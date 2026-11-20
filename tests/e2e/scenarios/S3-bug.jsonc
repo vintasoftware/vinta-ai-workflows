@@ -1,0 +1,26 @@
+// S3 — Bug workflow (PLAN §5, §13.3). `/systematic-debugging` pointed at a
+// planted defect with a currently-failing MockClient test. Runs against
+// `current/`.
+{
+  "id": "S3-bug",
+  "fixture": "medplum-provider",
+  "state": "current",
+  "steps": [
+    {
+      "invoke": "/systematic-debugging",
+      "input": "tasks/bug.md",
+      "answers": "tasks/bug.answers.md",
+      "autonomous": true
+    }
+  ],
+  "graders": ["bug-fixed", "git-tree-healthy"],
+  "expect": {
+    "bug": {
+      // The previously-failing test flips green with no regressions; the fix must
+      // touch the planted region (guard against "deleted the test").
+      "region": "src/pages/patient/allergies",
+      "testFile": "src/pages/patient/allergies/AllergyPanel.test.tsx"
+    }
+  },
+  "budget": { "maxWallSec": 1500 }
+}
