@@ -159,6 +159,7 @@ import {
   CHORE_TIMINGS,
   type ChoreTiming,
   type CrewMember,
+  type Effort,
   isJudgeGate,
   type Node,
   type Pipeline,
@@ -4610,6 +4611,7 @@ export class Scheduler {
         setAside: this.#setAsideFor(state),
       }),
       model: this.#modelFor(state, params),
+      ...this.#effortField(state),
       ...envField(),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
       // The handoff token: either the slot's session (§15) or, for a pipeline
@@ -4701,6 +4703,7 @@ export class Scheduler {
     // Read once: a reassignment while the agent waits on an answer moves the
     // phase's next turn, not the session this one resumes.
     const turnModel = this.#modelFor(state, params)
+    const turnEffort = this.#effortField(state)
     let turn: Turn = {
       adapter,
       cwd,
@@ -4715,6 +4718,7 @@ export class Scheduler {
         cwd,
         prompt,
         model: turnModel,
+        ...turnEffort,
         ...envField(),
         resumeSessionId,
       }),
@@ -6067,6 +6071,19 @@ export class Scheduler {
     const override = params['model']
     if (typeof override === 'string') return override
     return this.#resolved(state).model
+  }
+
+  /**
+   * The phase's effort, as an `AgentTask` field, read off the run's *current*
+   * workflow rather than the definition the node started with. An amendment
+   * that changes it is live-safe (`amend/diff.ts`): it reaches a running
+   * phase's next turn, which `state.node` — swapped only for a node that has
+   * not started — would never do. Every turn of the phase carries it: the
+   * implement turn, each fix round and every chore, the review included.
+   */
+  #effortField(state: NodeState): { readonly effort?: Effort } {
+    const effort = this.#workflow.nodes.find((node) => node.id === state.node.id)?.effort ?? state.node.effort
+    return effort === undefined ? {} : { effort }
   }
 
   /**

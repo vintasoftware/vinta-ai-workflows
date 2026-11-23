@@ -73,8 +73,14 @@ const TOPOLOGY_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>([
  * never satisfied. Which gates a phase must pass is part of what the phase
  * *is*, so it is folded into `body` below and blocks exactly as the rest of the
  * body does.
+ *
+ * A phase's effort is the other one. The scheduler reads it off the run's
+ * current workflow at every spawn, never off the definition the node started
+ * with, so a running phase's next turn runs at the new level, and nothing it
+ * already did was done against a definition it no longer has. Effort is how
+ * hard a turn works, not what the phase is.
  */
-const LIVE_SAFE_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>(['gates_changed'])
+const LIVE_SAFE_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>(['gates_changed', 'effort_changed'])
 
 /**
  * Kinds that change *who* works a phase, not what it is: its harness, its
@@ -127,6 +133,7 @@ interface Effective {
   readonly gates: string
   readonly harness: string
   readonly model: string
+  readonly effort: string
   readonly pipeline: string
   readonly body: string
   readonly crew: string
@@ -326,6 +333,7 @@ function effective(workflow: Workflow, node: Node): Effective {
     gates: JSON.stringify(node.gates.map((id) => workflow.gates[id] ?? null)),
     harness: node.harness ?? workflow.defaults.harness,
     model: node.model ?? workflow.defaults.model,
+    effort: node.effort ?? '',
     pipeline: node.pipeline ?? workflow.defaults.pipeline,
     body: JSON.stringify([
       node.name,
@@ -352,6 +360,7 @@ function kindsFor(old: Effective, next: Effective): AmendmentKind[] {
   if (old.gates !== next.gates) kinds.push('gates_changed')
   if (old.harness !== next.harness) kinds.push('harness_changed')
   if (old.model !== next.model) kinds.push('model_changed')
+  if (old.effort !== next.effort) kinds.push('effort_changed')
   if (old.pipeline !== next.pipeline) kinds.push('pipeline_changed')
   if (old.body !== next.body) kinds.push('body_changed')
   if (old.crew !== next.crew) kinds.push('crew_changed')

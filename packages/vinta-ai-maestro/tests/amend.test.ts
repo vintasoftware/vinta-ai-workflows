@@ -381,6 +381,19 @@ describe('classifying an amendment', () => {
     expect(diff.blocking).toEqual([])
   })
 
+  it('lets a running phase take a new effort, since every turn reads it afresh', () => {
+    const before = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }])
+    const after = edit(before, 'a', { effort: 'xhigh' })
+
+    const diff = diffWorkflows(before, after)
+    expect(diff.changes).toEqual([{ node: 'a', kind: 'effort_changed' }])
+    // How hard a turn works, not what the phase is: no base moves, no content
+    // has to be rebuilt, and the phase that needs it is the one running.
+    expect(diff.rebaseable).toEqual([])
+    expect(diff.contentChanged).toEqual([])
+    expect(diff.blocking).toEqual([])
+  })
+
   it('treats a node’s declared gate list as its body, which does block', () => {
     // The distinction `gates_changed` could not previously express. A phase
     // that *gains* a gate mid-flight would finish without ever running it and

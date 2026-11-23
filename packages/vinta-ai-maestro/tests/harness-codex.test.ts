@@ -628,6 +628,52 @@ describe('spawn against a fake app server', () => {
     expect(fake.sent('thread/backgroundTerminals/clean').length).toBe(1)
   })
 
+  describe('effort', () => {
+    const models = (levels: readonly string[]) => ({
+      'model/list': {
+        result: {
+          data: [
+            { id: 'other', model: 'other', supportedReasoningEfforts: [{ reasoningEffort: 'max', description: '' }] },
+            {
+              id: 'gpt-5.6-luna',
+              model: 'gpt-5.6-luna',
+              supportedReasoningEfforts: levels.map((reasoningEffort) => ({ reasoningEffort, description: '' })),
+            },
+          ],
+          nextCursor: null,
+        },
+      },
+    })
+    const turnEffort = (fake: FakeAppServer): unknown =>
+      (fake.sent('turn/start')[0]?.['params'] as Record<string, unknown>)['effort']
+
+    it('sends the phase’s effort on the turn when the model offers it', async () => {
+      const fake = server({ turns: [plainTurn], replies: models(['low', 'medium', 'high', 'xhigh']) })
+      await drain(await start(fake, {}, { effort: 'xhigh' }))
+      expect(turnEffort(fake)).toBe('xhigh')
+    })
+
+    it('clamps to the nearest level the model offers', async () => {
+      const fake = server({ turns: [plainTurn], replies: models(['low', 'medium', 'high']) })
+      await drain(await start(fake, {}, { effort: 'max' }))
+      expect(turnEffort(fake)).toBe('high')
+    })
+
+    it('runs at the CLI’s default when the model list cannot say', async () => {
+      // No reply configured: the fake answers `model/list` "method not found".
+      const fake = server({ turns: [plainTurn] })
+      await drain(await start(fake, {}, { effort: 'high' }))
+      expect(turnEffort(fake)).toBeUndefined()
+    })
+
+    it('asks nothing when the phase names no effort', async () => {
+      const fake = server({ turns: [plainTurn], replies: models(['high']) })
+      await drain(await start(fake))
+      expect(fake.sent('model/list')).toHaveLength(0)
+      expect(turnEffort(fake)).toBeUndefined()
+    })
+  })
+
   it('defers to the CLI’s own model when the task names none', async () => {
     const fake = server({ turns: [plainTurn] })
     await drain(await start(fake, {}, { model: '' }))

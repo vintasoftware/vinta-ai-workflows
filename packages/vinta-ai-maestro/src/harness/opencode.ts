@@ -1460,6 +1460,9 @@ export class OpencodeAdapter implements HarnessAdapter {
     // when the operator typed, so this spawn is its only delivery.
     if (task.operatorText !== undefined) session.noteOperator(task.operatorText)
 
+    // `task.effort` is not sent. opencode names a reasoning level per provider,
+    // and no field for it has been checked against a running server, so the
+    // turn runs at the effort the operator configured for the model.
     const prompt = await postJson(`${server.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       parts: [
         { type: 'text', text: task.prompt },

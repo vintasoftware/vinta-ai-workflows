@@ -820,6 +820,18 @@ describe('continuous DAG dispatch', () => {
     expectDrained(r)
   })
 
+  it('runs every turn of a phase at the phase’s effort, and leaves an unset one to the harness', async () => {
+    const r = rig(makeWorkflow([node('a', [], { effort: 'high' }), node('b', ['a'])]))
+    const report = await r.scheduler.run()
+
+    expect(report.status).toBe('completed')
+    const of = (id: string) => r.adapter.spawned.filter((task) => task.nodeId === id)
+    expect(of('a').length).toBeGreaterThan(0)
+    expect(of('a').every((task) => task.effort === 'high')).toBe(true)
+    expect(of('b').every((task) => !('effort' in task))).toBe(true)
+    expectDrained(r)
+  })
+
   it('runs a diamond with the middle pair together and the join last', async () => {
     const r = rig(
       makeWorkflow([node('a'), node('b', ['a']), node('c', ['a']), node('d', ['b', 'c'])]),

@@ -62,6 +62,8 @@ import {
   type SpawnRefusalKind,
   type TurnRefusal,
 } from './adapter.ts'
+import type { Effort } from '../types.ts'
+import { clampEffort } from './effort.ts'
 import { type AgentPermission, codexThreadPolicy, DEFAULT_PERMISSION } from './permissions.ts'
 import { openPty } from './pty.ts'
 import {
@@ -1697,7 +1699,13 @@ export class CodexAdapter implements HarnessAdapter {
         // labelled as the operator's rather than folded into the brief.
         const input = [textInput(task.prompt)]
         if (task.operatorText !== undefined) input.push(textInput(operatorGuidance(task.operatorText)))
-        const turn = await rpc.request('turn/start', { threadId, input })
+        // On the first turn only: codex keeps a turn's effort for the turns
+        // after it, so a question's answer continues at the same level.
+        const model = task.model.length > 0 ? task.model : asString(asRecord(opened.result)?.['model'])
+        const effort =
+          task.effort === undefined || model === undefined ? undefined : await codexEffort(rpc, model, task.effort)
+        if (settled) return
+        const turn = await rpc.request('turn/start', { threadId, input, ...(effort === undefined ? {} : { effort }) })
         if (settled) return
         if (!turn.ok) return refused(turn)
         session.adopt(asString(asRecord(asRecord(turn.result)?.['turn'])?.['id']))
@@ -1705,6 +1713,39 @@ export class CodexAdapter implements HarnessAdapter {
       })()
     })
   }
+}
+
+/**
+ * The level to ask codex for: the phase's effort, fitted to the levels the
+ * model advertises (`model/list`'s `supportedReasoningEfforts`).
+ *
+ * Asked rather than assumed, because the app server takes only "a reasoning
+ * effort value advertised by the model" and a level the model lacks can fail
+ * the turn. For the same reason a model the list does not name, or a list that
+ * cannot be read, gets no effort at all: the turn runs at the CLI's configured
+ * default, which is what it did before plans carried effort.
+ */
+async function codexEffort(rpc: Rpc, model: string, wanted: Effort): Promise<string | undefined> {
+  let cursor: string | undefined
+  // Bounded: a server that keeps handing back a cursor must not hold the spawn.
+  for (let page = 0; page < 10; page++) {
+    const reply = await rpc.request('model/list', { includeHidden: true, ...(cursor === undefined ? {} : { cursor }) })
+    if (!reply.ok) return undefined
+    const result = asRecord(reply.result)
+    const data: unknown[] = Array.isArray(result?.['data']) ? result['data'] : []
+    for (const entry of data) {
+      const record = asRecord(entry)
+      if (record === undefined || (record['model'] !== model && record['id'] !== model)) continue
+      const options: unknown[] = Array.isArray(record['supportedReasoningEfforts']) ? record['supportedReasoningEfforts'] : []
+      const offered = options
+        .map((option) => asString(asRecord(option)?.['reasoningEffort']))
+        .filter((level): level is string => level !== undefined)
+      return clampEffort(wanted, offered)
+    }
+    cursor = asString(result?.['nextCursor'])
+    if (cursor === undefined) return undefined
+  }
+  return undefined
 }
 
 const notLoggedIn = (nodeId: string): SpawnRefusal => ({

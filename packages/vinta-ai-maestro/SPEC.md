@@ -208,6 +208,8 @@ Expressing parallel phase execution inside a single state machine would require 
 
 `touches` is the Touch List. The daemon warns — does not refuse — when two nodes in the same wave declare overlapping paths.
 
+`effort` is the phase's `**Effort**:` line: `low`, `medium`, `high`, `xhigh` or `max`, the scale every vendor exposes under its own name (Anthropic's `effort`, OpenAI's `reasoning.effort`, Gemini's `thinking_level`). It belongs to the node rather than to the crew member. A member's tier is its model, which cannot change between phases without losing the session it carries, but effort is set per turn. So a member keeps its session and still works each phase at that phase's level. Every turn of the phase carries it: the implement turn, each fix round and every chore. The scheduler reads it from the run's *current* workflow at each spawn, which makes an amendment that changes it live-safe (`effort_changed`, like a gate command): a running phase takes the new level at its next turn. Absent means the harness's own configured default. Each adapter decides how the level reaches its CLI (§7).
+
 ### 5.2 Pipeline state machines
 
 Authored in a shape close to `vinta-state-machine-editor`'s own (`states` / `transitions` / `initialStateIds` / `finalStateIds`, with `trigger`, `guard`, `effects` per transition and a host-owned `data` blob on every entity).
@@ -417,6 +419,8 @@ type AgentEvent =
 Two details in that block are load-bearing and were both corrected during implementation.
 
 **`user_message` is part of the union.** §5.3 makes the transcript exactly this stream, and §9 lets an operator steer a running agent. Without a variant for the message they typed, the one input that changed a run's direction would be missing from the record of it — and "assert the injected message appears in the transcript" would be untestable.
+
+**Effort reaches each CLI its own way, and never fails a turn.** An `AgentTask` carries the phase's `effort` when it has one (§5.1). claude-code gets `--effort <level>` on every spawn and fits the level to the model itself. On codex the effort goes on the first `turn/start`, and the turns after it keep that level. But the app server takes only a level the model advertises, so the adapter first reads the model's `supportedReasoningEfforts` from `model/list` and sends the nearest level at or below the one asked for, or the nearest above when nothing is below. A model the list does not name, or a list that cannot be read, gets no effort, and the turn runs at the CLI's configured default. opencode sends none yet: no field for it has been checked against a running server.
 
 **`id` is a plain string, not the workflow's `harness` enum.** Those are different contracts: the enum constrains what a *workflow may request*, while this is the internal registry key that admission control keeps one ceiling under. Pinning them together forces test and out-of-tree adapters to impersonate a real vendor and contend for its ceiling.
 
@@ -1085,7 +1089,7 @@ The same kind with the same words is one decision. The list is prose — the ope
 
 - **The skills path's host.** `review-phase` runs the same `thermo-nuclear-review-loop` (`partials/review-loop.md`), but the conductor hosts it rather than the implementer, because a sub-agent cannot spawn sub-agents of its own. The conductor spawns the one reviewer, continues the phase's implementer as the fixer, and asks the gate questions itself. Its reviewer runs one tier above the tier the implementer ran at, and it pauses after 20 unapproved passes; neither rule is specified here.
 - **Reviewer edits.** The prompt tells the implementer to check `HEAD` and `git status` around each pass and not to build on anything the reviewer changed. The host no longer checks it, because the reviewer is a sub-agent of the implementer's turn and the turn itself edits the tree.
-- **The reviewer's model.** The prompt asks for the harness's most capable tier. Reasoning effort and the tier itself are the harness's to resolve, not the scheduler's.
+- **The reviewer's model.** The prompt asks for the harness's most capable tier. Reasoning effort and the tier itself are the harness's to resolve, not the scheduler's. The phase's `effort` (§5.1) sets the implementer's turn, not the reviewer it spawns.
 
 ---
 

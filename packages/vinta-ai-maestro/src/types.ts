@@ -13,6 +13,15 @@ import { z } from 'zod'
 
 export const HARNESS_IDS = ['claude-code', 'codex', 'opencode'] as const
 
+/**
+ * How hard the model works on a turn, cheapest first. Every vendor exposes the
+ * same scale under its own name (`effort`, `reasoning.effort`,
+ * `thinking_level`); the order matters, because an adapter whose model lacks a
+ * level clamps along it.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export type Effort = (typeof EFFORT_LEVELS)[number]
+
 /** Side effects a pipeline transition may invoke. The host owns this catalog. */
 export const EFFECT_IDS = [
   'spawn_agent',
@@ -677,6 +686,15 @@ export const NodeSchema = z.strictObject({
     .string()
     .optional()
     .describe('Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.'),
+  effort: z
+    .enum(EFFORT_LEVELS)
+    .optional()
+    .describe(
+      'How hard the agent works on every turn of this phase — the plan’s `**Effort**:` line. ' +
+        'Per phase, not per member: a member keeps its model and session across phases, and ' +
+        'effort is set per turn. Absent runs at the harness’s configured default. A model ' +
+        'that lacks the level runs at the nearest one it has, below first.',
+    ),
   crew: Id.optional().describe(
     'The member this phase is assigned to. Their tier is the floor for it: a busier roster ' +
       'may hand the phase to a free member at that tier or above, never below.',

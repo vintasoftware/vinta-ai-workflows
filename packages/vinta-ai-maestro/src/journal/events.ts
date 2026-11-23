@@ -250,6 +250,8 @@ export type AmendmentKind =
   | 'gates_changed'
   | 'harness_changed'
   | 'model_changed'
+  /** `nodes[].effort` — read per turn, so a running phase takes it at its next one. */
+  | 'effort_changed'
   | 'pipeline_changed'
   /** Name, `prompt_ref`, `touches` or `max_fix_rounds` — the phase body. */
   | 'body_changed'

@@ -26,6 +26,8 @@
  * the transcript files under the run directory (§5.3).
  */
 
+import type { Effort } from '../types.ts'
+
 /**
  * Everything an adapter needs to start one agent turn. `prompt` is the phase
  * brief itself; it is task input, never something to log or embed in an error.
@@ -37,6 +39,12 @@ export interface AgentTask {
   readonly cwd: string
   readonly prompt: string
   readonly model: string
+  /**
+   * The phase's effort (`nodes[].effort`). Absent leaves the harness at its own
+   * configured default. An adapter that cannot set effort ignores it; one that
+   * can learn the model's levels clamps it first (`effort.ts`).
+   */
+  readonly effort?: Effort
   /**
    * Steering the operator typed while this node had nowhere live to put it —
    * a harness whose `inject` is false, or a node that was down on a capacity
