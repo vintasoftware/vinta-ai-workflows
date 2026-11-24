@@ -33,6 +33,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the new level at its next turn. A node without `effort` runs exactly as
   before.
 
+### Changed
+
+- **`plan-feature` model tiers refreshed for November 2026, and Tier 4 is now
+  reserved.** Tier 4 (Claude Fable 5.2, GPT-6.2 Sol, Gemini 4 Argon) is for
+  work that is really exploratory or builds a new complex UI, and nothing
+  else. Hard work whose approach the plan already spells out (cycle
+  detection, deferred-constraint batch protocols, partitioned FK design,
+  perf tuning, heisenbugs) moves to Tier 3 (Claude Opus 5.5, GPT-6.1 Terra,
+  Gemini 4 Neon). Tier 1 moves to Claude Haiku 5.5 and Gemini 3.5
+  Flash-Lite. GPT-6 Astra is no longer recommended at any tier. Plans staffed
+  before this change keep the models they name; re-run `plan-feature` or
+  edit the Crew table to pick the new ones up. The nightly `check-ai-models`
+  proposer now keeps each Tier 4 entry on its own model line.
+
 ## [0.8.0] — 2026-11-20
 
 ### Changed

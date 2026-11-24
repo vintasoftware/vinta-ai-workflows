@@ -232,13 +232,13 @@ dependency on each other and are implemented concurrently.
 |---|---|---|---|
 | 1 | Phase 0, Phase 1b | `tier1`, `tier2-2` | — |
 | 2 | Phase 1, Phase 2 | `tier2-1`, `tier2-2` | Phase 0 |
-| 3 | Phase 3 | `tier4` | Phase 1, Phase 2 |
+| 3 | Phase 3 | `tier3` | Phase 1, Phase 2 |
 | 4 | Phase 4 — remove the `bookmarks-v2` flag | `tier1` | Phase 3 (deferred — soak-gated) |
 
 **File overlap:** phases in the same wave touch disjoint files, with one exception —
 Phase 1 and Phase 2 both export from `@app/bookmarks/__init__.py`. Trivial merge.
 
-**Idle:** `tier4` has nothing until wave 3 and `tier2-1` nothing until wave 2 — the
+**Idle:** `tier3` has nothing until wave 3 and `tier2-1` nothing until wave 2 — the
 foundation phase is the whole of wave 1 and only one agent can write it.
 ```
 
@@ -462,7 +462,7 @@ First thing under **Phased Rollout**, before the **Execution graph**:
 | `tier1` | 1 | Phase 0, Phase 4 | An empty module and a flag deletion — exact precedent, both of them. |
 | `tier2-1` | 2 | Phase 1 | A DRF viewset mirroring `@app/tags/api/views.py` almost line for line. |
 | `tier2-2` | 2 | Phase 1b, Phase 2 | Serializer with cross-field validation; the producer stub is the same shape. |
-| `tier4` | 4 | Phase 3 | Cycle detection over a user-mutable tree — no precedent in this repo. |
+| `tier3` | 3 | Phase 3 | Cycle detection over a user-mutable tree — hard, but the plan names the algorithm, so nothing about it is exploratory. |
 ```
 
 **Name members after their tier, never after a seniority.** A member is `tier<N>`, or `tier<N>-<k>` when the roster carries more than one at that tier. Ids are lowercase kebab-case — the schema rejects anything else.
@@ -505,11 +505,13 @@ When those two genuinely cannot both hold, **the floor wins and the plan says so
 #### Tier 2 — standard pattern application
 **Use for**: repository methods, DRF serializer with non-trivial validation, ViewSet wiring with filterset, pytest unit/integration tests against established fixtures, simple HStore/ArrayField additions.
 
-#### Tier 3 — multi-file orchestration, business logic, SQL views
-**Use for**: use case coordinating across repositories with non-trivial branching, new `vw_*` view + non-managed model + migration, serializer with cross-field validation affecting use-case behavior, integration tests covering concurrency edges.
+#### Tier 3 — multi-file orchestration, business logic, architectural / hard
+**Use for**: use case coordinating across repositories with non-trivial branching, new `vw_*` view + non-managed model + migration, serializer with cross-field validation affecting use-case behavior, integration tests covering concurrency edges — and hard but well-specified work: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
 
-#### Tier 4 — architectural / novel / hard
-**Use for**: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
+#### Tier 4 — exploratory / new complex UI (reserved)
+**Use only for**: work that is really exploratory — no precedent in the codebase and the shape of the solution still open (a spike, a prototype, a design the phase itself has to discover) — or a **new complex UI**: a new screen or flow with non-trivial interaction state, a new design-system component, drag-and-drop, a canvas or visual editor.
+
+**Difficulty alone never earns Tier 4.** A phase whose approach the plan already spells out is Tier 3, however hard the algorithm or the debugging. Ask: *does the implementer have to discover what to build, or only build what the plan says?* Only the first is Tier 4. Same for UI: a new component that follows an existing screen's pattern is Tier 2 or 3; only a new interaction model is Tier 4. The **Why this tier** cell of a Tier 4 row says which of the two it is — exploratory, or new complex UI — and why.
 
 ### Effort per phase
 
@@ -919,23 +921,23 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
   "crew": {
     "tier1": {
       "tier": 1,
-      "model": "claude-haiku-4-5",
+      "model": "claude-haiku-5-5",
       "description": "A model plus its migration, and a flag deletion."
     },
     "tier2-1": {
       "tier": 2,
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "description": "A DRF viewset mirroring the tags viewset."
     },
     "tier2-2": {
       "tier": 2,
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "description": "Tree serializer and the list action that returns it."
     }
   },
   "defaults": {
     "harness": "claude-code",
-    "model": "claude-sonnet-5",
+    "model": "claude-sonnet-5-5",
     "pipeline": "standard-phase",
     "chores": [
       "review",
