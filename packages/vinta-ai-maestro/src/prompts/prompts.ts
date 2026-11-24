@@ -56,6 +56,7 @@ import { type Decision, REJECTED_MARKER, selectDecisions } from '../decisions/in
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
+import { promotionCeiling, RESERVED_TIER, roster } from '../scheduler/crew.ts'
 import { AGENT_ROLES, CODEGEN_GATE_PREFIX, isJudgeGate, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
 
 /** The line a review chore is asked to end on, and the one `executor.ts` reads. */
@@ -527,6 +528,8 @@ interface Continuation {
   /** What was settled for this phase. Host state, so a delta carries it too. */
   readonly decisions: readonly Decision[]
   readonly setAside: readonly SetAsideWork[]
+  /** The model the review chore spawns its reviewer on (`reviewerFor`). */
+  readonly reviewer: ReviewerPick
 }
 
 /** What a cold turn is composed from: the above, plus everything read off disk. */
@@ -561,7 +564,47 @@ function resume(request: SpawnPromptRequest, workspace: string): Continuation {
         : null,
     decisions: request.decisions ?? [],
     setAside: request.setAside ?? [],
+    reviewer: reviewerFor(workflow, node, request.harness ?? workflow.defaults.harness),
   }
+}
+
+/**
+ * Which model the review chore's reviewer runs on.
+ *
+ * `top` — the harness's most capable tier — only for a phase the plan staffed
+ * at the reserved tier, or for a workflow with no roster to say otherwise.
+ * Below it, the reviewer is the roster's most capable member on this
+ * session's harness that a promotion could reach (`promotionCeiling`): the
+ * top tier is the plan's to give, and asking a harness for its best model
+ * hands it out on every review. With no such member, the session's own model.
+ */
+export type ReviewerPick =
+  | { readonly kind: 'top' }
+  | { readonly kind: 'model'; readonly model: string }
+  | { readonly kind: 'own' }
+
+export function reviewerFor(workflow: Workflow, node: Node, harness: string): ReviewerPick {
+  const planned = node.crew === undefined ? undefined : workflow.crew[node.crew]
+  if (planned === undefined || planned.tier >= RESERVED_TIER) return { kind: 'top' }
+  const cap = promotionCeiling(planned.tier)
+  const reachable = roster(workflow.crew).filter(
+    (member) =>
+      member.tier >= planned.tier &&
+      member.tier <= cap &&
+      (member.harness ?? workflow.defaults.harness) === harness,
+  )
+  const best = reachable.reduce<(typeof reachable)[number] | undefined>(
+    (found, member) => (found === undefined || member.tier > found.tier ? member : found),
+    undefined,
+  )
+  return best === undefined ? { kind: 'own' } : { kind: 'model', model: best.model }
+}
+
+/** The reviewer clause of the review chore's spawn line. */
+function reviewerModelClause(pick: ReviewerPick): string {
+  if (pick.kind === 'model') return `on \`${pick.model}\``
+  if (pick.kind === 'own') return 'on the model you are running on'
+  return 'on its most capable model tier'
 }
 
 function gather(request: SpawnPromptRequest, workspace: string): Materials {
@@ -1768,14 +1811,14 @@ function reviewRules(materials: Continuation, chore: ChoreMaterials, cold: boole
     'Exactly one reviewer sub-agent for this whole turn.',
     ...(materials.background !== null
       ? [
-          `Spawn it on its most capable model tier with ${materials.background.spawn}.`,
+          `Spawn it ${reviewerModelClause(materials.reviewer)} with ${materials.background.spawn}.`,
           `Send every later pass to that same agent — ${materials.background.message} — so`,
           'it keeps its context; it answers in the background, and "Waiting" below says',
           'how to wait for it. The reviewer reads and runs commands but edits nothing: check',
         ]
       : [
           'Spawn it with your harness’s sub-agent tool (claude-code’s Agent tool, or the',
-          'same thing under another name) on its most capable model tier, and',
+          `same thing under another name) ${reviewerModelClause(materials.reviewer)}, and`,
           'send every later pass to that same agent so it keeps its context. It reads',
           'and runs commands but edits nothing: check',
         ]),

@@ -35,6 +35,7 @@ import {
   PromptError,
   readVerdict,
   resolveBrief,
+  reviewerFor,
   VERDICT_MARKER,
   type ChorePrompt,
   type PromptJournal,
@@ -2318,5 +2319,82 @@ describe('a cross-phase continuation', () => {
   /** The reason the session was kept at all — say it, so the agent trusts it. */
   it('tells the agent its knowledge of the repository still holds', () => {
     expect(carried()).toContain('everything you learned about this repository still holds')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The review chore's reviewer model
+// ---------------------------------------------------------------------------
+
+/**
+ * Tier 4 is the plan's to give, never the run's. The review chore used to ask
+ * every reviewer for the harness's most capable tier, which spent the reserved
+ * tier's credits on the review of every phase in the run.
+ */
+describe('the review chore’s reviewer model', () => {
+  const staffed = (crew: Workflow['crew'], assigned: string): Workflow => {
+    const base = diamond()
+    return {
+      ...base,
+      crew,
+      nodes: base.nodes.map((node) => ({ ...node, crew: assigned })),
+    }
+  }
+  const node = (workflow: Workflow) => workflow.nodes.find((n) => n.id === 'api-layer') as Workflow['nodes'][number]
+
+  const ROSTER: Workflow['crew'] = {
+    tier1: { tier: 1, model: 'cheap' },
+    tier2: { tier: 2, model: 'mid' },
+    tier3: { tier: 3, model: 'strong' },
+    tier4: { tier: 4, model: 'reserved' },
+  }
+
+  it('asks for the most capable tier only for a phase planned at Tier 4', () => {
+    const workflow = staffed(ROSTER, 'tier4')
+    expect(reviewerFor(workflow, node(workflow), 'claude-code')).toEqual({ kind: 'top' })
+  })
+
+  it('reviews a phase planned below Tier 4 on the strongest member short of it', () => {
+    for (const assigned of ['tier1', 'tier2', 'tier3']) {
+      const workflow = staffed(ROSTER, assigned)
+      expect(reviewerFor(workflow, node(workflow), 'claude-code')).toEqual({ kind: 'model', model: 'strong' })
+    }
+  })
+
+  it('never reviews below the phase’s own tier, and skips members on another harness', () => {
+    const workflow = staffed(
+      {
+        tier2: { tier: 2, model: 'mid' },
+        tier3: { tier: 3, model: 'strong', harness: 'codex' },
+        tier4: { tier: 4, model: 'reserved' },
+      },
+      'tier2',
+    )
+    expect(reviewerFor(workflow, node(workflow), 'claude-code')).toEqual({ kind: 'model', model: 'mid' })
+  })
+
+  it('falls back to the session’s own model when no member qualifies', () => {
+    const workflow = staffed(
+      { tier3: { tier: 3, model: 'strong', harness: 'codex' }, tier4: { tier: 4, model: 'reserved' } },
+      'tier3',
+    )
+    expect(reviewerFor(workflow, node(workflow), 'claude-code')).toEqual({ kind: 'own' })
+  })
+
+  it('keeps the most capable tier for a workflow with no roster', () => {
+    const workflow = diamond()
+    expect(reviewerFor(workflow, node(workflow), 'claude-code')).toEqual({ kind: 'top' })
+  })
+
+  it('names the picked model in the review chore’s spawn line', () => {
+    const below = staffed(ROSTER, 'tier2')
+    const prompt = compose('api-layer', 'chore', {
+      rows: [{ node_id: 'api-layer', branch: 'plan/bookmarks/phase-api-layer', base_branch: 'main' }],
+      chore: reviewChore(),
+      harness: 'claude-code',
+      workflow: below,
+    })
+    expect(prompt).toContain('on `strong`')
+    expect(prompt).not.toContain('most capable model tier')
   })
 })

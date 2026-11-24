@@ -46,6 +46,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before this change keep the models they name; re-run `plan-feature` or
   edit the Crew table to pick the new ones up. The nightly `check-ai-models`
   proposer now keeps each Tier 4 entry on its own model line.
+- **Execution never moves a phase into Tier 4 that the plan put below it.**
+  Both executors now stop at Tier 3 when they move a phase up: covering for
+  a busy crew member (`defaults.substitution`, `any` included), reusing a
+  warm session, retry escalation, the hand-over after repeated review
+  rejections (`defaults.escalate_after_rejections`), and the reviewer's
+  tier. On the skills path a Tier 3 phase is reviewed at Tier 3 (it used to
+  be Tier 4), a failure at Tier 3 stops for the human instead of retrying
+  on Tier 4, and `systematic-debugging`'s fix review runs at Tier 3. Under
+  `vinta-ai-maestro` the review chore asks for the harness's most capable
+  tier only for a Tier 4 phase. Any other phase is reviewed on the
+  roster's strongest model at Tier 3 or below, and a Tier 3 phase whose
+  Tier 3 members are busy waits rather than run on Tier 4. Phases the plan
+  puts at Tier 4 behave as before.
 
 ## [0.8.0] — 2026-11-20
 

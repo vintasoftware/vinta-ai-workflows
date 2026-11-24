@@ -5,7 +5,7 @@
 
 Every model choice below is a **tier** (1–4) into the same table the per-phase implementer uses — [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml). Where the tier comes from depends on the role:
 
-- **`reviewer`** — one tier above the phase's implementer, derived by [review-phase](../review-phase/SKILL.md). Never configured and never plan-named. (`agent_models.reviewer` in older configs, and a plan's `**Review models**:` line or reviewer rows on its **Crew** table, are ignored.)
+- **`reviewer`** — one tier above the phase's implementer, never into Tier 4 from below it, derived by [review-phase](../review-phase/SKILL.md). Never configured and never plan-named. (`agent_models.reviewer` in older configs, and a plan's `**Review models**:` line or reviewer rows on its **Crew** table, are ignored.)
 - **`fixer`** — `agent_models.fixer`, for the merge-conflict fixer. A review finding is not this role's: the phase's own implementer fixes it, at its own tier.
 - **`worktree_prep`, `integrate`** — `agent_models.<role>`, for the mechanical steps below. Never plan-named.
 

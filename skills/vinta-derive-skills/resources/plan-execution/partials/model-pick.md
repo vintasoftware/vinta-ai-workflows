@@ -10,7 +10,7 @@ Pick:
 2. Open the tier in [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml) and take its models.
 3. **Filter to what's actually available in the runtime.** Different harnesses expose different sets.
 4. From the survivors, **pick the cheapest / fastest** the runner can use, and translate it to whatever form the runner's spawning tool expects.
-5. Tier with no runtime-available vendor → step one tier up and say so once. Never hard-fail a phase over a model-selection miss.
+5. Tier with no runtime-available vendor → step one tier up and say so once — but never from Tier 3 into Tier 4, which the plan keeps for exploratory work and new complex UI. A Tier 3 phase with no runtime-available Tier 3 vendor steps down to Tier 2 instead and says so. Never hard-fail a phase over a model-selection miss.
 6. `**Assigned to**:` missing or naming an agent the **Crew** table does not list → **ask the user** via `AskUserQuestion` (header `Crew`), quoting the line as found, one option per **Crew** member (id + tier), the likeliest fit first with ` (Recommended)`. Don't silently re-derive a tier from the phase body; the roster is the plan's arithmetic about how many agents this feature needs, and inventing a member changes it.
 
 **A legacy plan carries `**Suggested AI model**:` and no Crew table.** Read the tier straight off that line and continue — same resolution, one less indirection. Don't invent a roster for it.
@@ -46,7 +46,7 @@ Record which of those applied, so a phase that was unexpectedly slow can be read
 
 **An infrastructure failure is not the phase's failure.** The API is overloaded or returns a 5xx, the network fails, the harness's login expired, the harness will not start: none of these says anything about the model's capability. Don't step up a tier, and don't count the attempt as the phase's retry. Stop dispatching new phases — the others in flight are about to hit the same wall — and ask with `AskUserQuestion` (header `Outage`), quoting the error: `Wait and retry (Recommended)` (when the human says so, retry each phase that hit it at the step it reached), `Switch model` (re-spawn on another model of the same tier from `ai-models.yaml`), `Stop the run`. Running out of quota is the case above, not this one.
 
-**Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. After Tier 4 fails, STOP. Update tracking with `❌` and hand the failure back to the conductor, which asks the user how to proceed with a structured question (see its **Model escalation** rule).
+**Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. **Tier 4 is the plan's to give, never the run's**: a phase planned below it climbs no higher than Tier 3. A failure at Tier 3 therefore has no step left, the same as a failure at Tier 4. After either, STOP. Update tracking with `❌` and hand the failure back to the conductor, which asks the user how to proceed with a structured question (see its **Model escalation** rule).
 
 Record the **model actually used**, the **crew member** it came from, and **whether that member is the one the plan assigned** — a phase run by a covering peer is the difference between a run that cost what the plan said and one that did not.
 <!-- block-end: MODEL_PICK -->

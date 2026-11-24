@@ -8,6 +8,7 @@ export {
   readVerdict,
   REPORT_STATUS_MARKER,
   resolveBrief,
+  reviewerFor,
   VERDICT_MARKER,
   verdictFollowUp,
   type ChorePrompt,
@@ -16,6 +17,7 @@ export {
   type PromptJournal,
   type RedGate,
   type Reorientation,
+  type ReviewerPick,
   type SetAsideWork,
   type SpawnPromptRequest,
 } from './prompts.ts'

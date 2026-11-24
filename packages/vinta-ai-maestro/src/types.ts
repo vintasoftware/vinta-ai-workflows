@@ -1079,8 +1079,10 @@ export const DefaultsSchema = z.strictObject({
         'waits rather than run dearer. `up_one_tier` \u2014 the default \u2014 also the next tier up the ' +
         'roster has, when nobody at the planned tier is free; a warm session never moves a ' +
         'phase up. `any` \u2014 any tier above, and a warm session above the plan may take it to ' +
-        'avoid a cold start. One observed run moved 23 phases from Tier 3 to a Tier 4 member ' +
-        'whose credits then ran out, and nothing showed it.',
+        'avoid a cold start. None of them moves a phase planned below Tier 4 onto a Tier 4 ' +
+        'member: the top tier is reserved for the phases the plan staffed there. One observed ' +
+        'run moved 23 phases from Tier 3 to a Tier 4 member whose credits then ran out, and ' +
+        'nothing showed it.',
     ),
   escalate_after_rejections: z
     .number()
@@ -1090,10 +1092,11 @@ export const DefaultsSchema = z.strictObject({
     .describe(
       'Review rejections a phase may take on one desk before it moves up a crew tier. Every ' +
         'review that does not approve counts, across attempts; at the Nth the scheduler amends ' +
-        'the run, moving the phase to the cheapest member of the next tier up, journalled as a ' +
+        'the run, moving the phase to the cheapest member of the next tier up \u2014 never into ' +
+        'Tier 4 from below it \u2014 journalled as a ' +
         '`workflow_amended` row by `scheduler` with the reason and the count. The new desk ' +
         'takes the phase from its next attempt, and the count starts again there. Nothing ' +
-        'happens at the top tier, or in a workflow with no roster. `0` turns it off. One ' +
+        'happens at the top tier, at Tier 3, or in a workflow with no roster. `0` turns it off. One ' +
         'observed run left a Tier 1 phase rejected 16 times over six hours before a person moved it.',
     ),
   pull_requests: z

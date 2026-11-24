@@ -128,7 +128,7 @@ import { LanePrepareError, LaneRecycleError, LaneSetupError, WIP_REFS } from '..
 import { restoreToHead, setAsideWork, uncommittedPaths } from '../lanes/wip.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
-import { assignCrew, type CrewDecision, roster } from './crew.ts'
+import { assignCrew, type CrewDecision, promotionCeiling, roster } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import {
   composeSpawnPrompt,
@@ -4441,7 +4441,8 @@ export class Scheduler {
    * One observed run left a Tier 1 phase on its desk through 16 rejections
    * over six hours, until the coordinator moved it with four amendments. The
    * rule is the one a person applied: the cheapest member of the next tier up
-   * the roster takes the phase. It is an amendment — `author: scheduler`, with
+   * the roster takes the phase — short of the reserved top tier, which only
+   * the plan hands out (`RESERVED_TIER`). It is an amendment — `author: scheduler`, with
    * the rule and the count as its `reason` — rather than a private override
    * like `retry with`, so it reads in the run's history like any other change
    * of desk, survives a resume in the snapshot, and reaches the host through
@@ -4459,7 +4460,8 @@ export class Scheduler {
     const from = state.retryMember ?? state.node.crew
     const desk = from === undefined ? undefined : this.#workflow.crew[from]
     if (from === undefined || desk === undefined) return
-    const next = roster(this.#workflow.crew).find((member) => member.tier > desk.tier)
+    const cap = promotionCeiling(desk.tier)
+    const next = roster(this.#workflow.crew).find((member) => member.tier > desk.tier && member.tier <= cap)
     if (next === undefined) {
       if (state.reviewRejections === limit) {
         this.#log.info('node.escalation_unavailable', { node: state.node.id, member: from, tier: desk.tier })
