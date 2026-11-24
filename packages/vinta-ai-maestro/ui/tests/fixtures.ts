@@ -45,6 +45,7 @@ export function node(nodeId: string, status: NodeStatus, wave = 0): NodeSummary 
     branch: `feature/${nodeId}`,
     baseBranch: 'main',
     harness: 'claude-code',
+    effort: null,
     sessionId: null,
     step: null,
   }

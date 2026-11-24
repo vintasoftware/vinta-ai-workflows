@@ -3072,6 +3072,29 @@ describe('workflow editing', () => {
     ).toBe('B, amended')
   })
 
+  it('takes an effort change on a running node, and the run view reports the new level', async () => {
+    const r = await rig()
+    const base = r.journal.readWorkflow(RUN_ID)
+    // `a` is running. Effort is live-safe, so the run's phase page can change
+    // it mid-flight; anything else about `a` would be refused as in flight.
+    const amended = { ...base, nodes: [{ ...base.nodes[0], effort: 'high' }, base.nodes[1]] }
+
+    const result = await call(r.daemon, '/api/workflows/daemon-flow', { method: 'PUT', body: amended })
+    expect(result.status).toBe(200)
+    expect(AmendResponseSchema.parse(result.body)).toMatchObject({
+      changes: [{ node: 'a', kind: 'effort_changed' }],
+      rebased: [],
+    })
+
+    const snapshot = RunSnapshotSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}`)).body)
+    expect(snapshot.nodes.map((node) => [node.nodeId, node.effort])).toEqual([
+      ['a', 'high'],
+      ['b', null],
+    ])
+    const detail = NodeDetailSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body)
+    expect(detail.node.effort).toBe('high')
+  })
+
   /**
    * `ui` and a run's job are two processes. The editor's save is answered by
    * `ui`, which hosts no run, so it used to amend the frozen snapshot with no

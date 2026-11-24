@@ -51,13 +51,18 @@ import {
 } from 'vinta-design-system/layout'
 import { Button } from 'vinta-design-system/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
+import { NativeSelect, NativeSelectOption } from 'vinta-design-system/ui/native-select'
 import { Textarea } from 'vinta-design-system/ui/textarea'
 import type { NodeDetail } from '../../src/daemon/schemas.ts'
+import { EFFORT_LEVELS, type Effort } from '../../src/types.ts'
 import type { AgentAnswer } from '../../src/questions/shape.ts'
 import { AgentQuestions } from './AgentQuestions.tsx'
 import { Changes } from './Changes.tsx'
 import { Chip } from './Chip.tsx'
 import { CoordinatorButton, CoordinatorDock, useCoordinatorOpen } from './CoordinatorDock.tsx'
+import { describe as describeRefusal } from './Editor.tsx'
+import type { WorkflowClient } from './editor-client.ts'
+import { patchNode } from './editor-model.ts'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import { Gates } from './Gates.tsx'
 import { Live } from './Live.tsx'
@@ -80,10 +85,13 @@ type Answer = OperationBody<'answer'>['answer']
 
 export function NodeView({
   client,
+  workflows,
   runId,
   nodeId,
 }: {
   readonly client: Client
+  /** For the effort setting, which amends the run through the editor's own save. */
+  readonly workflows: WorkflowClient
   readonly runId: string
   readonly nodeId: string
 }) {
@@ -142,6 +150,32 @@ export function NodeView({
     }
   }
 
+  /**
+   * Effort is plan data, so changing it is an amendment (§9), sent the way the
+   * editor sends one: the workflow document with this one field changed, which
+   * the daemon routes to the run hosting it. It is live-safe — the scheduler
+   * reads it at every spawn — so a running phase takes it on its next turn.
+   */
+  async function setEffort(workflowId: string, effort: Effort | undefined): Promise<void> {
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const workflow = await workflows.load(workflowId)
+      await workflows.save(workflowId, patchNode(workflow, nodeId, { effort }))
+      setNotice(
+        effort === undefined
+          ? 'Effort cleared. The phase’s next turn runs at the harness’s default.'
+          : `Effort set to ${effort}. The phase’s next turn runs at it.`,
+      )
+      setReloads((count) => count + 1)
+    } catch (cause: unknown) {
+      setError(describeRefusal(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function stopProcess(pid: number): Promise<void> {
     setError(null)
     setNotice(null)
@@ -193,6 +227,18 @@ export function NodeView({
               <span>{detail.node.nodeId}</span>
               <span>wave {detail.node.wave}</span>
               <span>{detail.node.harness}</span>
+              <EffortSetting
+                effort={detail.node.effort}
+                // Only while there is a turn left for it to reach: a live run,
+                // and a phase that has not finished.
+                editable={
+                  snapshot?.run.status === 'running' && status !== 'done' && status !== 'failed'
+                }
+                busy={busy}
+                onChange={(effort) => {
+                  if (snapshot !== null) void setEffort(snapshot.run.workflowId, effort)
+                }}
+              />
               <span>{detail.node.lane ?? 'no lane'}</span>
             </PageHeaderMeta>
           </PageHeaderHeading>
@@ -458,6 +504,45 @@ function Pending({
         )}
       </CardContent>
     </Card>
+  )
+}
+
+/** The phase's effort in the header, and the select that amends it while it can still matter. */
+function EffortSetting({
+  effort,
+  editable,
+  busy,
+  onChange,
+}: {
+  readonly effort: Effort | null
+  readonly editable: boolean
+  readonly busy: boolean
+  readonly onChange: (effort: Effort | undefined) => void
+}) {
+  if (!editable) {
+    return <span data-effort={effort ?? ''}>{effort === null ? 'default effort' : `${effort} effort`}</span>
+  }
+  return (
+    <label className="inline-flex items-center gap-1.5" data-effort={effort ?? ''}>
+      <span>effort</span>
+      <NativeSelect
+        size="sm"
+        aria-label="Effort"
+        data-field="effort"
+        disabled={busy}
+        value={effort ?? ''}
+        onChange={(e) =>
+          onChange(e.target.value === '' ? undefined : (e.target.value as Effort))
+        }
+      >
+        <NativeSelectOption value="">harness default</NativeSelectOption>
+        {EFFORT_LEVELS.map((level) => (
+          <NativeSelectOption key={level} value={level}>
+            {level}
+          </NativeSelectOption>
+        ))}
+      </NativeSelect>
+    </label>
   )
 }
 

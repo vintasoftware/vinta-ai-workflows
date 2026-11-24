@@ -1169,6 +1169,17 @@
             "description": "Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.",
             "type": "string"
           },
+          "effort": {
+            "description": "How hard the agent works on every turn of this phase — the plan’s `**Effort**:` line. Per phase, not per member: a member keeps its model and session across phases, and effort is set per turn. Absent runs at the harness’s configured default. A model that lacks the level runs at the nearest one it has, below first.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "crew": {
             "description": "The member this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free member at that tier or above, never below.",
             "type": "string",

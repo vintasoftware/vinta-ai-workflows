@@ -1198,6 +1198,9 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       ...access,
       '--model',
       task.model,
+      // Per process, so per turn: a resumed session takes the level its new
+      // phase asked for. The CLI fits the level to the model itself.
+      ...(task.effort === undefined ? [] : ['--effort', task.effort]),
       ...(task.resumeSessionId === undefined ? [] : ['--resume', task.resumeSessionId]),
     ]
 

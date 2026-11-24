@@ -172,6 +172,25 @@ test('opens on the first phase, with the plan’s title, validity and review sta
   await waitFor(() => expect(cardLabelOf(container, 'p1')).toContain('No comments'))
 })
 
+test('each phase’s effort is on its staffing line and in the phases table', async () => {
+  const { container } = await openReview(double())
+  expect(container.querySelector('[data-staffing] [data-effort]')?.textContent).toBe('at medium effort')
+  expect(container.querySelector('[data-phase-row="p1"] [data-effort]')?.textContent).toBe('medium')
+  expect(container.querySelector('[data-phase-row="p5"] [data-effort]')?.textContent).toBe('low')
+})
+
+test('a phase the plan set no effort for says it runs at the harness default', async () => {
+  const workflow = {
+    ...WORKFLOW,
+    nodes: WORKFLOW.nodes.map(({ effort: _effort, ...node }) => node),
+  }
+  const { container } = await openReview(double(view({ workflow })))
+  expect(container.querySelector('[data-staffing] [data-effort]')?.textContent).toBe(
+    'at the harness’s default effort',
+  )
+  expect(container.querySelector('[data-phase-row="p1"] [data-effort]')?.textContent).toBe('default')
+})
+
 test('a comment on a prompt is anchored to that prompt, colours its phase, and is sent as a batch', async () => {
   const plans = double()
   const { container } = await openReview(plans)

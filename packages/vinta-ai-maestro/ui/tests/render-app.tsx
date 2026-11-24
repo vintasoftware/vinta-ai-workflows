@@ -1,12 +1,18 @@
 import { render, type RenderResult } from '@testing-library/react'
 import { App } from '../src/App.tsx'
 import { createClient } from '../src/client.ts'
+import { createWorkflowClient } from '../src/editor-client.ts'
 import type { StubDaemon } from './stub-daemon.ts'
 
 /** Mounts the whole app against a stub daemon, at a fragment route. */
 export function renderApp(stub: StubDaemon, hash: string): RenderResult {
   window.location.hash = hash
-  return render(<App client={createClient(stub.origin, stub.token)} />)
+  return render(
+    <App
+      client={createClient(stub.origin, stub.token)}
+      workflows={createWorkflowClient(stub.origin, stub.token)}
+    />,
+  )
 }
 
 /** The tone the roster gives a node — the meaning, not the colour. */

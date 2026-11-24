@@ -15,6 +15,17 @@ Pick:
 
 **A legacy plan carries `**Suggested AI model**:` and no Crew table.** Read the tier straight off that line and continue — same resolution, one less indirection. Don't invent a roster for it.
 
+### Apply the phase's effort
+
+**The plan owns the implementer's effort as well, and per phase rather than per member.** It sits on the phase's `**Effort**:` line: `low`, `medium`, `high`, `xhigh` or `max`. The vendor names it `effort`, `reasoning.effort` or `thinking_level`. Pass it on every turn of the phase (the implement turn, each fix round and the review fixes) through whatever setting the spawning tool or the runner offers for it. A continued member gets the new phase's level, because effort is per turn and the session carries over unaffected.
+
+- **The model lacks the level** → use the nearest level it supports below the one asked for, or the nearest above when nothing is below. Say so once. Never fail a phase over it.
+- **The runtime has no effort setting at all** → run at its default and say so once. Effort is a tuning, not a precondition.
+- **No `**Effort**:` line** (a plan written before effort was planned) → leave the runtime's default in place. Don't derive a level from the tier: the plan never made that decision, and the default is what that plan was written against.
+- **Retry escalation stays a tier move.** A capability gap is not fixed by thinking longer at the same tier (see below). Don't raise a phase's effort on your own. A higher level is the human's call, through [amend-plan](../amend-plan/SKILL.md).
+
+Record the **effort actually used** next to the model, so a phase that was clamped reads that way later.
+
 ### Reuse the agent the plan staffed
 
 **A crew member is an agent, and it is still alive.** If this member has already taken a phase on this run, continue that sub-agent rather than spawning a new one: it is standing in the same worktree — a member keeps one for the whole run — and it already knows where this codebase keeps things, how its suite is run and what its conventions are. Rediscovering that is most of what a cold agent's first turn costs.

@@ -363,6 +363,8 @@ Tests:
 
 **Assigned to**: `{crew-id}` (Tier {N}) — {why this phase needs that tier, in the rubric's terms}. See "Staff the plan".
 
+**Effort**: `{low|medium|high|xhigh}` — {why, in the effort rubric's terms; for `medium` on a Tier 1–2 phase, "tier default" is enough}. See "Effort per phase".
+
 **Reusable skills**: {invoke `Skill(name)` — see "Project skills"}.
 
 Acceptance: {one literal statement true after merge + deploy of this phase, only this phase}.
@@ -419,6 +421,8 @@ Tests:
 
 **Assigned to**: `{the roster's Tier 1 member}` (Tier 1) — mechanical deletion + inlining; exact precedent by construction, since every line it removes was added by a phase above it.
 
+**Effort**: `low` — every change is dictated by the grep above, and the suite plus the zero-hits `grep` prove it.
+
 **Reusable skills**: none — pure cleanup.
 
 Acceptance: `grep -r "{flag-key}" app/ tests/` returns nothing, feature behaves identically to flag-on state, full test suite green.
@@ -442,7 +446,7 @@ The mandatory final flag-removal phase depends on **every** gated phase — it d
 
 ## Staff the plan
 
-A plan does not pick a model per phase. It **staffs a team**, then assigns each phase to somebody on it.
+A plan does not pick a model per phase. It **staffs a team**, then assigns each phase to somebody on it. What a plan *does* pick per phase is the **effort** that member spends on it (see "Effort per phase").
 
 The difference is not cosmetic. Choosing a tier phase by phase answers "what should run this one" ten times and never adds it up, so the two questions that actually decide what a feature costs go unasked: **how many agents does this need at once, and is any of them below the tier of what it was handed.** A roster asks both before a line is written, and it is falsifiable — you can look at it and say "nobody needs three Tier 4 members here".
 
@@ -506,6 +510,49 @@ When those two genuinely cannot both hold, **the floor wins and the plan says so
 
 #### Tier 4 — architectural / novel / hard
 **Use for**: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
+
+### Effort per phase
+
+The tier picks **which model** works a phase. **Effort** picks **how hard that model works on it**. Every vendor exposes this second setting under its own name: Anthropic calls it `effort`, OpenAI `reasoning.effort`, Gemini `thinking_level`. All of them use roughly the same scale: `low` · `medium` · `high` · `xhigh` · `max`. Effort covers everything the turn produces, not only its thinking: lower effort also means fewer and terser tool calls, and fewer checks before the agent declares the work done. That makes it a cost lever and a quality lever in its own right, and each phase sets it on an `**Effort**:` line.
+
+**Effort belongs to the phase, not to the member.** A member's tier is its model, and the model cannot change between phases without losing the session the member carries from phase to phase (see "Every implementer gets a desk"). Effort can change, because it is set per turn. Putting effort on the roster would split one Tier 2 member into a `tier2-medium` and a `tier2-high` who cannot cover for each other. That is exactly the fine distinction "Prefer fewer tiers over more" warns against. So the roster says **who** works each phase, and each phase says **how hard**.
+
+**Tier and effort answer different questions. Don't use one to fix the other:**
+
+- **Tier**: can this model do this *kind* of work at all? A capability gap is fixed with a tier. A Tier 1 model at `xhigh` is not a Tier 3 model. It spends longer reasoning about code it still gets wrong. **Never raise effort to keep a phase below its rubric tier.**
+- **Effort**: given a model that can do the work, how much does this phase need to deliberate and verify? That depends on how much the brief leaves open, how far the change reaches, and how much a subtle mistake would cost.
+
+#### The effort rubric
+
+| Effort | Use for |
+|---|---|
+| `low` | **Never as a starting point.** Only for a phase where the plan dictates every change and the gates prove all of it: a flag removal, a rename, a re-export, deleting dead code. At `low`, vendors report models more likely to skip a search, stop early or skip a check. An unattended run has nobody to catch that before review does. |
+| `medium` | **The default.** A well-specified phase applying a pattern the codebase already has, which covers most Tier 1 and Tier 2 work. Vendors name `medium` as the starting point for well-specified agentic coding on their mid-sized models. |
+| `high` | The brief leaves real decisions to the implementer; the change spans several layers or modules; or a mistake could pass the gates and still be wrong (concurrency, transactions, migrations on hot tables, cross-field invariants, auth or permission checks, money); or the phase is debugging something whose root cause is unknown. **The starting point for Tier 3 and Tier 4.** |
+| `xhigh` | Long, hard, correctness-critical phases where `high` is likely to fall short: a Tier 4 exploratory phase, or a Tier 3 algorithm or protocol that no test pins down completely. Vendors reserve it for cases where it measurably beats `high`. They also warn that it overthinks simple work and can exhaust the turn's output budget. **Needs a written reason naming what `high` would miss.** |
+| `max` | **Never in a plan.** Vendors report only a small gain over `xhigh` at a much higher cost. It is an operator's escalation for a phase that already failed at `xhigh`, not a planning choice. |
+
+**Start from the tier, then move at most one step, with a reason:**
+
+| Tier | Starting effort |
+|---|---|
+| 1 | `medium` (`low` only for the narrow case in the rubric) |
+| 2 | `medium` |
+| 3 | `high` |
+| 4 | `high` (`xhigh` when the phase is exploratory and nothing in its Tests block can prove the result) |
+
+- **Up one step** when the brief leaves a design decision open, when a gate passing does not prove the phase correct, when the phase debugs an unknown cause, or when a previous run's post-mortem shows phases like this one repeatedly rejected by review.
+- **Down one step** (`medium` → `low`) only for the narrow `low` case above. A Tier 3 or 4 phase never goes below `high`. If it seems to need less, it is probably not Tier 3 work.
+
+**Rules that keep effort honest:**
+
+- **Effort does not repair a vague brief.** Higher effort makes a model explore more and reconsider more, and range further past the brief. It does not make it follow the brief more faithfully. A phase that "needs `xhigh`" because the plan never says what to build is missing a decision, so go back to Step 0 rather than paying for the model to guess. For the same reason, more effort on a tightly scoped phase invites scope creep, which is one more reason `medium` is the default.
+- **Write the level on every phase. Never leave it to the default.** Defaults differ per model: some default to `medium`, others to `high`. An unstated effort therefore means something different on every harness, and the plan's cost stops being predictable.
+- **Effort costs context as well as money.** Thinking and tool calls count against the session. A phase at `xhigh` reaches the executor's session-size ceiling sooner, and a member's next phase then starts cold.
+- **A plan whose phases are mostly `xhigh` has phases that are too big or too vague.** Split them, or settle the open decisions in **Guiding Decisions**. Effort is not a substitute for planning.
+- **The executor clamps; the plan does not.** Write the level the phase needs. When a model does not support that level (not every model has `xhigh`), the executor uses the nearest level the model supports below it, and the nearest above when nothing is below. Don't pre-clamp in the plan: a later run on another model may support the level the phase asked for.
+- **The effort is the phase's, transcribed into the workflow.** Each phase's level becomes its node's `effort` (see "Mapping the plan onto the document"). Both executors run every turn of the phase at it, the fix rounds and chores included. A plan amended mid-run with a new level reaches a running phase at its next turn.
+- **The review gets no effort line.** The reviewer is not staffed (see "Who reviews"), and its effort is the executor's choice, like its model.
 
 ### Who reviews
 
@@ -625,6 +672,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `nodes[].touches` | That phase's **Touch List** entries as plain repo-relative paths — strip the `@` prefix and any markdown link syntax, keep the trailing `/` on a directory. |
 | `nodes[].gates` | The gate ids this phase must pass, in the order they should run. **Omit the key** when they are the run's `defaults.gates` (the plan's or the project's `maestro.defaults.gates`). **`[]` is an ungated phase** — its gate step passes without running anything — and is for a phase that genuinely has nothing to check, declared with `defaults.allow_ungated_phases: true`; `vinta-ai-maestro validate` refuses a phase that resolves to no gates otherwise. One observed run finished twelve phases without a single check because every node carried `"gates": []` where the author meant "the project's". |
 | `nodes[].crew` | The id from this phase's `**Assigned to**:` line. **Required on every node of a staffed workflow** — a half-staffed document is refused, because the executor would be running two staffing rules at once. |
+| `nodes[].effort` | The level on this phase's `**Effort**:` line, verbatim: `low`, `medium`, `high` or `xhigh`. **Required on every node**, because an absent effort runs at whatever the harness is configured to, which differs per model. Every turn of the phase runs at it, the fix rounds and chores included. A model that lacks the level runs at the nearest one it has, so write the level the phase needs, not one you guess the model offers. |
 | `nodes[].model` / `nodes[].harness` | **Omit `model` entirely on a staffed workflow** — the member carries it, and a node setting both is refused. `harness` only when this one phase runs on a different CLI than `defaults`. |
 | `nodes[].deferred` | The phase's soak or wait condition, as prose, on every phase the Execution graph marks **deferred** — the flag-removal phase above all. A deferred phase is not started when its dependencies merge: the executor parks it on a question naming this text, and a person answers `start` when the condition holds (or `stop`). Omit on every other phase. Without it the scheduler runs a soak-gated flag removal the moment the phases it depends on land. |
 | `nodes[].max_fix_rounds` | Omit. Absent means no limit: the fixer works until the gates are green and the review loop until the reviewer approves. Set it to cap the fix rounds a phase may spend on red gates, and the review iterations each review turn may run, before the operator is asked. When a phase spends a set budget, the executor asks the operator whether to continue rather than failing the phase. Set one only on a phase you want a person to look at if it drags on — an expensive suite, a phase with a known risk of going in circles. |
@@ -947,7 +995,8 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "tier1"
+      "crew": "tier1",
+      "effort": "medium"
     },
     {
       "id": "p2",
@@ -968,7 +1017,8 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "tier2-1"
+      "crew": "tier2-1",
+      "effort": "medium"
     },
     {
       "id": "p3",
@@ -988,7 +1038,8 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "tier2-2"
+      "crew": "tier2-2",
+      "effort": "medium"
     },
     {
       "id": "p4",
@@ -1013,7 +1064,8 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "tier2-2"
+      "crew": "tier2-2",
+      "effort": "medium"
     },
     {
       "id": "p5",
@@ -1045,7 +1097,8 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "tier1"
+      "crew": "tier1",
+      "effort": "low"
     }
   ]
 }
@@ -1178,6 +1231,8 @@ Then ask with `AskUserQuestion`: header `Plan`, question "Anything to change bef
 - **No `**Depends on**:` edge you can't justify with an artifact.** "It's later in the list" is not a dependency; it's a chain that costs the team a week of wall-clock for nothing.
 - **No two same-wave phases rewriting the same file.** Either add the edge or split differently.
 - **No phase assigned below the tier its work implies.** A cheap model on work above its tier does not fail cleanly; it fails review two rounds later, and by then nothing points at the staffing.
+- **No effort raised to stand in for a tier, or for a decision the plan never made.** A cheap model at `xhigh` is still below its tier. A phase that needs `xhigh` to work out what to build is missing a **Guiding Decisions** row.
+- **No `max` effort in a plan, and no phase without an `**Effort**:` line.** `max` is an operator's escalation, and an unstated effort is a different effort on every harness.
 - **No member who takes no phase.** It is an agent budgeted for that can never be picked, and the executor refuses it.
 - **No reviewer rows and no per-phase review-model line.** Reviews are not staffed (see "Who reviews"); executors ignore both.
 - **No `model` on a node of a staffed workflow.** The member carries it; a node with both is refused rather than one quietly outranking the other.
@@ -1208,7 +1263,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Phases MR-sized (≤4000 LoC) + independently mergeable, and no phase of a few hundred lines that could fold into a neighbour without crossing a repo, a wave or a concern.
 - [ ] Phase numbering uses numbers + letters consistently.
 - [ ] **Phase granularity matches the Step 0 answer.** Default (bundling): closely-related use-cases share a phase, grouped phases stay MR-sized, one concern, independently mergeable, and each names every use-case it implements. If one-use-case-per-phase was chosen: at least one phase per spec use-case, no phase implements two use-cases. Cross-cutting scaffolding is its own foundation phase either way.
-- [ ] Each phase has Goal / **Depends on** / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / **Assigned to** / Reusable skills / Acceptance.
+- [ ] Each phase has Goal / **Depends on** / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / **Assigned to** / **Effort** / Reusable skills / Acceptance.
 - [ ] Every `**Depends on**:` entry names the artifact it needs (model, symbol, migration, endpoint) — no bare phase ids, no "comes first" edges.
 - [ ] **Execution graph** table is the first thing under **Phased Rollout**, and its waves match what the `**Depends on**:` lines imply.
 - [ ] Graph is acyclic; the flag-removal phase depends on every gated phase.
@@ -1221,6 +1276,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] **Crew** table is the first thing under **Phased Rollout**: one row per implementer and no reviewer rows, every member taking at least one phase, every `Takes` cell agreeing with that phase's `**Assigned to**:` line.
 - [ ] **Every member earns their place** — by concurrency (a wave genuinely needs that many hands *at or above* those phases' tiers) or by cheapness (they take work a dearer member would otherwise do). Check it wave by wave: sort the wave's phase tiers against the roster's and confirm the roster covers them one for one.
 - [ ] Every phase is assigned to a member whose tier is **at or above** the rubric tier its work implies — no phase handed down a tier to save money.
+- [ ] Every phase carries an `**Effort**:` line. The level starts from its tier's starting effort and moves at most one step, with a reason. There is no `max`, `low` only where the plan dictates every change and the gates prove it, no Tier 3 or 4 phase below `high`, and every `xhigh` names what `high` would miss. Every workflow node carries the same level as `effort`.
 - [ ] **Execution graph** carries the Agent column, and an **Idle** note naming who has nothing to do in which wave. A wave that serializes because the roster is smaller than it is called out rather than left to be discovered at run time.
 <!-- e2e:start -->
 - [ ] **If e2e coverage was opted into at Step 0:** every phase introducing a new UI flow has an **E2E happy-path test** in its Tests block, with screenshot output to `pr-screenshots/`. If it was not opted into (default), **no phase carries an e2e spec** and there is no `QA_USE_CASES.md` / `pr-screenshots/` reference.

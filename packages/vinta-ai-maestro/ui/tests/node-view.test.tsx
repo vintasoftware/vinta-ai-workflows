@@ -30,6 +30,7 @@ import { renderApp, textOf } from './render-app.tsx'
 import { startStubDaemon, type StubDaemon } from './stub-daemon.ts'
 import { WINDOWS_TIMING_RETRY } from '../../tests/support/platform.ts'
 import type { NodeDetail } from '../../src/daemon/schemas.ts'
+import type { Workflow } from '../../src/types.ts'
 
 let daemon: StubDaemon | null = null
 let view: RenderResult | null = null
@@ -325,6 +326,61 @@ test('a harness that cannot inject says the message waits for the next resume', 
   expect(textOf(live.container, '[data-delivery]')).not.toContain('next turn')
   expect(textOf(live.container, '[data-delivery]')).not.toContain('queued')
   expect(textOf(live.container, '[data-delivery]')).toContain('running claude-code session')
+})
+
+/** The document `runSummary()`'s run executes, as the editor's endpoints serve it. */
+const BILLING = {
+  schema_version: 1,
+  id: 'add-billing',
+  base_branch: 'main',
+  defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+  resources: { lane: { capacity: 2, kind: 'worktree' } },
+  gates: {},
+  nodes: [
+    { id: 'impl', name: 'Impl', prompt_ref: 'plan.md#impl', effort: 'medium' },
+    { id: 'docs', name: 'Docs', prompt_ref: 'plan.md#docs', effort: 'low' },
+  ],
+}
+
+test('a live phase’s effort is changed from its header, as an amendment of that one field', async () => {
+  const impl = { ...node('impl', 'running'), effort: 'medium' as const }
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [impl] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ node: impl }) },
+    workflows: { 'add-billing': BILLING },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('select[data-field="effort"]')).not.toBe(null))
+  const select = container.querySelector('select[data-field="effort"]') as HTMLSelectElement
+  expect(select.value).toBe('medium')
+
+  fireEvent.change(select, { target: { value: 'high' } })
+  await waitFor(() => expect(stub.puts).toHaveLength(1))
+  const saved = stub.puts[0]?.workflow as Workflow
+  expect(stub.puts[0]?.id).toBe('add-billing')
+  expect(saved.nodes.map((each) => [each.id, each.effort])).toEqual([
+    ['impl', 'high'],
+    ['docs', 'low'],
+  ])
+  await waitFor(() => expect(container.textContent).toContain('Effort set to high'))
+})
+
+test('a phase’s effort is only shown once nothing is left for it to reach', async () => {
+  const done = { ...node('impl', 'done'), effort: 'medium' as const }
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [done] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ node: done }) },
+    workflows: { 'add-billing': BILLING },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(textOf(container, '[data-effort]')).toBe('medium effort'))
+  expect(container.querySelector('select[data-field="effort"]')).toBe(null)
 })
 
 test('a node that is not in a turn queues steering whatever its harness can do', async () => {

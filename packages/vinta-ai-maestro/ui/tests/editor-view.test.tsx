@@ -276,6 +276,35 @@ test('clearing the fix-round budget removes it, which means no limit', async () 
   expect(saved.nodes[1]).not.toHaveProperty('max_fix_rounds')
 })
 
+test('a phase’s effort is one of the five levels, and clearing it means the harness default', async () => {
+  const { container } = await openEditor()
+
+  fireEvent.click(control(container, 'select-node', 'p2'))
+  await waitFor(() => expect(container.querySelector('[data-role="node-fields"]')).not.toBe(null))
+  const effort = (): HTMLSelectElement =>
+    container.querySelector('[data-role="node-fields"] [data-field="effort"]') as HTMLSelectElement
+  expect([...effort().options].map((option) => option.value)).toEqual([
+    '',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+  ])
+  expect(effort().value).toBe('')
+
+  fireEvent.change(effort(), { target: { value: 'xhigh' } })
+  fireEvent.click(saveButton(container))
+  await waitFor(() => expect(daemon?.puts).toHaveLength(1))
+  expect((daemon?.puts[0]?.workflow as Workflow).nodes[1]?.effort).toBe('xhigh')
+
+  fireEvent.change(effort(), { target: { value: '' } })
+  fireEvent.click(saveButton(container))
+  await waitFor(() => expect(daemon?.puts).toHaveLength(2))
+  // Absent rather than an empty string: the schema has no "default" level.
+  expect((daemon?.puts[1]?.workflow as Workflow).nodes[1]).not.toHaveProperty('effort')
+})
+
 test('an omitted pipeline is the shipped one, and an override is an explicit act', async () => {
   const { container } = await openEditor()
 

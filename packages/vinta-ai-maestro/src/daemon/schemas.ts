@@ -28,7 +28,7 @@ import { z } from 'zod'
 import type { HarnessCapabilities } from '../harness/adapter.ts'
 import type { NodeStatus, OperatorDelivery, RunStatus } from '../journal/events.ts'
 import { AgentAnswersSchema, AgentAskSchema } from '../questions/shape.ts'
-import { WorkflowSchema } from '../types.ts'
+import { EFFORT_LEVELS, WorkflowSchema } from '../types.ts'
 import {
   AnchorSchema,
   COMMENT_STATUSES,
@@ -446,6 +446,12 @@ export const NodeSummarySchema = z.strictObject({
   branch: z.string().nullable(),
   baseBranch: z.string().nullable(),
   harness: z.string(),
+  /**
+   * The phase's planned effort, from the run's current workflow — an amendment
+   * changes it for the phase's next turn. Null when the plan set none, and the
+   * harness runs at its own default.
+   */
+  effort: z.enum(EFFORT_LEVELS).nullable(),
   sessionId: z.string().nullable(),
   /** The pipeline state this attempt last entered (`node_step`), or null before its first. */
   step: z.string().nullable(),

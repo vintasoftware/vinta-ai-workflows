@@ -106,7 +106,8 @@
         "types",
         "unit"
       ],
-      "crew": "tier1"
+      "crew": "tier1",
+      "effort": "medium"
     },
     {
       "id": "p2",
@@ -127,7 +128,8 @@
         "types",
         "unit"
       ],
-      "crew": "tier2-1"
+      "crew": "tier2-1",
+      "effort": "medium"
     },
     {
       "id": "p3",
@@ -147,7 +149,8 @@
         "types",
         "unit"
       ],
-      "crew": "tier2-2"
+      "crew": "tier2-2",
+      "effort": "medium"
     },
     {
       "id": "p4",
@@ -172,7 +175,8 @@
         "types",
         "unit"
       ],
-      "crew": "tier2-2"
+      "crew": "tier2-2",
+      "effort": "medium"
     },
     {
       "id": "p5",
@@ -204,7 +208,8 @@
         "types",
         "unit"
       ],
-      "crew": "tier1"
+      "crew": "tier1",
+      "effort": "low"
     }
   ]
 }

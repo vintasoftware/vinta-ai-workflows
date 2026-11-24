@@ -5,6 +5,44 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — YYYY-MM-DD
+
+### Added
+
+- **`plan-feature` plans an effort for every phase.** Each phase now carries
+  an `**Effort**:` line (`low`, `medium`, `high` or `xhigh`) beside its
+  `**Assigned to**:` line. It is set per phase, not per crew member, so the
+  roster does not fragment. A new effort rubric gives a starting point per
+  tier (`medium` for Tiers 1–2, `high` for Tiers 3–4) and allows one step up
+  or down with a reason. It also rules out `max`, limits `low` to mechanical
+  phases whose gates prove them, and forbids using effort in place of a tier
+  or of a decision the plan never made. On the skills path, `implement-phase`
+  passes the level to the runtime on every turn of the phase. When a model
+  lacks the level, it uses the nearest supported one. Plans without the line
+  keep running at the runtime's default. The level is also transcribed into
+  `.workflow.json` as `nodes[].effort`. Re-render the plan-execution skills
+  (`vinta-derive-skills`) to pick the executor side up.
+- **`vinta-ai-maestro` runs each phase at its planned effort.** The workflow
+  schema gains an optional `nodes[].effort` (`low`, `medium`, `high`,
+  `xhigh`, `max`; additive, so `workflow.v1` stays). Every turn of the phase
+  runs at it, the fix rounds and chores included. claude-code receives it as
+  `--effort`. codex receives it on `turn/start`, fitted to the levels the
+  model advertises in `model/list`; a model the list does not name runs at the
+  CLI's default. opencode does not send it yet. An amendment that only changes
+  a phase's effort is live-safe (`effort_changed`), so a running phase takes
+  the new level at its next turn. A node without `effort` runs exactly as
+  before.
+- **Each phase's effort can be reviewed and changed in `vinta-ai-maestro ui`.**
+  On a plan under review, the phases table has an Effort column, and the
+  selected phase's staffing line says the level it runs at. The Editor has an
+  Effort field per phase, with "harness default" to clear it. On a running
+  phase's page, the header shows the effort and lets you change it in place.
+  The change is saved as an amendment of that one field, and the phase's next
+  turn runs at the new level. Once the run has ended or the phase is done or
+  failed, the level is shown but can no longer be changed. Run snapshots and
+  node details now carry `effort` on each node (`null` when the plan set
+  none).
+
 ## [0.8.0] — 2026-11-20
 
 ### Changed

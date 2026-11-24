@@ -216,6 +216,7 @@ export function App({
       <NodeView
         key={`${route.runId}/${route.nodeId}`}
         client={client}
+        workflows={workflowClient}
         runId={route.runId}
         nodeId={route.nodeId}
       />

@@ -782,6 +782,34 @@ describe('spawn against a fake binary', () => {
     ])
   })
 
+  it('passes the phase’s effort as a flag, and none when the phase names none', async () => {
+    const dir = makeTemp()
+    const bin = fakeCliFromSource(
+      dir,
+      'claude-effort',
+      `import { appendFileSync } from 'node:fs'
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(VERSION)}); process.exit(0) }
+appendFileSync(${JSON.stringify(join(dir, 'argv.jsonl'))}, JSON.stringify(process.argv.slice(2)) + '\\n')
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-effort' }))
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }))
+`,
+    )
+    const adapter = new ClaudeCodeAdapter({ bin, settingsDir: join(dir, 'settings') })
+    for (const overrides of [{ effort: 'xhigh' as const }, {}]) {
+      const outcome = await adapter.spawn({ ...task(), cwd: dir, ...overrides })
+      expect(outcome.ok).toBe(true)
+      if (!outcome.ok) return
+      for await (const _event of outcome.session.events) void _event
+    }
+
+    const [withEffort, without] = readFileSync(join(dir, 'argv.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[])
+    expect(withEffort?.[(withEffort?.indexOf('--effort') ?? -2) + 1]).toBe('xhigh')
+    expect(without).not.toContain('--effort')
+  })
+
   /**
    * The grant and its guard reach the CLI as arguments, so the assertion is
    * about argv and nothing else.
