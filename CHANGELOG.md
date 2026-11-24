@@ -32,6 +32,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a phase's effort is live-safe (`effort_changed`), so a running phase takes
   the new level at its next turn. A node without `effort` runs exactly as
   before.
+- **Each phase's effort can be reviewed and changed in `vinta-ai-maestro ui`.**
+  On a plan under review, the phases table has an Effort column, and the
+  selected phase's staffing line says the level it runs at. The Editor has an
+  Effort field per phase, with "harness default" to clear it. On a running
+  phase's page, the header shows the effort and lets you change it in place.
+  The change is saved as an amendment of that one field, and the phase's next
+  turn runs at the new level. Once the run has ended or the phase is done or
+  failed, the level is shown but can no longer be changed. Run snapshots and
+  node details now carry `effort` on each node (`null` when the plan set
+  none).
 
 ## [0.8.0] — 2026-11-20
 

@@ -239,7 +239,7 @@ export function PhaseInspector({
   )
 }
 
-/** Wave, who implements, how it is reviewed — one line under the title. */
+/** Wave, who implements and at what effort, how it is reviewed — one line under the title. */
 function Staffing({
   workflow,
   node,
@@ -262,6 +262,12 @@ function Staffing({
           {node.crew !== undefined ? `${node.crew} · ` : ''}
           {member !== undefined ? `tier ${member.tier} · ` : ''}
           {model}
+        </span>
+      </span>
+      <span data-effort={node.effort ?? ''}>
+        at{' '}
+        <span className="text-foreground">
+          {node.effort === undefined ? 'the harness’s default effort' : `${node.effort} effort`}
         </span>
       </span>
       <span>

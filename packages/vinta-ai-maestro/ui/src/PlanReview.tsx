@@ -705,6 +705,7 @@ function PhaseTable({
               <TableHead className="w-12">Wave</TableHead>
               <TableHead>Phase</TableHead>
               <TableHead>Agent</TableHead>
+              <TableHead>Effort</TableHead>
               <TableHead>Gates</TableHead>
               <TableHead className="w-28">Review</TableHead>
             </TableRow>
@@ -731,6 +732,9 @@ function PhaseTable({
                     {member !== undefined && (
                       <span className="text-muted-foreground"> · t{member.tier} · {member.model}</span>
                     )}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs" data-effort={node.effort ?? ''}>
+                    {node.effort ?? <span className="text-muted-foreground">default</span>}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{node.gates.join(', ') || '—'}</TableCell>
                   <TableCell>

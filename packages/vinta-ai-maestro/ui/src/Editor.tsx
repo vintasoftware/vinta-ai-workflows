@@ -6,7 +6,7 @@
  * here is the three things a canvas cannot know:
  *
  * - **The fields that are not geometry.** A node carries a `prompt_ref`, gates,
- *   a harness, a model and a fix-round budget, and a dependency carries an
+ *   a harness, a model, an effort and a fix-round budget, and a dependency carries an
  *   *artifact*. The artifact is what the implementer prompt uses to explain
  *   what the phase builds on (§5.1), so it is a labelled required field beside
  *   its dependency, never a tooltip on an arrow.
@@ -48,7 +48,7 @@ import { Input } from 'vinta-design-system/ui/input'
 import { Label } from 'vinta-design-system/ui/label'
 import { NativeSelect, NativeSelectOption } from 'vinta-design-system/ui/native-select'
 import { formatPath, type Issue } from '../../src/daemon/schemas.ts'
-import { HARNESS_IDS, type Node, type Pipeline, type Workflow } from '../../src/types.ts'
+import { EFFORT_LEVELS, HARNESS_IDS, type Node, type Pipeline, type Workflow } from '../../src/types.ts'
 import { parseWorkflow, type ValidationIssue } from '../../src/validate.ts'
 import { Chip } from './Chip.tsx'
 import { WorkflowRefused, type WorkflowClient } from './editor-client.ts'
@@ -527,6 +527,30 @@ function NodeFields({
           }
         />
       </Field>
+      {/* Live-safe (§9): on a running phase, the next turn takes the new level. */}
+      <Field label="Effort" htmlFor="node-effort">
+        <NativeSelect
+          id="node-effort"
+          size="sm"
+          className="w-full"
+          data-field="effort"
+          value={node.effort ?? ''}
+          onChange={(e) =>
+            onPatch(
+              e.target.value === ''
+                ? { effort: undefined }
+                : { effort: e.target.value as Node['effort'] },
+            )
+          }
+        >
+          <NativeSelectOption value="">harness default</NativeSelectOption>
+          {EFFORT_LEVELS.map((level) => (
+            <NativeSelectOption key={level} value={level}>
+              {level}
+            </NativeSelectOption>
+          ))}
+        </NativeSelect>
+      </Field>
 
       <fieldset className="m-0 flex flex-col gap-1.5 border-0 p-0" data-field="gates">
         <legend className="mb-1.5 text-[13px] font-medium">Gates</legend>
@@ -760,7 +784,8 @@ function Issues({
 }
 
 /** A reason, never a body: the daemon's codes and statuses carry no contents. */
-function describe(reason: unknown): string {
+/** A workflow refusal in words — also how the run's phase page explains a refused effort change. */
+export function describe(reason: unknown): string {
   if (reason instanceof WorkflowRefused) return CODES[reason.code] ?? `Refused: ${reason.code}`
   return reason instanceof Error ? reason.message : 'The daemon could not be reached.'
 }

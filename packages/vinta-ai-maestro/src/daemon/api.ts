@@ -1334,7 +1334,7 @@ export function createApi(options: ApiOptions): Hono {
 
     const detail: NodeDetail = {
       runId,
-      node: nodeSummary(node, declared?.name ?? node.node_id, journal.nodeSteps(runId).get(node.node_id) ?? null),
+      node: nodeSummary(node, declared, journal.nodeSteps(runId).get(node.node_id) ?? null),
       integration: journal.integrationTimeline(runId, node.node_id).map((row) => ({
         ...row,
         // Read only inside the run's own directory, whatever the event says.
@@ -2387,7 +2387,7 @@ export function createApi(options: ApiOptions): Hono {
     // sees the effect of — the fold is idempotent — but can never miss one.
     const cursor = journal.lastEventId(row.id)
     const nodes = journal.nodes(row.id)
-    const names = new Map(wf.nodes.map((node) => [node.id, node.name]))
+    const declared = new Map(wf.nodes.map((node) => [node.id, node]))
     const steps = journal.nodeSteps(row.id)
     const mine = new Set(nodes.map((node) => node.node_id))
     const leases = journal.leases().filter((lease) => mine.has(lease.holder_node))
@@ -2401,7 +2401,7 @@ export function createApi(options: ApiOptions): Hono {
       run: runSummary(row),
       cursor,
       nodes: nodes.map((node) =>
-        nodeSummary(node, names.get(node.node_id) ?? node.node_id, steps.get(node.node_id) ?? null),
+        nodeSummary(node, declared.get(node.node_id), steps.get(node.node_id) ?? null),
       ),
       integration: (({ queue, ...rest }) => ({ ...rest, queue: [...queue] }))(journal.integrationWorktree(row.id)),
       // The graph's edges come from the frozen workflow, which is the only
@@ -2464,16 +2464,22 @@ function runSummary(row: RunRow): RunSummary {
   }
 }
 
-function nodeSummary(row: NodeRow, name: string, step: string | null): RunSnapshot['nodes'][number] {
+/** `declared` is the node in the run's current workflow; undefined for one it no longer declares. */
+function nodeSummary(
+  row: NodeRow,
+  declared: Workflow['nodes'][number] | undefined,
+  step: string | null,
+): RunSnapshot['nodes'][number] {
   return {
     nodeId: row.node_id,
-    name,
+    name: declared?.name ?? row.node_id,
     status: row.status,
     wave: row.wave,
     lane: row.lane,
     branch: row.branch,
     baseBranch: row.base_branch,
     harness: row.harness,
+    effort: declared?.effort ?? null,
     sessionId: row.session_id,
     step,
   }
