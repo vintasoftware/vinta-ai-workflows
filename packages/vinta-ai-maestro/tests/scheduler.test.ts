@@ -4524,13 +4524,13 @@ describe('crew', () => {
    * hours before the coordinator moved it with four amendments.
    */
   describe('after repeated review rejections', () => {
-    const escalating = (limit: number, crew: Record<string, unknown>): Workflow => {
+    const escalating = (limit: number, crew: Record<string, unknown>, desk = 'tier1'): Workflow => {
       // Every member has a phase of its own: a roster member assigned none is a
       // plan defect the amend path refuses.
       const nodes = [
-        node('a', [], { gates: ['unit'], chores: ['review'], crew: 'tier1' }),
+        node('a', [], { gates: ['unit'], chores: ['review'], crew: desk }),
         ...Object.keys(crew)
-          .filter((member) => member !== 'tier1')
+          .filter((member) => member !== desk)
           .map((member) => node(`on-${member}`, ['a'], { gates: ['unit'], crew: member })),
       ]
       const workflow = makeWorkflow(nodes, {
@@ -4610,6 +4610,20 @@ describe('crew', () => {
         expect(report.statuses['a']).toBe('failed')
         expect(r.journal.events('run-1').filter((event) => event.type === 'workflow_amended')).toEqual([])
       }
+    })
+
+    /** Tier 4 is the plan's to give: a rejected Tier 3 phase stays on Tier 3. */
+    it('never moves a phase planned below Tier 4 into it', async () => {
+      const r = rig(escalating(1, { tier3: { tier: 3, model: 'strong' }, tier4: CREW.tier4 }, 'tier3'), {
+        outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
+      })
+      const report = await runAnsweringStop(r, 'a')
+
+      expect(report.statuses['a']).toBe('failed')
+      expect(r.journal.events('run-1').filter((event) => event.type === 'workflow_amended')).toEqual([])
+      expect(r.adapter.spawned.filter((task) => task.nodeId === 'a').map((task) => task.model)).not.toContain(
+        'dear',
+      )
     })
   })
 
@@ -4887,9 +4901,9 @@ describe('crew', () => {
    * Warmth, end to end, and the whole point of computing it from `planSession`
    * rather than from "has this member run before".
    *
-   * `a` is `tier4`'s; `b` is `tier2-1`'s and `tier2-1` is free. Today's rule
+   * `a` is `tier3`'s; `b` is `tier2-1`'s and `tier2-1` is free. Today's rule
    * staffs `b` as written and opens a second session. The new one hands it to
-   * `tier4` — dearer per token, and it resumes instead of cold-starting, which
+   * `tier3` — dearer per token, and it resumes instead of cold-starting, which
    * is the trade. Both halves are asserted, because either alone would pass on
    * a bug: the promotion without the resume is the failure mode that costs on
    * both axes.
@@ -4898,23 +4912,23 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'tier4', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier3', pipeline: 'reuse' }),
           node('b', ['a'], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
         // Opted in: by default a warm session never moves a phase up a tier.
-        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2, substitution: 'any' },
+        { crew: { 'tier2-1': CREW['tier2-1'], tier3: { tier: 3, model: 'dear' } }, lanes: 2, substitution: 'any' },
       ),
     )
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
-    // `medium` never appears: the Tier 2 phase ran on the Tier 4 model.
+    // `medium` never appears: the Tier 2 phase ran on the Tier 3 model.
     expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear', 'dear'])
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier4', 'tier4'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier3', 'tier3'])
     // The reason token, which is the only thing that tells this apart from a
     // busy-peer cover afterwards — and `tier2-1` was never busy.
     expect(crewEvents(r)[1]).toMatchObject({
-      member: 'tier4',
+      member: 'tier3',
       substitute: true,
       instead_of: 'tier2-1',
       reason: 'warm_session',
@@ -5831,10 +5845,10 @@ describe('a failed phase the operator can retry', () => {
   /**
    * The member that actually ran is never offered as the alternative to itself.
    *
-   * Both phases are assigned `tier1`, so one of them is covered by `tier4` —
+   * Both phases are assigned `tier1`, so one of them is covered by `tier3` —
    * and it is that substituted phase whose failure is offered here. The menu
    * used to exclude only the member the *plan* named, so it offered "retry with
-   * tier4" to a phase `tier4` had just failed: an escalation that had already
+   * tier3" to a phase `tier3` had just failed: an escalation that had already
    * happened, and a third of the menu doing nothing.
    */
   it('does not offer the member that just failed the phase', async () => {
@@ -5842,7 +5856,7 @@ describe('a failed phase the operator can retry', () => {
       makeWorkflow([node('a', [], { crew: 'tier1' }), node('b', [], { crew: 'tier1' })], {
         pipeline: 'explode',
         lanes: 2,
-        crew: { tier1: ROSTER.tier1, tier4: ROSTER.tier4 },
+        crew: { tier1: ROSTER.tier1, tier3: { tier: 3, model: 'dear' } },
       }),
       { onFailure: 'ask' },
     )
@@ -5853,7 +5867,7 @@ describe('a failed phase the operator can retry', () => {
       'both offers',
     )
 
-    // Whichever phase `tier4` covered: its menu names neither the member the
+    // Whichever phase `tier3` covered: its menu names neither the member the
     // plan asked for nor the one that ran, so nothing is left to escalate to.
     const covered = r.journal
       .events('run-1')
@@ -5862,11 +5876,11 @@ describe('a failed phase the operator can retry', () => {
     expect(covered).toBeDefined()
     const substituted = String(covered?.nodeId)
     const offered = r.journal.pendingQuestion('run-1', substituted)?.question.choices ?? []
-    expect(offered).not.toContain('retry with tier4')
+    expect(offered).not.toContain('retry with tier3')
     // And the phase that ran on the member the plan named still gets the
     // escalation, because there really is a higher tier that could take it.
     const other = substituted === 'a' ? 'b' : 'a'
-    expect(r.journal.pendingQuestion('run-1', other)?.question.choices).toContain('retry with tier4')
+    expect(r.journal.pendingQuestion('run-1', other)?.question.choices).toContain('retry with tier3')
 
     r.scheduler.answer('a', { human: { answer: 'stop' } })
     r.scheduler.answer('b', { human: { answer: 'stop' } })

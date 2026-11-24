@@ -359,7 +359,7 @@ After every queue entry processes:
 - **Subagents commit but never push.** Orchestrator owns force-push. {{PR_RULE_TAIL}}.
 {{COAUTHOR_RULE_LINE}}
 {{DEPENDENCY_LICENSE_RULE_LINE}}
-- **Stop on Tier-4 failure** (model escalation, same rules as [implement-phase](../implement-phase/SKILL.md#pick-the-model-from-the-plans-per-phase-suggestion)).
+- **Stop when escalation runs out** — at Tier 3, or at Tier 4 for a phase the plan put there (model escalation, same rules as [implement-phase](../implement-phase/SKILL.md#pick-the-model-from-the-plans-per-phase-suggestion)).
 - **Stop on rebase failure** the fixer can't resolve in one retry. Don't ship half-rebased branches.
 
 ## Quick checklist (orchestrator, per amendment run)

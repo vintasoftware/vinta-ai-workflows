@@ -123,6 +123,21 @@ export interface CrewAssignInput {
 }
 
 /**
+ * The top tier is the plan's to give, never the run's. The plan skill keeps
+ * it for exploratory work and new complex UI, and its models are the dearest
+ * the vendors sell, so nothing that moves a phase up a tier — covering for a
+ * busy peer, a warm session, an escalation after rejections, the review
+ * chore's reviewer — moves a phase planned below it into it. A phase planned
+ * at it stays there.
+ */
+export const RESERVED_TIER = 4
+
+/** The highest tier a phase planned at `tier` may be moved to. */
+export function promotionCeiling(tier: number): number {
+  return tier >= RESERVED_TIER ? Number.POSITIVE_INFINITY : RESERVED_TIER - 1
+}
+
+/**
  * Roster order, cheapest first. Ties break on id so the choice is stable across
  * runs — a substitution that picked a different peer each time would make two
  * runs of one plan cost differently for no reason anyone could see.
@@ -202,11 +217,13 @@ export function assignCrew(input: CrewAssignInput): CrewDecision {
  * The highest tier a phase planned at `tier` may run at. `up_one_tier` is the
  * next tier the roster actually has, not `tier + 1`: a roster of Tier 2 and
  * Tier 4 members has no Tier 3 to cover with, and reading "one up" literally
- * would make such a roster wait on every busy Tier 2 member.
+ * would make such a roster wait on every busy Tier 2 member. None of them
+ * reaches the reserved tier from below it, `any` included.
  */
 function ceilingFor(members: readonly RosterMember[], tier: number, substitution: Substitution): number {
-  if (substitution === 'any') return Number.POSITIVE_INFINITY
   if (substitution === 'same_tier') return tier
-  const above = members.map((member) => member.tier).filter((candidate) => candidate > tier)
+  const cap = promotionCeiling(tier)
+  if (substitution === 'any') return cap
+  const above = members.map((member) => member.tier).filter((candidate) => candidate > tier && candidate <= cap)
   return above.length === 0 ? tier : Math.min(...above)
 }

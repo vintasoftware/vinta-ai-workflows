@@ -232,13 +232,13 @@ dependency on each other and are implemented concurrently.
 |---|---|---|---|
 | 1 | Phase 0, Phase 1b | `tier1`, `tier2-2` | — |
 | 2 | Phase 1, Phase 2 | `tier2-1`, `tier2-2` | Phase 0 |
-| 3 | Phase 3 | `tier4` | Phase 1, Phase 2 |
+| 3 | Phase 3 | `tier3` | Phase 1, Phase 2 |
 | 4 | Phase 4 — remove the `bookmarks-v2` flag | `tier1` | Phase 3 (deferred — soak-gated) |
 
 **File overlap:** phases in the same wave touch disjoint files, with one exception —
 Phase 1 and Phase 2 both export from `@app/bookmarks/__init__.py`. Trivial merge.
 
-**Idle:** `tier4` has nothing until wave 3 and `tier2-1` nothing until wave 2 — the
+**Idle:** `tier3` has nothing until wave 3 and `tier2-1` nothing until wave 2 — the
 foundation phase is the whole of wave 1 and only one agent can write it.
 ```
 
@@ -462,7 +462,7 @@ First thing under **Phased Rollout**, before the **Execution graph**:
 | `tier1` | 1 | Phase 0, Phase 4 | An empty module and a flag deletion — exact precedent, both of them. |
 | `tier2-1` | 2 | Phase 1 | A DRF viewset mirroring `@app/tags/api/views.py` almost line for line. |
 | `tier2-2` | 2 | Phase 1b, Phase 2 | Serializer with cross-field validation; the producer stub is the same shape. |
-| `tier4` | 4 | Phase 3 | Cycle detection over a user-mutable tree — no precedent in this repo. |
+| `tier3` | 3 | Phase 3 | Cycle detection over a user-mutable tree — hard, but the plan names the algorithm, so nothing about it is exploratory. |
 ```
 
 **Name members after their tier, never after a seniority.** A member is `tier<N>`, or `tier<N>-<k>` when the roster carries more than one at that tier. Ids are lowercase kebab-case — the schema rejects anything else.
@@ -505,11 +505,13 @@ When those two genuinely cannot both hold, **the floor wins and the plan says so
 #### Tier 2 — standard pattern application
 **Use for**: repository methods, DRF serializer with non-trivial validation, ViewSet wiring with filterset, pytest unit/integration tests against established fixtures, simple HStore/ArrayField additions.
 
-#### Tier 3 — multi-file orchestration, business logic, SQL views
-**Use for**: use case coordinating across repositories with non-trivial branching, new `vw_*` view + non-managed model + migration, serializer with cross-field validation affecting use-case behavior, integration tests covering concurrency edges.
+#### Tier 3 — multi-file orchestration, business logic, architectural / hard
+**Use for**: use case coordinating across repositories with non-trivial branching, new `vw_*` view + non-managed model + migration, serializer with cross-field validation affecting use-case behavior, integration tests covering concurrency edges — and hard but well-specified work: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
 
-#### Tier 4 — architectural / novel / hard
-**Use for**: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
+#### Tier 4 — exploratory / new complex UI (reserved)
+**Use only for**: work that is really exploratory — no precedent in the codebase and the shape of the solution still open (a spike, a prototype, a design the phase itself has to discover) — or a **new complex UI**: a new screen or flow with non-trivial interaction state, a new design-system component, drag-and-drop, a canvas or visual editor.
+
+**Difficulty alone never earns Tier 4.** A phase whose approach the plan already spells out is Tier 3, however hard the algorithm or the debugging. Ask: *does the implementer have to discover what to build, or only build what the plan says?* Only the first is Tier 4. Same for UI: a new component that follows an existing screen's pattern is Tier 2 or 3; only a new interaction model is Tier 4. The **Why this tier** cell of a Tier 4 row says which of the two it is — exploratory, or new complex UI — and why.
 
 ### Effort per phase
 
@@ -558,10 +560,12 @@ The tier picks **which model** works a phase. **Effort** picks **how hard that m
 
 Nobody on the plan. Both executors review every phase with the same `thermo-nuclear-review-loop` skill, and each picks the loop's reviewer itself:
 
-- **On the skills path**, `review-phase` spawns the reviewer **one tier above the tier the phase's implementer actually ran at** — a Tier 4 phase is reviewed at Tier 4, since nothing sits above it — and the phase's own implementer fixes what it finds.
-- **Under `vinta-ai-maestro`**, the `review` chore runs the loop on the implementer's own session (see "The review chore"), and its reviewer runs at the harness's most capable tier.
+- **On the skills path**, `review-phase` spawns the reviewer **one tier above the tier the phase's implementer actually ran at, but never into Tier 4 from below it** — a Tier 3 phase is reviewed at Tier 3, and a Tier 4 phase at Tier 4, since nothing sits above it — and the phase's own implementer fixes what it finds.
+- **Under `vinta-ai-maestro`**, the `review` chore runs the loop on the implementer's own session (see "The review chore"). Its reviewer runs at the harness's most capable tier only for a Tier 4 phase. For any other phase it runs on the strongest **Crew** model at Tier 3 or below, at or above the phase's tier, on the same harness; with no such member it runs on the implementer's own model.
 
-So the review needs no staffing decision, and the plan carries no reviewer rows and no per-phase review-model line. On the skills path the phase's tier sizes its review too, which is one more reason never to hand a phase down a tier.
+So the review needs no staffing decision, and the plan carries no reviewer rows and no per-phase review-model line. On both paths the phase's tier sizes its review too, which is one more reason never to hand a phase down a tier, and one more reason to keep Tier 4 for the phases that need it.
+
+**Execution never moves a phase into Tier 4 that the plan put below it.** Covering for a busy member, reusing a warm session, retry escalation, the hand-over after repeated rejections and the reviewer's tier all stop at Tier 3. Tier 4 is spent only where the plan put a phase there.
 
 ### Every implementer gets a desk
 
@@ -658,8 +662,8 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `codegen.<id>` | The project's generators — the commands that write files other files determine: the OpenAPI schema, the API client generated from it, a route tree, a GraphQL schema — plus a formatter a pre-commit hook would otherwise run. `{ "cmd": "<the command>", "inputs": [<globs it reads>], "outputs": [<globs it writes>], "after": [<steps first>] }`, and `"format": true` with `{changed_files}` in `cmd` for a formatter. **Omit the whole key when `maestro.codegen` already declares them**, and declare one here only when this plan adds a generator. See "Generated files and append-only registries". |
 | `append_only` | Files every phase only appends entries to — DI containers, URL route lists, notification-kind registries, beat schedules — as gitattributes patterns. **Omit when `maestro.append_only` already lists them**; a list here *replaces* the project's. See "Generated files and append-only registries". |
 | `defaults.chores` | `["review", "deslop"]`, plus `"review-canvas"` when that chore is emitted — or **omit the key** when `maestro.defaults.chores` already names the same list. The chores every phase runs unless it names its own. **Never write `"chores": []` to mean "the project's"**: an empty list *replaces* the project's list with nothing, and the run then runs no chore at all. |
-| `defaults.substitution` | **Omit** — it defaults to `up_one_tier`: a busy member's phase may go to the next tier up the roster has, and a warm session never moves a phase up. Set `same_tier` when the top tier is a limited credit allowance that must not absorb other tiers' work. |
-| `defaults.escalate_after_rejections` | **Omit** — it defaults to `3`: a phase whose review fails to approve it three times on one desk moves to the cheapest member of the next tier up. Set `0` only when the human wants every phase kept on the tier the plan gave it. |
+| `defaults.substitution` | **Omit** — it defaults to `up_one_tier`: a busy member's phase may go to the next tier up the roster has, and a warm session never moves a phase up. No setting, `any` included, moves a phase planned below Tier 4 onto a Tier 4 member: a Tier 3 phase whose Tier 3 members are busy waits. Set `same_tier` when the top tier is a limited credit allowance that must not absorb other tiers' work. |
+| `defaults.escalate_after_rejections` | **Omit** — it defaults to `3`: a phase whose review fails to approve it three times on one desk moves to the cheapest member of the next tier up — never into Tier 4 from below it, so a Tier 3 phase stays on Tier 3. Set `0` only when the human wants every phase kept on the tier the plan gave it. |
 | `defaults.wave_gates` | **Omit** — it defaults to `every`: each wave's gates run in full on the merged tree, so the next wave builds on a passing one, and every gate of the plan once more before the plan PR opens. Set `final` only for a plan whose suite is too slow to run once per wave. Never `off` unless the project's suite cannot run in the integration worktree. |
 | `defaults.verify_gates` / `defaults.base_gates` | **Omit** — both default to `full`: a phase runs its gates' full commands once its review approves, and a multi-dependency phase's merged base is gated before it starts. Set `verify_gates: scoped` or `base_gates: off` only when the human says the suite is too slow for it, and say so in the plan. |
 | `defaults.gates` | The gate ids every phase runs. **Omit the key** when `maestro.defaults.gates` is already the list this plan wants; set it when most phases share a list the project does not name. A node with no `gates` key takes it. **Never `[]`**: that is a run with no gates. |
@@ -919,23 +923,23 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
   "crew": {
     "tier1": {
       "tier": 1,
-      "model": "claude-haiku-4-5",
+      "model": "claude-haiku-5-5",
       "description": "A model plus its migration, and a flag deletion."
     },
     "tier2-1": {
       "tier": 2,
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "description": "A DRF viewset mirroring the tags viewset."
     },
     "tier2-2": {
       "tier": 2,
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "description": "Tree serializer and the list action that returns it."
     }
   },
   "defaults": {
     "harness": "claude-code",
-    "model": "claude-sonnet-5",
+    "model": "claude-sonnet-5-5",
     "pipeline": "standard-phase",
     "chores": [
       "review",

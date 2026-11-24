@@ -153,6 +153,7 @@ ${liveLines}
 Produce an UPDATED version of the YAML file that:
 - replaces every dead model id with the closest current equivalent of the same capability class,
 - considers promoting strong new candidates into the appropriate tier (cheapest model that one-shots the tier's work — do NOT over-upgrade),
+- moves each tier-4 entry only to a newer version of its own model line (e.g. claude-fable-5-1 → claude-fable-5-2, gpt-6.1-sol → gpt-6.2-sol) — tier 4 is reserved for exploratory work and new complex UI and its models are a maintainer's pick, so never swap in a different line even if it ranks higher,
 - keeps the exact same top-level structure, keys, comment style, \`source:\` block, and tier numbering,
 - keeps the leading comment block and the \`# yaml-language-server\` directive,
 - updates \`last_verified\` to today's date if you know it; otherwise leave it,

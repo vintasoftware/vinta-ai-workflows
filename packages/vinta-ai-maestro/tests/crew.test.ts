@@ -22,7 +22,7 @@ const CREW: Record<string, CrewMember> = {
   tier1: impl(1, 'cheap-1'),
   'tier2-1': impl(2, 'medium-1'),
   'tier2-2': impl(2, 'medium-1'),
-  tier4: impl(4, 'dear-1'),
+  tier3: impl(3, 'dear-1'),
 }
 
 function input(overrides: Partial<CrewAssignInput> = {}): CrewAssignInput {
@@ -44,10 +44,10 @@ describe('assignCrew — the plan’s own staffing', () => {
   })
 
   it('carries a member’s harness override, so a roster can be mixed-vendor', () => {
-    const crew = { ...CREW, tier4: impl(4, 'dear-1', { harness: 'codex' }) }
-    const decision = assignCrew(input({ assigned: 'tier4', crew }))
+    const crew = { ...CREW, tier3: impl(3, 'dear-1', { harness: 'codex' }) }
+    const decision = assignCrew(input({ assigned: 'tier3', crew }))
 
-    expect(decision).toMatchObject({ member: 'tier4', harness: 'codex' })
+    expect(decision).toMatchObject({ member: 'tier3', harness: 'codex' })
   })
 
   it('is unstaffed when there is no roster — every workflow written before one', () => {
@@ -74,7 +74,7 @@ describe('assignCrew — covering for a busy peer', () => {
   it('reaches up when it has to, and records that it did', () => {
     const decision = assignCrew(input({ busy: new Set(['tier2-1', 'tier2-2']) }))
 
-    expect(decision).toMatchObject({ member: 'tier4', substitute: true, insteadOf: 'tier2-1' })
+    expect(decision).toMatchObject({ member: 'tier3', substitute: true, insteadOf: 'tier2-1' })
   })
 
   /**
@@ -82,14 +82,14 @@ describe('assignCrew — covering for a busy peer', () => {
    * phase is ready, a lane is free — and the answer is still no.
    */
   it('never reaches down, even with the cheaper member sitting idle', () => {
-    const decision = assignCrew(input({ busy: new Set(['tier2-1', 'tier2-2', 'tier4']) }))
+    const decision = assignCrew(input({ busy: new Set(['tier2-1', 'tier2-2', 'tier3']) }))
 
     expect(decision).toEqual({ kind: 'wait', requiredTier: 2 })
   })
 
   /**
    * Covering should not silently promote the phase. With both a peer and a
-   * Tier 4 member free, the peer takes it — otherwise a busy wave quietly runs
+   * Tier 3 member free, the peer takes it — otherwise a busy wave quietly runs
    * every Tier 2 phase on the top-tier model and the plan's cost estimate is
    * fiction.
    */
@@ -100,28 +100,28 @@ describe('assignCrew — covering for a busy peer', () => {
   })
 
   it('waits for the only member who qualifies rather than demoting the phase', () => {
-    const decision = assignCrew(input({ assigned: 'tier4', busy: new Set(['tier4']) }))
+    const decision = assignCrew(input({ assigned: 'tier3', busy: new Set(['tier3']) }))
 
-    expect(decision).toEqual({ kind: 'wait', requiredTier: 4 })
+    expect(decision).toEqual({ kind: 'wait', requiredTier: 3 })
   })
 })
 
 describe('assignCrew — reusing a session that is already open', () => {
   /**
-   * The trade the whole feature is: a Tier 4 model on a Tier 2 phase costs more
+   * The trade the whole feature is: a Tier 3 model on a Tier 2 phase costs more
    * per token, and it buys not starting a fifth session that would re-read the
    * repository before writing a line. The plan's own member is free here and is
    * passed over anyway, which is the part that has to be deliberate rather than
    * incidental — so it is asserted as a substitution with its own reason, not
-   * merely as "`tier4` took it".
+   * merely as "`tier3` took it".
    */
   it('gives a phase to a warm higher-tier member rather than cold-starting the plan’s member', () => {
-    const decision = assignCrew(input({ warm: new Set(['tier4']), substitution: 'any' }))
+    const decision = assignCrew(input({ warm: new Set(['tier3']), substitution: 'any' }))
 
     expect(decision).toEqual({
       kind: 'assigned',
-      member: 'tier4',
-      tier: 4,
+      member: 'tier3',
+      tier: 3,
       model: 'dear-1',
       harness: null,
       substitute: true,
@@ -133,7 +133,7 @@ describe('assignCrew — reusing a session that is already open', () => {
   /**
    * The case that pins "only if we already have started sessions". Nobody is
    * warm, so a session is being opened whichever member takes this — there is
-   * no cold start left to save, and the Tier 4 rate would buy nothing at all.
+   * no cold start left to save, and the Tier 3 rate would buy nothing at all.
    * The pre-defined level wins.
    */
   it('leaves a cold higher-tier member alone and staffs the phase as the plan wrote it', () => {
@@ -158,7 +158,7 @@ describe('assignCrew — reusing a session that is already open', () => {
 
   it('waits rather than take a warm member below the floor', () => {
     const decision = assignCrew(
-      input({ busy: new Set(['tier2-1', 'tier2-2', 'tier4']), warm: new Set(['tier1']) }),
+      input({ busy: new Set(['tier2-1', 'tier2-2', 'tier3']), warm: new Set(['tier1']) }),
     )
 
     expect(decision).toEqual({ kind: 'wait', requiredTier: 2 })
@@ -166,7 +166,7 @@ describe('assignCrew — reusing a session that is already open', () => {
 
   /** A warm member holding another node is not available to be reused. */
   it('does not reach for a warm member who is busy', () => {
-    const decision = assignCrew(input({ busy: new Set(['tier4']), warm: new Set(['tier4']) }))
+    const decision = assignCrew(input({ busy: new Set(['tier3']), warm: new Set(['tier3']) }))
 
     expect(decision).toMatchObject({ member: 'tier2-1', substitute: false })
   })
@@ -178,7 +178,7 @@ describe('assignCrew — reusing a session that is already open', () => {
    */
   it('takes the cheapest warm member when more than one would resume', () => {
     const decision = assignCrew(
-      input({ assigned: 'tier1', busy: new Set(['tier1']), warm: new Set(['tier2-2', 'tier4']), substitution: 'any' }),
+      input({ assigned: 'tier1', busy: new Set(['tier1']), warm: new Set(['tier2-2', 'tier3']), substitution: 'any' }),
     )
 
     expect(decision).toMatchObject({ member: 'tier2-2', tier: 2, reason: 'warm_session' })
@@ -193,7 +193,7 @@ describe('assignCrew — reusing a session that is already open', () => {
    */
   it('prefers the plan’s member over an equally warm peer, recording no substitution', () => {
     const decision = assignCrew(
-      input({ assigned: 'tier2-2', warm: new Set(['tier2-1', 'tier2-2', 'tier4']) }),
+      input({ assigned: 'tier2-2', warm: new Set(['tier2-1', 'tier2-2', 'tier3']) }),
     )
 
     expect(decision).toMatchObject({ member: 'tier2-2', substitute: false, reason: null })
@@ -201,15 +201,15 @@ describe('assignCrew — reusing a session that is already open', () => {
 
   /**
    * Covering and reuse can want different people. `tier2-1` is busy, `tier2-2`
-   * is free and cheap, and `tier4` is warm — the old rule says `tier2-2`, the
-   * new one says `tier4`. The reason token is what keeps the two distinguishable
+   * is free and cheap, and `tier3` is warm — the old rule says `tier2-2`, the
+   * new one says `tier3`. The reason token is what keeps the two distinguishable
    * afterwards: both are `substitute: true`, and only one of them was a choice.
    */
   it('prefers a warm higher-tier member over a cheaper cold peer when covering', () => {
-    const decision = assignCrew(input({ busy: new Set(['tier2-1']), warm: new Set(['tier4']), substitution: 'any' }))
+    const decision = assignCrew(input({ busy: new Set(['tier2-1']), warm: new Set(['tier3']), substitution: 'any' }))
 
     expect(decision).toMatchObject({
-      member: 'tier4',
+      member: 'tier3',
       substitute: true,
       insteadOf: 'tier2-1',
       reason: 'warm_session',
@@ -229,7 +229,7 @@ describe('assignCrew — how far up a phase may go (`defaults.substitution`)', (
    * session is not a reason to run a phase dearer unless the operator said so.
    */
   it('does not move a phase up a tier for a warm session by default', () => {
-    expect(assignCrew(input({ warm: new Set(['tier4']) }))).toMatchObject({
+    expect(assignCrew(input({ warm: new Set(['tier3']) }))).toMatchObject({
       member: 'tier2-1',
       substitute: false,
     })
@@ -249,13 +249,56 @@ describe('assignCrew — how far up a phase may go (`defaults.substitution`)', (
 
   /** One up is the next tier the roster has: here Tier 2 covers Tier 1, Tier 3 does not. */
   it('reaches only to the next tier the roster has under up_one_tier', () => {
-    const crew = { ...CREW, tier3: impl(3, 'dearer-1') }
+    const crew = CREW
     expect(
       assignCrew(input({ crew, assigned: 'tier1', busy: new Set(['tier1']) })),
     ).toMatchObject({ member: 'tier2-1', reason: 'peer_busy' })
     expect(
       assignCrew(input({ crew, assigned: 'tier1', busy: new Set(['tier1', 'tier2-1', 'tier2-2']) })),
     ).toEqual({ kind: 'wait', requiredTier: 1 })
+  })
+})
+
+describe('assignCrew — the reserved top tier', () => {
+  /**
+   * Tier 4 is the plan's to give: the plan skill keeps it for exploratory work
+   * and new complex UI, on the dearest models the vendors sell. A phase planned
+   * below it never lands there, whatever `defaults.substitution` says.
+   */
+  const RESERVED: Record<string, CrewMember> = {
+    tier2: impl(2, 'medium-1'),
+    tier3: impl(3, 'dear-1'),
+    tier4: impl(4, 'frontier-1'),
+  }
+
+  it('waits rather than cover a busy Tier 3 member with the Tier 4 one', () => {
+    for (const substitution of ['up_one_tier', 'any'] as const) {
+      expect(
+        assignCrew({ assigned: 'tier3', crew: RESERVED, busy: new Set(['tier3']), substitution }),
+      ).toEqual({ kind: 'wait', requiredTier: 3 })
+    }
+  })
+
+  it('does not move a phase onto a warm Tier 4 session, even under any', () => {
+    expect(
+      assignCrew({ assigned: 'tier2', crew: RESERVED, busy: new Set(), warm: new Set(['tier4']), substitution: 'any' }),
+    ).toMatchObject({ member: 'tier2', substitute: false })
+  })
+
+  it('skips over Tier 4 to nothing when it is the only tier above', () => {
+    const crew = { tier3: impl(3, 'dear-1'), tier4: impl(4, 'frontier-1') }
+    expect(assignCrew({ assigned: 'tier3', crew, busy: new Set(['tier3']) })).toEqual({
+      kind: 'wait',
+      requiredTier: 3,
+    })
+  })
+
+  it('still runs a phase the plan staffed at Tier 4 on its Tier 4 member', () => {
+    expect(assignCrew({ assigned: 'tier4', crew: RESERVED, busy: new Set() })).toMatchObject({
+      member: 'tier4',
+      tier: 4,
+      substitute: false,
+    })
   })
 })
 
@@ -270,7 +313,7 @@ describe('roster order', () => {
       'tier1',
       'tier2-1',
       'tier2-2',
-      'tier4',
+      'tier3',
     ])
   })
 })

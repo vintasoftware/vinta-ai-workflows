@@ -11,7 +11,7 @@
 # Tier *placement* is human/LLM judgement — the job flags drift and proposes
 # edits, it does not blindly reassign tiers. See scripts/check-ai-models.mjs.
 schema_version: 1
-last_verified: 2026-10-02
+last_verified: 2026-11-23
 
 # Drift is checked against a free, no-key community aggregator (models.dev,
 # vendor-keyed with release dates + pricing), cross-checked against LiteLLM's
@@ -28,9 +28,15 @@ source:
 # and run out long before the plan's usage window does. A budget decision, not
 # a tier placement, so it may point outside its tier.
 #
-# Tiers run cheapest/fastest (1) → architectural/hard (4). Default to the
+# Tiers run cheapest/fastest (1) → architectural/hard (3), with tier 4 held
+# back for genuinely exploratory work and new complex UI. Default to the
 # cheapest tier that plausibly one-shots the work; a cheap model failing fast
 # beats an expensive one succeeding slowly.
+#
+# Tier 4's models are a maintainer's pick, not a capability ranking: each
+# vendor's entry there is the model that team chose to spend on open-ended
+# work. When refreshing, move a tier-4 entry to a newer version of the same
+# model line; don't swap it for a different line.
 tiers:
   - tier: 1
     label: cheapest/fastest (boilerplate, exact-precedent edits)
@@ -40,12 +46,12 @@ tiers:
       mirroring existing pattern verbatim.
     models:
       anthropic:
-        - id: claude-haiku-4-5
+        - id: claude-haiku-5-5
       openai:
         - id: gpt-6-luna
           note: optimized for cost-sensitive workloads
       google:
-        - id: gemini-3.1-flash-lite
+        - id: gemini-3.5-flash-lite
 
   - tier: 2
     label: standard pattern application
@@ -63,35 +69,38 @@ tiers:
         - id: gemini-3.8-flash
 
   - tier: 3
-    label: multi-file orchestration, business logic, SQL views
+    label: multi-file orchestration, business logic, architectural / hard
     use_for: >-
       use case coordinating across repositories with non-trivial branching,
       new vw_* view + non-managed model + migration, serializer with
       cross-field validation affecting use-case behavior, integration tests
-      covering concurrency edges.
+      covering concurrency edges, and hard but well-specified work: cycle
+      detection in user-mutable trees, transactional batch protocols with
+      deferred constraints, partitioned-to-partitioned FK design, perf tuning
+      a slow query against a partitioned hot table, debugging a heisenbug.
     models:
       anthropic:
         - id: claude-opus-5-5
       openai:
-        - id: gpt-6.1-sol
+        - id: gpt-6.1-terra
       google:
-        - id: gemini-3.1-pro-preview
-          note: stronger code recall
+        - id: gemini-4-neon
+          note: priced above tier 4's argon; that is Google's line-up, not a placement error
 
   - tier: 4
-    label: architectural / novel / hard
+    label: exploratory / new complex UI (reserved)
     use_for: >-
-      cycle detection in user-mutable trees, transactional batch protocols
-      with deferred constraints, partitioned-to-partitioned FK design, perf
-      tuning slow query against partitioned hot table, debugging heisenbug.
+      only work that is really exploratory — no precedent in the codebase and
+      the shape of the solution still open (a spike, a prototype, a design the
+      phase itself has to discover) — or a new complex UI: a new screen or
+      flow with non-trivial interaction state, a new design-system component,
+      drag-and-drop, a canvas or visual editor. Hard work whose approach is
+      already known is tier 3, however hard.
     models:
       anthropic:
-        - id: claude-fable-5-1
+        - id: claude-fable-5-2
           fallback: claude-opus-5-5
       openai:
-        - id: gpt-6-astra
-          note: frontier model; roughly twice sol's price, so reserve it for tier 4
-          fallback: gpt-5.6-sol
+        - id: gpt-6.2-sol
       google:
-        - id: gemini-3.1-pro-preview
-          note: with thinking
+        - id: gemini-4-argon

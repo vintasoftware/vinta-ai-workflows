@@ -1,6 +1,6 @@
 ---
 name: review-phase
-description: Internal review gate of [implement-plan] / [amend-plan] / [systematic-debugging] — NOT a standalone entry point. Runs the thermo-nuclear review loop over one phase's diff in {{PROJECT_NAME}}, with this skill as the loop's host: it spawns one reviewer sub-agent one tier above the phase's implementer, hands each round of findings to the phase's own implementer to verify, fix or reject with evidence, puts the questions only a person can settle to the human, and loops until the reviewer explicitly approves. The invoking conductor passes the diff, the phase body (the stated requirement) and the resolved `WORKROOT`; do not invoke directly to "review my code" — use the `thermo-nuclear-review-loop` skill for that.
+description: Internal review gate of [implement-plan] / [amend-plan] / [systematic-debugging] — NOT a standalone entry point. Runs the thermo-nuclear review loop over one phase's diff in {{PROJECT_NAME}}, with this skill as the loop's host: it spawns one reviewer sub-agent one tier above the phase's implementer (never into Tier 4 from below it), hands each round of findings to the phase's own implementer to verify, fix or reject with evidence, puts the questions only a person can settle to the human, and loops until the reviewer explicitly approves. The invoking conductor passes the diff, the phase body (the stated requirement) and the resolved `WORKROOT`; do not invoke directly to "review my code" — use the `thermo-nuclear-review-loop` skill for that.
 disable-model-invocation: true
 ---
 
@@ -20,9 +20,9 @@ The single review implementation shared by every plan-execution conductor: [impl
 
 ## Resolve the reviewer model
 
-The reviewer runs **one tier above the implementer**: `min(author_tier + 1, 4)`.
+The reviewer runs **one tier above the implementer, short of Tier 4**: a Tier 4 implementer is reviewed at Tier 4, any other at `min(author_tier + 1, 3)`.
 
-`author_tier` is the tier the implementer **actually ran at** — after implement-phase's escalation, and the covering crew member's tier when a peer took the phase — not the tier the plan wrote down. The review is a judgement of the work, and it should come from a model at least as capable as the one that did it. A Tier 4 implementer is reviewed at Tier 4, since nothing sits above it; the reviewer's independence then comes from being a separate agent with no implementation context, which it always is. When the conductor cannot say which tier the implementer ran at, review at Tier 4.
+`author_tier` is the tier the implementer **actually ran at** — after implement-phase's escalation, and the covering crew member's tier when a peer took the phase — not the tier the plan wrote down. The review is a judgement of the work, and it should come from a model at least as capable as the one that did it. Nothing in a run moves a phase planned below Tier 4 into Tier 4: the plan keeps that tier for exploratory work and new complex UI, and its models are the dearest the vendors sell. So a Tier 3 implementer is reviewed at Tier 3, and a Tier 4 one at Tier 4, since nothing sits above it. The reviewer's independence then comes from being a separate agent with no implementation context, which it always is. When the conductor cannot say which tier the implementer ran at, review at Tier 4 if the plan put the phase there, and at Tier 3 otherwise.
 
 The fix does not take the reviewer's tier: the phase's own implementer fixes, at its own tier, because it is the agent that knows why the code is the way it is.
 
