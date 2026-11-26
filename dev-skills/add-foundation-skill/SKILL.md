@@ -45,6 +45,15 @@ description: <dense one-liner of what + when, ~3–6 sentences>
 ---
 ```
 
+**Workflow skill or how-to skill?** A skill that starts a multi-step workflow a person decides to run (planning, review loops, PR creation, handoffs) loads only when invoked by name. Add it to the list in [vinta-derive-skills](../../skills/vinta-derive-skills/SKILL.md) under **Workflow skills load only when invoked by name**, and to the matching lists in `vinta-sync-ai-tools`'s **Explicit-only skills** migration and `validate-skill-md`. Put `disable-model-invocation: true` right after `description:`, and add `agents/openai.yaml` (the Codex counterpart of the flag):
+
+```yaml
+policy:
+  allow_implicit_invocation: false
+```
+
+A how-to skill that should load when its description matches the task has neither.
+
 Body structure (~100–300 lines):
 
 ```markdown

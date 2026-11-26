@@ -1,6 +1,7 @@
 ---
 name: handoff
 description: Write or consume a session-continuation handoff document under `.vinta-ai-workflows/handoffs/` so a fresh agent session (or a different agent / teammate) can resume in-flight work without re-deriving context. Use when the user says "hand this off", "write a handoff", "wrap this up for another agent", "prepare a handoff doc", or — in resume mode — "pick up from the handoff", "resume from handoff", or points at a handoff file. Captures goal, current state, decisions with rationale, files touched, verification status, and the exact next step.
+disable-model-invocation: true
 ---
 
 # Handoff

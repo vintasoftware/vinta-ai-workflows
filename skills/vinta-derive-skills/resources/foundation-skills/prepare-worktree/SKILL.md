@@ -1,6 +1,7 @@
 ---
 name: prepare-worktree
 description: Provision a fully-runnable git worktree for parallel feature work so a long-running plan (or experiment) can build, test, lint, run migrations, and hit databases without disturbing the main checkout — or other parallel worktrees. Reads the active plan (when given one) plus the project's `.gitignore`, package manifests, env templates, and docker config to decide what to copy (every dependency tree gets its own per-worktree copy, never a symlink), what to fork (DBs, env files, compose project names, test databases, sandboxes), and what little may be symlinked. Use when the user says "set up a worktree for plan X", "create an isolated env for this feature", "I want to run two plans in parallel without breaking the main checkout", or when [implement-plan](../implement-plan/SKILL.md) opts in via Step 0 question (c). NOT for one-off branch switches that don't need a separate runnable copy of the app.
+disable-model-invocation: true
 ---
 
 # Prepare worktree

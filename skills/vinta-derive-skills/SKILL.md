@@ -353,7 +353,23 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 - **Integration skills are not yours.** `ai-tools/skills/pr-review-canvas/` (and any other skill an `integrations.*` tool installs) is written and refreshed by that tool's CLI. It carries the tool's own marker. Never copy, render, scrub or delete it here. The tool's `doctor` treats any edit as a stale copy.
 - **Each skill solves one job.** Two unrelated checklists → split.
 - **Reference real files in the target.** Skill links must point to existing paths.
-- **Skills auto-load by description.** Specific triggers, specific outcomes.
+- **Skills auto-load by description, except the workflow skills.** A how-to skill (stack skills, `write-unit-test`, `add-one-off-script`, `deslop-comments`) loads when its description matches the task. Write it with specific triggers and specific outcomes.
+- **Workflow skills load only when invoked by name.** These skills start a multi-step workflow that a person decides to run, so a description match must not start one:
+  - verbatim: `plan-feature`, `create-spec`, `create-qa-use-cases`, `open-pr-from-context`, `thermo-nuclear-review-loop`, `thermo-nuclear-code-quality-review`, `handoff`, `prepare-worktree`, `interview-ui`;
+  - rendered: the plan-execution unit (`implement-plan`, `implement-phase`, `review-phase`, `integrate-phase` and its `-stacked` / `-modular` variants, `amend-plan`), `systematic-debugging`, `handoff-to-client`.
+
+  Each one has two files, one per vendor family:
+  - `disable-model-invocation: true` in the `SKILL.md` frontmatter, right after `description:`. Claude Code, Cursor and VS Code Copilot read it. The bundled bodies and templates already have it, so keep it when copying or rendering.
+  - `agents/openai.yaml` in the skill's directory, for Codex:
+
+    ```yaml
+    policy:
+      allow_implicit_invocation: false
+    ```
+
+    The verbatim copies already include this file. For each rendered workflow skill, write it next to the rendered `SKILL.md`.
+
+  Links from one skill to another, such as `[review-phase](../review-phase/SKILL.md)`, keep working, because the agent reads the linked file directly.
 - **Never use `§N` shorthand to point at sections in any drafted SKILL.md body, agent prompt, or rendered template.** Use the section's full name (and a markdown anchor link when the link target is reachable). `§N` shorthand makes cross-references hard for humans to follow and breaks when section numbering shifts. This rule applies to both the foundation skills shipped verbatim and the template-rendered ones.
 
 ## Pitfalls
@@ -367,7 +383,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 
 After all skills written:
 
-1. Each `ai-tools/skills/<name>/SKILL.md` has frontmatter `name` + `description`, plus markdown body.
+1. Each `ai-tools/skills/<name>/SKILL.md` has frontmatter `name` + `description`, plus markdown body. Every workflow skill shipped (listed under **Workflow skills load only when invoked by name**) also has `disable-model-invocation: true`, and an `agents/openai.yaml` beside it with `allow_implicit_invocation: false`.
 2. `name` field matches dir name.
 3. No `{{PLACEHOLDER}}` strings survive in any output skill.
 4. Foundation skills (plan-feature, create-spec, open-pr-from-context — plus create-qa-use-cases when e2e is enabled) reference each other correctly via `[name](../<name>/SKILL.md)` links. When e2e is disabled, confirm `plan-feature` has **no** surviving `<!-- e2e:start/end -->` markers and no dangling link to `create-qa-use-cases` / `add-e2e-test`.

@@ -1,6 +1,7 @@
 ---
 name: plan-feature
 description: Author a phased implementation plan for a new feature following the repo's `ai-plans/` conventions — including the dependency graph that lets independent phases be implemented in parallel. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting. Validates the emitted workflow with `vinta-ai-maestro validate` when maestro is installed, then hands the plan to the human for review — on maestro's review page (graph, per-phase prompts and gates, comments, and a chat the agent answers through `vinta-ai-maestro review wait|reply`) or in chat.
+disable-model-invocation: true
 ---
 
 # Plan Feature

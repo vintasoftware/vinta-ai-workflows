@@ -1,6 +1,7 @@
 ---
 name: create-spec
 description: Turn raw feature prompt into structured spec doc at `ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md`. Sections fixed — Business Context, Hypothesis, Objectives, Decisions (Use-cases / State transitions & edge cases / Acceptance scenarios / Negative scope), Alternatives considered (optional), Open questions, Risks assumed. Use when user asks "write a spec", "draft a spec doc", "turn this idea into a spec", or hands one-line / paragraph feature description needing structure before plan. Skill ALWAYS interviews requester before drafting — never turn vague prompt into plausible-sounding spec by guessing.
+disable-model-invocation: true
 ---
 
 # Spec Document

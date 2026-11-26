@@ -7,6 +7,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.10.0]
 
+### Changed
+
+- **Workflow skills now load only when invoked by name.** Before, they
+  loaded whenever their description matched the conversation, so a long
+  `plan-feature` or `implement-plan` body could enter context unasked. This
+  applies to `plan-feature`, `create-spec`, `create-qa-use-cases`,
+  `open-pr-from-context`, `thermo-nuclear-review-loop`,
+  `thermo-nuclear-code-quality-review`, `handoff`, `prepare-worktree`,
+  `interview-ui`, the plan-execution unit (`implement-plan`, `implement-phase`, `review-phase`,
+  `integrate-phase`, `amend-plan`), `systematic-debugging` and
+  `handoff-to-client`. Each one carries `disable-model-invocation: true` in
+  its frontmatter (Claude Code, Cursor, VS Code Copilot) and an
+  `agents/openai.yaml` with `policy.allow_implicit_invocation: false`
+  (Codex). Run them by name, for example `/plan-feature` or `$plan-feature`.
+  Links from one skill to another still work. How-to skills (stack skills,
+  `write-unit-test`, `add-one-off-script`, `deslop-comments`) and the
+  `vinta-*` bootstrap skills still load by description. Existing projects: `vinta-sync-ai-tools` has a new
+  **Explicit-only skills** migration that flags the workflow skills already
+  in `ai-tools/skills/` without touching their bodies.
+
 ### Fixed
 
 - **`open-pr-from-context`, `thermo-nuclear-code-quality-review` and
