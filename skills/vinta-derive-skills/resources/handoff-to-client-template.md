@@ -1,6 +1,7 @@
 ---
 name: handoff-to-client
 description: Generate a markdown API-change handoff document for the client teams consuming {{PROJECT_NAME}}'s {{API_STYLE}} API ({{CLIENT_PLATFORMS_LIST}}). Documents every endpoint/operation added, changed, deprecated, or removed on the current branch relative to `{{DEFAULT_BRANCH}}` — request/response shapes, auth, errors, breaking-change flags, and per-platform migration notes — so client implementers can adopt the changes without reading this repo's source. Use when the user says "write the client handoff", "document the API changes for the clients", "hand off to the frontend/mobile team", or before merging an API-changing branch.
+disable-model-invocation: true
 ---
 
 # Handoff to client

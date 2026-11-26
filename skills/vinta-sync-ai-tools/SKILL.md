@@ -218,6 +218,17 @@ Then re-enter step 1 of the main flow.
 
 **Optional, per harness** — mention once, don't apply: Codex only offers `request_user_input` in Plan mode unless the user sets `[features] default_mode_request_user_input = true` in `~/.codex/config.toml`. OpenCode agents other than `build` / `plan` need `"permission": { "question": "allow" }`.
 
+### Explicit-only skills (0.10.0)
+
+**Detect**: a workflow skill under `ai-tools/skills/` whose frontmatter lacks `disable-model-invocation: true`, or whose directory lacks `agents/openai.yaml`. The workflow skills are the ones [vinta-derive-skills](../vinta-derive-skills/SKILL.md) lists under **Workflow skills load only when invoked by name**: `plan-feature`, `create-spec`, `create-qa-use-cases`, `open-pr-from-context`, `thermo-nuclear-review-loop`, `thermo-nuclear-code-quality-review`, `handoff`, `prepare-worktree`, `interview-ui`, the plan-execution unit, `systematic-debugging` and `handoff-to-client`. Other skills keep loading by description, so leave them alone.
+
+**Why**: workflow skills used to load as soon as their description matched the conversation. A long `plan-feature` or `implement-plan` body could enter context during an unrelated question, and a workflow could start when nobody asked for it. Now they load only when someone invokes them by name. Links between skills still resolve, because the agent reads the linked `SKILL.md` directly.
+
+**Steps** — one `AskUserQuestion` for the whole migration (`Apply (Recommended)`, `Show the list`, `Skip`):
+
+1. For each workflow skill found by **Detect**, insert `disable-model-invocation: true` right after the `description:` line, and write `agents/openai.yaml` with `policy.allow_implicit_invocation: false`. Change nothing else in the file. That way the migration also works on a body the user declined to refresh or edited by hand.
+2. Re-run the setup script so vendors that receive copies instead of symlinks pick up the change.
+
 ## Pitfalls
 
 - **Hand-edited rendered skill bodies.** `vinta-sync-ai-tools` re-renders templates from the config — any inline edits the user made to the rendered `ai-tools/skills/<name>/SKILL.md` will be overwritten on `Apply`. Surface a warning when re-rendering would clobber a body the user touched (heuristic: file modified after the bootstrap commit). Default action: ask before overwriting.
@@ -238,3 +249,4 @@ Then re-enter step 1 of the main flow.
 6. **Orphan diff**: changelog has no entry for a real file change; sync surfaces it at the end without applying.
 7. **Layout migration applied**: `AGENTS.md` is a regular file at the root, `ai-tools/AGENTS.md` is gone, `grep -rn "ai-tools/AGENTS.md"` returns only historical records, and both link checks in "One-time migrations" print nothing.
 8. **Structured-questions migration applied**: `grep -c 'asking-the-human:start' AGENTS.md` prints `1`; every `access: read-write` agent YAML mentions `NEEDS_INPUT`; the re-rendered `implement-phase` contains a "Relay a sub-agent's questions" section.
+9. **Explicit-only migration applied**: every workflow skill present has `disable-model-invocation: true` in its frontmatter and an `agents/openai.yaml` beside it. No other skill gained either.

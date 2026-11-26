@@ -1,6 +1,7 @@
 ---
 name: create-qa-use-cases
 description: Bootstrap a project's `QA_USE_CASES.md` from scratch using the canonical pattern (immutable PA###/PR### ids, role table, per-app numbered sections with role-tagged checklists). Invoked from inside [plan-feature](../plan-feature/SKILL.md) when the project has no `QA_USE_CASES.md` yet — the active feature's spec + plan are already in hand. Seeds the file with use cases from those two documents only; does not sweep prior plans. Asks the user for the few gaps spec/plan don't answer (app boundaries, role list, prefix conventions). Project-agnostic — works in any repo that adopts this skill set.
+disable-model-invocation: true
 ---
 
 # Bootstrap `QA_USE_CASES.md`

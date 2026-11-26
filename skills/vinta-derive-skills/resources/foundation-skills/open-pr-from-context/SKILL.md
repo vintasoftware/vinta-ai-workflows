@@ -1,6 +1,7 @@
 ---
 name: open-pr-from-context
-description: Publish one `.vinta-ai-workflows/prs-context/{feature-name}/{phase-name}.md` file as a real PR + inline review comments by invoking the bundled [open-pr.sh](scripts/open-pr.sh) shell script. The script handles all parsing + CLI calls (`gh` for GitHub, `glab` for GitLab); this skill is a thin wrapper that picks the file, runs the script, and reports the result. Use after `implement-plan` has pushed a phase branch + written the context file, or any time afterwards to publish a `status: pending` file. Does nothing else — no diff editing, no extra checks, no skill-side parsing.
+description: 'Publish one `.vinta-ai-workflows/prs-context/{feature-name}/{phase-name}.md` file as a real PR + inline review comments by invoking the bundled [open-pr.sh](scripts/open-pr.sh) shell script. The script handles all parsing + CLI calls (`gh` for GitHub, `glab` for GitLab); this skill is a thin wrapper that picks the file, runs the script, and reports the result. Use after `implement-plan` has pushed a phase branch + written the context file, or any time afterwards to publish a `status: pending` file. Does nothing else — no diff editing, no extra checks, no skill-side parsing.'
+disable-model-invocation: true
 ---
 
 # Open PR from context

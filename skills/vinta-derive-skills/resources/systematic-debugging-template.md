@@ -1,6 +1,7 @@
 ---
 name: systematic-debugging
 description: Use when debugging any defect, test failure, regression, performance issue, or unexpected behavior in {{PROJECT_NAME}} ({{STACK_SUMMARY}}). Enforces a root-cause-first investigation flow before any code change is proposed. Pulls evidence from the project's observability MCP tools ({{OBSERVABILITY_MCP_LIST}}) before forming a hypothesis. Cites the project's real test, lint, and type-check commands so reproduction steps are concrete.
+disable-model-invocation: true
 ---
 
 # Systematic debugging

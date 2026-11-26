@@ -42,9 +42,12 @@ Parse the YAML between the first two `---` lines. Required fields:
 - `name`: kebab-case string. **Must equal the dir name** (`basename(dirname(path))`).
 - `description`: non-empty string. Warn (not error) if shorter than 80 chars or longer than 1500 chars.
 
+- `disable-model-invocation`: must be `true` on every **workflow skill**, the set listed in [vinta-derive-skills](../../skills/vinta-derive-skills/SKILL.md) under **Workflow skills load only when invoked by name**. That covers the foundation copies (`plan-feature`, `create-spec`, `create-qa-use-cases`, `open-pr-from-context`, `thermo-nuclear-review-loop`, `thermo-nuclear-code-quality-review`, `handoff`, `prepare-worktree`, `interview-ui`) and the templates (`plan-execution/shell/*-template.md`, `systematic-debugging-template.md`, `handoff-to-client-template.md`). Missing or `false` → error. On any other skill → warn: it may be a new workflow skill that is missing from that list, or a how-to skill that should keep loading by description.
+- Each workflow foundation-skill directory also has `agents/openai.yaml` with `policy.allow_implicit_invocation: false`, the Codex counterpart of the flag. Missing → error. Templates are exempt, because `vinta-derive-skills` writes that file when it renders them.
+
 Optional but recognised:
 
-- `version`, `tags`, `license` — pass through, don't validate.
+- `version`, `tags`, `license`, `metadata`, `user-invocable` — pass through, don't validate.
 
 Anything else under frontmatter → warn (unknown key).
 

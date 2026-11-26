@@ -1,6 +1,7 @@
 ---
 name: interview-ui
 description: Run an agent interview as a full-screen browser form instead of a chat exchange. The agent writes one round at a time as JSON (`interview-round.v1`) plus Markdown/Mermaid or HTML explainer docs; `vinta-ai-maestro interview` serves the interview page — the same design system as maestro's run monitor — where the user answers one decision per screen with context, diagrams, and per-option consequences in view, and writes the answers back as JSON (`interview-answers.v1`) to unblock the agent. The chat panel inside the page is for questions to the agent, not decisions. Used by `create-spec` for its Step 0 interview when the user prefers the browser; reusable by any skill with a decision-heavy interview. Use when a user says "open the interview in the browser", "I want to see the options properly", "walk me through the decisions in a UI", or when a skill delegates its interview here.
+disable-model-invocation: true
 ---
 
 # Interview UI

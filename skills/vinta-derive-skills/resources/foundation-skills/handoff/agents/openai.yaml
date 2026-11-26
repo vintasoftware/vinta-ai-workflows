@@ -1,0 +1,3 @@
+# Codex: load this skill only when invoked explicitly ($<name>), never by description match.
+policy:
+  allow_implicit_invocation: false
