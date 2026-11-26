@@ -5,6 +5,14 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0]
+
+### Fixed
+
+- **`open-pr-from-context`, `thermo-nuclear-code-quality-review` and
+  `review-phase` frontmatter parses as YAML.** Their descriptions contained
+  an unquoted `: `, which strict parsers reject. They are now quoted.
+
 ## [0.9.0] — 2026-11-24
 
 ### Added
