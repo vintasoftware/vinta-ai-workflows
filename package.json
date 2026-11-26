@@ -9,6 +9,9 @@
   },
   "scripts": {
     "check-ai-models": "node scripts/check-ai-models.mjs",
+    "test:e2e:l1": "node tests/e2e/l1/smoke.test.mjs",
+    "e2e": "node tests/e2e/runner/run-e2e.mjs",
+    "e2e:list": "node tests/e2e/runner/run-e2e.mjs --list"
     "validate-schemas": "node scripts/validate-schemas.mjs",
     "test": "node --test tests/*.test.mjs"
   },
